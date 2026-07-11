@@ -10,6 +10,7 @@ import type { Expr, Stmt, Pattern } from './ast.ts';
 import { FORBIDDEN_KEYS } from './ast.ts';
 import { parseProgram } from './parser.ts';
 import { Environment } from './environment.ts';
+import { makeSeededRng, range as seededRange } from './determinism.ts';
 import type { HostEnvironment, ReactiveHost, CellRef } from './ports.ts';
 
 export const DEFAULT_MAX_STEPS = 100_000;
@@ -26,7 +27,7 @@ export interface EvalOptions {
   maxSteps?: number;
   maxTimeMs?: number;
   maxDepth?: number;
-  maxStringLength?: number;    // string-growth cap on `+` (default MAX_STRING_LENGTH) — testable small (F3)
+  maxStringLength?: number;    // string-growth cap on `+` (default MAX_STRING_LENGTH) — testable small
   insideComponent?: boolean;   // gates reactive `let`
 }
 export interface EvalResult { value: unknown; diagnostics: Diagnostic[] }
@@ -83,8 +84,13 @@ export class Runner {
    *  once within ONE instance (e.g. a loop body) gets distinct suffixes (#0, #1, …). Reset per instance
    *  by instantiateComponent. Canonical top-of-component `let`s each hit #0 and latch perfectly. */
   letOccurrences = new Map<string, number>();
+  /** The seeded PRNG for the intrinsic rand()/range builtins. Seeded from EvalOptions.seed so
+   *  `result = f(source, data, seed, state)` — same source + same seed → identical rand() sequence.
+   *  A fresh Runner per run re-seeds identically, so a re-run is byte-stable. */
+  readonly rng: () => number;
   constructor(readonly opt: Required<Pick<EvalOptions, 'maxSteps' | 'maxTimeMs' | 'maxDepth' | 'maxStringLength'>> & EvalOptions) {
     this.deadline = Date.now() + opt.maxTimeMs;
+    this.rng = makeSeededRng(opt.seed ?? 0);
   }
   tick(): void {
     if (++this.steps > this.opt.maxSteps) throw new BudgetSignal('steps');
@@ -258,6 +264,15 @@ function invokeClosure(fn: (...a: unknown[]) => unknown, expr: Extract<Expr, { k
 }
 
 function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, env: Environment, r: Runner): unknown {
+  // Intrinsic seeded builtins — resolved BEFORE the host so determinism-with-randomness is a language
+  // guarantee, not a per-domain re-implementation. Only fires for the UNBOUND-head path (a user
+  // `function rand`/`range` shadows via evalCall's callee-resolution step, which never reaches here).
+  if (head === 'rand') { r.tick(); return r.rng(); }
+  if (head === 'range') {
+    r.tick();
+    const n = Number(evalExpr(expr.args[0] ?? { kind: 'number', value: 0, span: expr.span }, env, r));
+    return seededRange(Number.isFinite(n) ? n : 0);
+  }
   const args = expr.args.map((a) => evalExpr(a, env, r));
   // Wrap each evaluated value into the Arg shape. lang's evaluator does NOT populate name/reactive
   // here — that is a @metael/runtime (derive) responsibility; it only carries the value.
@@ -340,7 +355,7 @@ export function execStmt(stmt: Stmt, env: Environment, r: Runner, insideComponen
       // a `const x; let x` silently converts the const cell to a reactive let — a const-immutability bypass).
       if (env.hasOwn(stmt.name)) { r.error('ML-LANG-REDECL', `'${stmt.name}' already declared`, stmt.span); return null; }
       // Compute the STABLE cell key = component-instance key + let name + per-instance occurrence
-      // ordinal, so a host can latch this cell's settled value across a re-derive (Task-6). No instance
+      // ordinal, so a host can latch this cell's settled value across a re-derive. No instance
       // key (top-level / non-component context) → undefined → the host always uses the initializer.
       // EDGE: if the SAME name is `let`-declared more than once within one instance (e.g. inside a loop
       // body), the occurrence ordinal keeps them distinct within a pass but may not carry perfectly

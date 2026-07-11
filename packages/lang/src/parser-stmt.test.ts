@@ -28,7 +28,7 @@ describe('statement + wrapping parser', () => {
     const s = prog('translate([0,0,-400]) chart({ type: "bar" });');
     expect((s[0] as any).expr.block).toHaveLength(1);
   });
-  it('newline-separated wrapping calls stay SIBLINGS, not nested (F7 guard)', () => {
+  it('newline-separated wrapping calls stay SIBLINGS, not nested (sibling guard)', () => {
     // The brace-less single-trailing-statement wrap fires ONLY when the trailing statement is on
     // the SAME logical line (no `;` and no newline between the `)` and the next token). A newline
     // (or `;`) makes them siblings — else `KPI(a)` newline `KPI(b)` would mis-nest b inside a.

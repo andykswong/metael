@@ -13,7 +13,8 @@
     "skipLibCheck": true,
     "noEmit": true,
     "paths": {
-      "@metael/lang": ["./packages/lang/src/index.ts"]
+      "@metael/lang": ["./packages/lang/src/index.ts"],
+      "@metael/runtime": ["./packages/runtime/src/index.ts"]
     }
   }
 }

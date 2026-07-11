@@ -1,7 +1,7 @@
 import { lex, type Token, type TokenType } from './lexer.ts';
 import type { Diagnostic } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
-import type { Expr, Stmt, BinOp, Pattern, Program } from './ast.ts';   // Stmt: arrow block bodies + the Task-13 statement layer
+import type { Expr, Stmt, BinOp, Pattern, Program } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
 import { FORBIDDEN_KEYS } from './ast.ts';
 
 export interface ParseExprResult { readonly expr: Expr; readonly diagnostics: Diagnostic[] }

@@ -8,15 +8,18 @@ A domain = **metael + its vocabulary + its derived View/renderers**. The same ke
 
 > **Why it exists:** the same eval-free reactive-DSL kernel keeps getting re-implemented per domain. metael consolidates it into **one durable, tested substrate** each domain instantiates with its own vocabulary — instead of hand-rolling it again.
 
-## Status — `@metael/lang` built & green
+## Status — `@metael/{lang,runtime}` built & green
 
-The kernel's front half — **`@metael/lang`** — is **built, tested, and merged-ready**: the eval-free, port-injected JS/ES interpreter (lexer → parser → discriminated-union AST → tree-walking evaluator with fuel/time/depth budgets + `__proto__`/`constructor`/`prototype` guards), plus the host-injection port **interfaces** (`HostEnvironment` / `ReactiveHost` / `KeyMinter`) and their test doubles.
+The kernel is **complete, tested, and merged-ready** across two packages:
 
-It is domain-neutral by construction, with the domain-specific AST→View lowering left to the consuming domain, and three interface-review fixes applied to the host-injection ports (native-`Disposable` disposal, an ordered `Arg[]` on `resolveCall`, and an optional fail-loud `knownHeads`/`didYouMean`).
+- **`@metael/lang`** — the eval-free, port-injected JS/ES interpreter (lexer → parser → discriminated-union AST → tree-walking evaluator with fuel/time/depth budgets + `__proto__`/`constructor`/`prototype` guards), the host-injection port **interfaces** (`HostEnvironment` / `ReactiveHost` / `KeyMinter`) + their test doubles, the generic child-collection **walk** (`lowerEntry`) as view-free lang machinery, and intrinsic seeded `rand`/`range`. Zero runtime dependencies; imports nothing domain-specific.
+- **`@metael/runtime`** — the fine-grained reactive core (`signal`/`memo`/`effect` + a synchronous `change()` batch/flush boundary + a converge guard, over vendored `@vue/reactivity`), the generic **keyed-list diff** (add/remove/move + teardown-by-identity on `remove`), the real **`RuntimeReactiveHost`** (native-`Disposable` `runLeafEffect` + `DisposableStack` owner scopes + cellKey latch + cell-freeing), and the one-shot **`derive()`** composition root. Depends only on `@metael/lang` + `@vue/reactivity`.
 
-**9 test files / 89 tests green**; typecheck · lint · build clean; zero runtime dependencies; **self-contained** — `@metael/lang` imports nothing domain-specific. Built subagent-driven / TDD with adversarial review per task + a final comprehensive spec-conformance pass.
+Three interface-review fixes are baked into the host-injection ports (native-`Disposable` disposal, an ordered `Arg[]` on `resolveCall`, an optional fail-loud `knownHeads`/`didYouMean`). Determinism is a language-level guarantee: `result = f(source, data, seed, state)`, with cross-consumer conformance fixtures (same source + seed → identical host-value trace) + disposal fixtures (a keyed `remove` leaves no lingering effect and no retained cell-key state).
 
-**Next:** `@metael/runtime` — the port implementations + the fine-grained reactive runtime (signals/memos/effects + a synchronous `change()`) + the generic keyed-list diff — followed by an `@metael/vdom` showcase consumer.
+**18 test files / 182 tests green** across both packages; typecheck · lint · build clean; each package **self-contained** behind the port seam (`lang` imports nothing; `runtime` imports only `@metael/lang` + `@vue/reactivity`, enforced by an automated boundary test). Built subagent-driven / TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + spec-conformance pass.
+
+**Next:** `@metael/vdom` — a Preact-like signal-VDOM showcase consumer that also hardens the runtime's keyed-reconciliation half (a VDOM forces full add/remove/reorder).
 
 ## Quick start
 
@@ -36,12 +39,13 @@ npm test
 
 ```
 packages/
-└── lang/     @metael/lang   — [BUILT] the eval-free, port-injected interpreter kernel (zero deps, self-contained)
-                               diagnostics · ast · determinism · environment · ports · lexer · parser · evaluate
+├── lang/     @metael/lang    — [BUILT] the eval-free, port-injected interpreter kernel (zero deps, self-contained)
+│                               diagnostics · ast · determinism · environment · ports · lexer · parser · evaluate · lower
+└── runtime/  @metael/runtime — [BUILT] the reactive runtime + port implementations (deps: @metael/lang + @vue/reactivity)
+                               reactive · reactive-host · keyed-diff · derive
 
 (planned, design-only)
-   runtime/   @metael/runtime — the port implementations + reactive runtime + keyed-list diff
-   vdom/      @metael/vdom    — a Preact-like signal-VDOM showcase consumer
+   vdom/      @metael/vdom    — a Preact-like signal-VDOM showcase consumer + the keyed-diff forcing function
 ```
 
 See [AGENTS.md](./AGENTS.md) for the architecture, conventions, and editing guardrails.
@@ -55,7 +59,7 @@ npm run build:packages   # build @metael/* → dist/ (.js + .d.ts)
 npm test                 # vitest run
 ```
 
-Everything in `@metael/lang` is pure logic and fully CPU-unit-tested — the ported tests are the conformance bar, and a `safety.test.ts` source-scan asserts the kernel stays eval-free.
+Both packages are pure logic and fully CPU-unit-tested — the tests are the conformance bar. `@metael/lang`'s `safety.test.ts` source-scan asserts the kernel stays eval-free; `@metael/runtime`'s `boundary.test.ts` asserts the package imports nothing beyond `@metael/lang` + `@vue/reactivity`.
 
 ## License
 

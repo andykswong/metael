@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram } from './evaluate.ts';
+import { makeSeededRng } from './determinism.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import type { Arg } from './ports.ts';
 
@@ -100,7 +101,7 @@ describe('evaluator core + budgets', () => {
   });
 });
 
-describe('reactive let routes through the ReactiveHost (F5)', () => {
+describe('reactive let routes through the ReactiveHost', () => {
   // A tracking double that records host calls, to prove reactive-let read/write go through the host,
   // NOT through Environment.assign.
   class SpyHost extends PlainStorageHost {
@@ -123,5 +124,57 @@ describe('reactive let routes through the ReactiveHost (F5)', () => {
     const r = run('(function make() { const k = 10; (x) => x + k })();');
     expect(typeof r.value).toBe('function');
     expect((r.value as (x: number) => number)(5)).toBe(15);
+  });
+});
+
+describe('seeded rand/range builtins (intrinsic, EvalOptions.seed)', () => {
+  it('rand() is deterministic for a fixed seed and matches makeSeededRng', () => {
+    const r1 = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const r2 = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const expected = makeSeededRng(42)();
+    expect(r1.value).toBe(expected);
+    expect(r2.value).toBe(expected);
+  });
+  it('different seeds → different rand() values', () => {
+    const a = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 1 });
+    const b = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 2 });
+    expect(a.value).not.toBe(b.value);
+  });
+  it('range(n) returns [0..n) without touching the host', () => {
+    const env = new RecordingHostEnv();
+    const res = evaluateProgram('range(3)', { host: new PlainStorageHost(), env, seed: 0 });
+    expect(res.value).toEqual([0, 1, 2]);
+    expect(env.calls.some((c) => c.head === 'range')).toBe(false);
+  });
+  it('rand/range are NOT routed to resolveCall (intrinsic wins over the host)', () => {
+    const env = new RecordingHostEnv();
+    evaluateProgram('rand()', { host: new PlainStorageHost(), env, seed: 7 });
+    expect(env.calls.some((c) => c.head === 'rand')).toBe(false);
+  });
+  it('a domain can still shadow: a user function named rand is called first', () => {
+    const res = evaluateProgram('function rand() { 99 } rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 3 });
+    expect(res.value).toBe(99);
+  });
+  it('rand() advances one shared per-run sequence (not re-seeded per call)', () => {
+    const res = evaluateProgram('[rand(), rand(), rand()]', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const rng = makeSeededRng(42);
+    expect(res.value).toEqual([rng(), rng(), rng()]);   // three SUCCESSIVE draws, not three copies of the first
+  });
+  it('range with no arg → [] (synthetic 0 fallback)', () => {
+    const res = evaluateProgram('range()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0 });
+    expect(res.value).toEqual([]);
+  });
+  it('range(0) → []', () => {
+    expect(evaluateProgram('range(0)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0 }).value).toEqual([]);
+  });
+  it('range(2 + 1) resolves its arg via evalExpr → [0,1,2]', () => {
+    expect(evaluateProgram('range(2 + 1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0 }).value).toEqual([0, 1, 2]);
+  });
+  it('range with a negative arg → [] (guarded, no throw)', () => {
+    expect(evaluateProgram('range(-1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0 }).value).toEqual([]);
+  });
+  it('rand() is budget-charged: an unbounded loop of rand() trips ML-LANG-BUDGET (does not hang)', () => {
+    const res = evaluateProgram('while (true) { rand() }', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0, maxSteps: 1000 });
+    expect(res.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
   });
 });

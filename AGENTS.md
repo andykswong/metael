@@ -6,7 +6,7 @@ metael is the **generic, reusable, eval-free reactive-DSL substrate** — a lang
 
 1. **The language** — a legible JS/ES-syntax surface (declarations · declarative-wrapping composition) run by an **eval-free tree-walking interpreter** (sandbox-safe, LLM-emit-safe, budgeted).
 2. **The reactive-component AST** — the serializable, editable parse target (reka *State*): `function` (pure) / `component` (stateful, reactive `let`) / control flow / expressions, every node span-tagged.
-3. **The reactive runtime** — fine-grained signals/memos/effects + a synchronous `change()` batch/flush boundary + a converge guard *(design; `@metael/runtime`, not yet built)*.
+3. **The reactive runtime** — fine-grained signals/memos/effects + a synchronous `change()` batch/flush boundary + a converge guard + the generic keyed-list diff + the real port implementations (`@metael/runtime`, built + green).
 4. **The host-injection contract** — the seam by which a *domain* supplies its vocabulary + output: `HostEnvironment` (resolve a head → a host value), `ReactiveHost` (cells/effects), `KeyMinter` (identity keys). **metael knows how to declare, compose, resolve, and react — never *which* heads exist or *what* they build.**
 5. **Determinism + diagnostics** — fuel/deadline/recursion budgets, a seeded-PRNG primitive, a fail-loud diagnostic model. `result = f(source, data, seed, state)`.
 
@@ -20,19 +20,27 @@ The same eval-free reactive-DSL kernel — lexer → parser → tree-walking int
 
 ## Repo Structure
 
-This is an npm **workspaces monorepo**. Only the kernel's front half is built so far.
+This is an npm **workspaces monorepo**. The kernel (both packages) is built + green.
 
 ```
 packages/
-└── lang/     @metael/lang   — [BUILT + GREEN] the eval-free, port-injected JS/ES interpreter kernel:
-                               lexer → recursive-descent parser → discriminated-union AST →
-                               eval-free tree-walking evaluator (fuel/time/depth budgets + FORBIDDEN_KEYS)
-                               + the host-injection port INTERFACES (HostEnvironment/ReactiveHost/KeyMinter)
-                               + test doubles (PlainStorageHost/RecordingHostEnv/PathKeyMinter).
-                               Zero runtime deps; imports NOTHING domain-specific (self-contained).
+├── lang/     @metael/lang    — [BUILT + GREEN] the eval-free, port-injected JS/ES interpreter kernel:
+│                               lexer → recursive-descent parser → discriminated-union AST →
+│                               eval-free tree-walking evaluator (fuel/time/depth budgets + FORBIDDEN_KEYS)
+│                               + the generic child-collection walk (lowerEntry) + intrinsic seeded rand/range
+│                               + the host-injection port INTERFACES (HostEnvironment/ReactiveHost/KeyMinter)
+│                               + test doubles (PlainStorageHost/RecordingHostEnv/PathKeyMinter).
+│                               Zero runtime deps; imports NOTHING domain-specific (self-contained).
+└── runtime/  @metael/runtime — [BUILT + GREEN] the reactive runtime + the real port implementations:
+                               reactive core (signal/memo/effect + synchronous change() + converge guard,
+                               over vendored @vue/reactivity) + the generic keyed-list diff (add/remove/move
+                               + teardown-by-identity on remove) + RuntimeReactiveHost (native-Disposable
+                               runLeafEffect + DisposableStack scope() + cellKey latch + cell-freeing) + the
+                               one-shot derive() composition root (ML-RT-CONVERGE). Imports ONLY @metael/lang
+                               + @vue/reactivity (enforced by an automated boundary test).
 ```
 
-Planned (design-only, not built): `@metael/runtime` (the port *implementations* + the fine-grained reactive runtime + the generic keyed-list diff), `@metael/vdom` (a Preact-like signal-VDOM showcase consumer + the forcing function for the keyed diff), and landing + playground apps.
+Planned (design-only, not built): `@metael/vdom` (a Preact-like signal-VDOM showcase consumer + the forcing function that hardens the keyed diff), and landing + playground apps.
 
 `@metael/lang` source layout (`packages/lang/src/`), bottom-up dependency order:
 
@@ -44,13 +52,24 @@ environment.ts   Environment — Map-based chained lexical scope + BindingMeta
 ports.ts         the 3 host-injection port INTERFACES + Region/LangWrapper/Arg/Scope + 3 test doubles + didYouMean
 lexer.ts         lex() → tokens (ML-LANG-LEX diagnostics)
 parser.ts        recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE)
-evaluate.ts      evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract
-index.ts         the public barrel (excludes the domain-specific lowering)
+evaluate.ts      evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range
+lower.ts         the generic child-collection walk (lowerEntry): entry-component instantiation → child collection → resolveCall/key-minting/Region+Wrapper emission
+index.ts         the public barrel (exports the generic lowerEntry; excludes any domain-specific lowering)
+```
+
+`@metael/runtime` source layout (`packages/runtime/src/`), bottom-up dependency order:
+
+```
+reactive.ts      signal/memo/effect over @vue/reactivity + the synchronous change()/drain boundary + ReactiveFlushError converge guard
+keyed-diff.ts    diffKeyed (pure add/remove/move ops) + applyKeyedDiff (reconcile + dispose-by-identity teardown); zero imports
+reactive-host.ts RuntimeReactiveHost — the real ReactiveHost: native-Disposable runLeafEffect + DisposableStack scope() + cellKey latch + exportState + cell-freeing on scope disposal
+derive.ts        derive() — the one-shot composition root: one change()-wrapped lowerEntry pass; ML-RT-CONVERGE on a non-converging flush; the onHost seam
+index.ts         the public barrel (runtime API + convenience re-exports of the @metael/lang seam)
 ```
 
 ## The extraction boundary
 
-**The load-bearing invariant: `@metael/lang` imports NOTHING domain-specific.** Its `src/` has zero `@`-scoped imports and zero `../` parent-relative imports — verified by the gate. A `call` node is identical whether the head is a user component or a domain vocabulary word; *which* heads exist is a host/registry concern resolved through `HostEnvironment.resolveCall`. Keep it that way: never import a domain View, vocabulary, or renderer into `lang`. The domain-specific AST→View lowering is deliberately **not** in this package — generic child-collection/derive belongs to `@metael/runtime`.
+**The load-bearing invariant: `@metael/lang` imports NOTHING domain-specific.** Its `src/` has zero `@`-scoped imports and zero `../` parent-relative imports — verified by the gate. A `call` node is identical whether the head is a user component or a domain vocabulary word; *which* heads exist is a host/registry concern resolved through `HostEnvironment.resolveCall`. Keep it that way: never import a domain View, vocabulary, or renderer into `lang`. The generic child-collection walk (`lowerEntry` — instantiate the entry component, child-collect bodies, resolve heads through the ports, mint keys, emit Region/Wrapper) lives HERE in `@metael/lang` (it is view-free lang machinery). What stays out of this package is any *domain-specific* lowering (a domain's own View/scene-graph construction) and the reactive *re-derive* + keyed-diff, which belong to `@metael/runtime`.
 
 Diagnostics are `ML-*`; the wrapper/effect brands are `__ml*`. If you touch this kernel, preserve that domain-neutrality — no domain codes, no domain brands, no domain imports leak in.
 
@@ -70,31 +89,36 @@ npm run typecheck           # tsc --noEmit (root) + every package's typecheck (-
 npm run lint                # eslint (root + packages)
 npm run build:packages      # build @metael/* packages → dist/ (.js + .d.ts, preserveModules)
 npm test                    # vitest run (node project)
-npx vitest run packages/lang   # the @metael/lang suite specifically
+npx vitest run packages/lang      # the @metael/lang suite specifically
+npx vitest run packages/runtime   # the @metael/runtime suite specifically
 ```
 
-Test runner is **Vitest** (node project only — `lang` has no browser surface). Everything in `@metael/lang` is pure logic and **fully CPU-unit-tested** (no GPU/visual path). The test suite is the conformance bar; keep it green and add a test with any logic change.
+Test runner is **Vitest** (node project only — neither package has a browser surface). Both packages are pure logic and **fully CPU-unit-tested** (no GPU/visual path). The test suite is the conformance bar; keep it green and add a test with any logic change.
 
 ## Key Conventions
 
 - **TypeScript, ESM-only** (`"type": "module"`), `moduleResolution: bundler`. Sources import with explicit **`.ts` extensions** (`allowImportingTsExtensions`). `strict` + `noUncheckedIndexedAccess` + `verbatimModuleSyntax` + `noImplicitOverride` are on. `lib: ["ESNext", ...]` — `ESNext` resolves `Disposable`/`DisposableStack`/`Symbol.dispose` (no separate `ESNext.Disposable` needed on TS 6).
-- **Zero runtime dependencies.** `@metael/lang` is a pure, self-contained kernel. Do not add a dependency to it. (A signal library like `@vue/reactivity` is a *`@metael/runtime`* concern, not `lang`.)
+- **Dependency discipline per package.** `@metael/lang` is a pure, self-contained kernel with **zero runtime dependencies** — do not add one (a signal library like `@vue/reactivity` is a `@metael/runtime` concern, not `lang`). `@metael/runtime` may import **only** `@metael/lang` + `@vue/reactivity` — nothing domain-specific, no other package.
 - **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). A `safety.test.ts` source-scan asserts this; do not defeat it.
 - **Vocabulary-agnostic core.** The grammar/reactivity/composition/registry hardcode **no** concrete heads. A domain's vocabulary change needs **zero** grammar/AST change. Do not add domain keywords — vocabulary is identifiers resolved through `HostEnvironment.resolveCall`.
-- **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (this package), `ML-RT-*` for the runtime (future package). A domain owns its own prefix for its own diagnostics. Fail-loud.
+- **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (`@metael/lang`), `ML-RT-*` for the runtime (`@metael/runtime`; `ML-RT-CONVERGE` on a non-converging flush). A domain owns its own prefix for its own diagnostics. Fail-loud.
 - **TDD for everything** (there is no un-unit-testable surface here). Red → green → commit; a change to logic gets a test.
 - **No comments unless the "why" is non-obvious.**
 
 ## When Editing
 
-- **Never break the self-containment boundary.** After any change to `packages/lang/src/`, `grep -rn "from '@" packages/lang/src/ ; grep -rn "from '\.\./" packages/lang/src/` must produce **no output**. `lang` imports nothing domain-specific and nothing from a sibling package.
+- **Never break the self-containment boundaries.** After any change to `packages/lang/src/`, `grep -rn "from '@" packages/lang/src/ ; grep -rn "from '\.\./" packages/lang/src/` must produce **no output** — `lang` imports nothing domain-specific and nothing from a sibling package. `@metael/runtime` has its own boundary (imports only `@metael/lang` + `@vue/reactivity`), enforced by `packages/runtime/src/boundary.test.ts` — do not weaken it.
 - **The load-bearing guards are not negotiable.** Never weaken: `FORBIDDEN_KEYS = new Set(['__proto__','constructor','prototype'])`; the budget constants (`DEFAULT_MAX_STEPS=100_000`, `DEFAULT_MAX_TIME_MS=1000`, `DEFAULT_MAX_DEPTH=64`, `MAX_STRING_LENGTH=10_000_000`); `MAX_PARSE_DEPTH=512`; the never-throw contract (`evaluateProgram` catches budget/parse-overflow → diagnostics + `null`, never throws); or the `safety.test.ts` eval-free scan.
 - **The tests are the conformance bar.** The existing suite pins the kernel's behavior. If a change would make a test need a *logic* edit to pass, treat that as a red flag — the behavior is load-bearing; change the test only when you're deliberately and correctly changing the contract, with the reasoning recorded.
 - **Disposal uses the native TC39 protocol.** `runLeafEffect` → `Disposable`; `scope()` → `Scope<T> extends Disposable`; no bespoke `() => void` disposer. Tear-down on throw must not leak a subscription (regression-tested).
-- **Build + verify before claiming.** From the repo root: `npm run typecheck && npm run lint && npm run build:packages && npx vitest run packages/lang` (all green). Add/adjust a test with any logic change.
+- **Build + verify before claiming.** From the repo root: `npm run typecheck && npm run lint && npm run build:packages && npm test` (all green). Add/adjust a test with any logic change.
 
 ## Status
 
-**`@metael/lang` — BUILT & GREEN.** The eval-free interpreter + the 3 interface-review fixes; the domain-specific lowering excluded. **9 test files / 89 tests green**; typecheck · lint · build:packages clean; self-contained (zero cross-imports); eval-free scan green. Built TDD with a two-lens adversarial review per task + a final comprehensive review (0 real code defects).
+**`@metael/{lang,runtime}` — BUILT & GREEN (the kernel is complete).**
+- **`@metael/lang`** — the eval-free interpreter + the 3 interface-review fixes + the generic child-collection walk (`lowerEntry`) + intrinsic seeded `rand`/`range`; domain-specific lowering excluded. Self-contained (zero cross-imports); eval-free scan green.
+- **`@metael/runtime`** — the reactive core (signal/memo/effect + synchronous `change()` + converge guard over vendored `@vue/reactivity`) + the generic keyed-list diff (teardown-by-identity) + `RuntimeReactiveHost` (native-`Disposable` `runLeafEffect` + `DisposableStack` scope() + cellKey latch + cell-freeing) + the one-shot `derive()` (`ML-RT-CONVERGE`). Imports only `@metael/lang` + `@vue/reactivity` (automated boundary test).
 
-**Next: `@metael/runtime`** — the port *implementations* + the fine-grained reactive runtime (signals/memos/effects + synchronous `change()` + converge guard) + the generic keyed-list diff (which owns disposal on `remove`).
+**18 test files / 182 tests green** across both packages; typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance review. One known limitation tracked in the docs backlog: the reactive re-run path shares the derive-time evaluator budget — to be addressed in the first interactive consumer (`@metael/vdom`).
+
+**Next: `@metael/vdom`** — a Preact-like signal-VDOM showcase consumer that also hardens the runtime's keyed-reconciliation half (a VDOM forces full add/remove/reorder), and the first interactive consumer where the reactive-re-run-budget limitation gets addressed.

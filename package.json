@@ -23,5 +23,5 @@
     "vite-plugin-dts": "^5.0",
     "vitest": "^4.1"
   },
-  "workspaces": ["./packages/lang"]
+  "workspaces": ["./packages/lang", "./packages/runtime"]
 }

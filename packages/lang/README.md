@@ -1,16 +1,16 @@
 # @metael/lang
 
-**The eval-free, port-injected JS/ES interpreter kernel** — the front half of the [metael](../../README.md) substrate. Zero runtime dependencies; imports nothing domain-specific.
+**The eval-free, port-injected JS/ES interpreter kernel** — the language layer of the [metael](../../README.md) substrate. Zero runtime dependencies; imports nothing domain-specific. (Its reactive runtime companion is [`@metael/runtime`](../runtime/README.md).)
 
 `@metael/lang` turns source text into a reactive-component AST and evaluates it against a domain's host, staying entirely vocabulary-agnostic:
 
 ```
-source ──lex──▶ tokens ──parse──▶ AST (Expr/Stmt/Program) ──evaluate──▶ host values
+source ──lex──▶ tokens ──parse──▶ AST (Expr/Stmt/Program) ──evaluate / lowerEntry──▶ host values
                                      │ discriminated unions        │ via HostEnvironment.resolveCall
                                      │ every Expr/Stmt span-tagged  │ reactive `let` → ReactiveHost cells
 ```
 
-It ships the **interpreter** + the host-injection port **interfaces** + **test doubles**. The port *implementations* and the fine-grained reactive runtime live in the separate `@metael/runtime` package.
+It ships the **interpreter** + the generic **child-collection walk** (`lowerEntry` — instantiate the entry component, child-collect its body, resolve heads, mint keys, emit `Region`/`Wrapper`) + the host-injection port **interfaces** + **test doubles**. The port *implementations* and the fine-grained reactive runtime (which drives `lowerEntry` inside a `change()` boundary) live in the separate `@metael/runtime` package.
 
 ## What's in the box
 
@@ -19,7 +19,8 @@ It ships the **interpreter** + the host-injection port **interfaces** + **test d
 | `lex`, `Token`, `TokenType`, `LexResult` | the tokenizer (fail-soft; `ML-LANG-LEX` diagnostics) |
 | `parseExpr`, `parseProgram`, `Parser`, `ParseProgramResult` | recursive-descent parser (`MAX_PARSE_DEPTH` guard; `ML-LANG-PARSE`) |
 | `Expr`, `Stmt`, `Program`, `Pattern`, `BinOp`, `FORBIDDEN_KEYS` | the discriminated-union AST + the member/key security guard |
-| `evaluateProgram`, `EvalOptions`, `EvalResult` | the eval-free tree-walker + fuel/time/depth budgets (never-throw) |
+| `evaluateProgram`, `EvalOptions`, `EvalResult` | the eval-free tree-walker + fuel/time/depth budgets (never-throw); binds intrinsic seeded `rand`/`range` from `EvalOptions.seed` |
+| `lowerEntry`, `LowerOptions`, `LowerResult` | the generic child-collection walk — instantiate the entry component, child-collect its body, resolve heads via `HostEnvironment`, mint keys via `KeyMinter`, emit `Region`/`Wrapper`; view-free (builds no domain node) |
 | `DEFAULT_MAX_STEPS`, `DEFAULT_MAX_TIME_MS`, `DEFAULT_MAX_DEPTH`, `MAX_STRING_LENGTH` | the budget constants |
 | `Environment`, `BindingMeta` | chained lexical scope + binding metadata |
 | `makeSeededRng`, `range`, `MAX_RANGE` | the seeded-PRNG primitive (mulberry32) + bounded range |
@@ -58,10 +59,10 @@ Evaluation is **eval-free** (a source-scan test asserts no `eval`/`new Function`
 ```shell
 npm run -w @metael/lang typecheck
 npm run -w @metael/lang build     # → dist/ (.js + .d.ts, one per source module)
-npx vitest run packages/lang      # the suite (9 files / 89 tests)
+npx vitest run packages/lang      # the suite (10 files / 127 tests)
 ```
 
-Domain-neutral by construction: the domain-specific AST→View lowering is excluded — generic derive belongs to `@metael/runtime`. See [../../AGENTS.md](../../AGENTS.md) for the load-bearing invariants and the editing guardrails.
+Domain-neutral by construction: the generic child-collection walk `lowerEntry` ships in THIS package (view-free lang machinery). Only domain-specific lowering (a domain's own View/scene-graph construction) and the reactive re-derive + keyed-diff belong to `@metael/runtime`. See [../../AGENTS.md](../../AGENTS.md) for the load-bearing invariants and the editing guardrails.
 
 ## License
 

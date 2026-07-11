@@ -13,3 +13,5 @@ export type { Expr, Stmt, Program, Pattern, BinOp } from './ast.ts';
 export { FORBIDDEN_KEYS } from './ast.ts';
 export { evaluateProgram, DEFAULT_MAX_STEPS, DEFAULT_MAX_TIME_MS, DEFAULT_MAX_DEPTH, MAX_STRING_LENGTH } from './evaluate.ts';
 export type { EvalOptions, EvalResult } from './evaluate.ts';
+export { lowerEntry } from './lower.ts';
+export type { LowerOptions, LowerResult } from './lower.ts';

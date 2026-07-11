@@ -31,10 +31,10 @@ export interface LangWrapper {
   readonly __mlWrap: 'component' | 'unknown';
   readonly head: string;
   readonly key: string;
-  readonly args: HostValue[];
+  readonly args: Arg[];   // keep the parsed name/reactive roles (was flat HostValue[])
   readonly children: HostValue[];
 }
-export function wrapper(kind: 'component' | 'unknown', head: string, key: string, args: HostValue[], children: HostValue[]): LangWrapper {
+export function wrapper(kind: 'component' | 'unknown', head: string, key: string, args: Arg[], children: HostValue[]): LangWrapper {
   return { __mlWrap: kind, head, key, args, children };
 }
 export function isWrapper(v: unknown): v is LangWrapper {
