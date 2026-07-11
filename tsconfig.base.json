@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["vitest/importMeta", "node"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@metael/lang": ["./packages/lang/src/index.ts"]
+    }
+  }
+}

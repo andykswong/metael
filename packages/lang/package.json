@@ -1,0 +1,20 @@
+{
+  "name": "@metael/lang",
+  "version": "0.0.0",
+  "private": true,
+  "description": "metael eval-free JS/ES interpreter kernel — pure, port-injected. No deps.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["/dist"],
+  "scripts": {
+    "clean": "rimraf dist *.tsbuildinfo",
+    "build": "vite build",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "license": "MIT"
+}
