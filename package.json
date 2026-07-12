@@ -4,19 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prepublishOnly": "npm run clean && npm run build && npm test",
-    "build": "npm run build --ws --if-present",
+    "prepublishOnly": "npm run clean && npm run build:packages && npm test",
+    "build:packages": "npm run build --ws --if-present",
     "clean": "npm run clean --ws --if-present && rimraf dist *.tsbuildinfo",
     "lint": "eslint",
     "typecheck": "tsc --noEmit && npm run typecheck --ws --if-present",
     "test": "vitest run",
-    "test:node": "vitest run --project node"
+    "test:node": "vitest run --project node",
+    "test:browser": "vitest run --project browser"
   },
   "devDependencies": {
     "@eslint/js": "^10.0",
     "@types/node": "^26.0",
+    "@vitest/browser-playwright": "^4.1",
     "eslint": "^10.0",
     "globals": "^17.0",
+    "playwright": "^1.61",
     "rimraf": "^6.0",
     "typescript": "^6.0",
     "typescript-eslint": "^8.50",
@@ -24,5 +27,5 @@
     "vite-plugin-dts": "^5.0",
     "vitest": "^4.1"
   },
-  "workspaces": ["./packages/lang", "./packages/runtime"]
+  "workspaces": ["./packages/lang", "./packages/runtime", "./packages/vdom"]
 }

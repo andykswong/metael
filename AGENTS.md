@@ -20,7 +20,7 @@ The same eval-free reactive-DSL kernel — lexer → parser → tree-walking int
 
 ## Repo Structure
 
-This is an npm **workspaces monorepo**. The kernel (both packages) is built + green.
+This is an npm **workspaces monorepo**. All three packages are built + green.
 
 ```
 packages/
@@ -31,16 +31,26 @@ packages/
 │                               + the host-injection port INTERFACES (HostEnvironment/ReactiveHost/KeyMinter)
 │                               + test doubles (PlainStorageHost/RecordingHostEnv/PathKeyMinter).
 │                               Zero runtime deps; imports NOTHING domain-specific (self-contained).
-└── runtime/  @metael/runtime — [BUILT + GREEN] the reactive runtime + the real port implementations:
-                               reactive core (signal/memo/effect + synchronous change() + converge guard,
-                               over vendored @vue/reactivity) + the generic keyed-list diff (add/remove/move
-                               + teardown-by-identity on remove) + RuntimeReactiveHost (native-Disposable
-                               runLeafEffect + DisposableStack scope() + cellKey latch + cell-freeing) + the
-                               one-shot derive() composition root (ML-RT-CONVERGE). Imports ONLY @metael/lang
-                               + @vue/reactivity (enforced by an automated boundary test).
+├── runtime/  @metael/runtime — [BUILT + GREEN] the reactive runtime + the real port implementations:
+│                               reactive core (signal/memo/effect + synchronous change() + converge guard,
+│                               over vendored @vue/reactivity) + the generic keyed-list diff (add/remove/move
+│                               + teardown-by-identity on remove) + RuntimeReactiveHost (native-Disposable
+│                               runLeafEffect + DisposableStack scope() + cellKey latch + cell-freeing) + the
+│                               one-shot derive() composition root (ML-RT-CONVERGE). Imports ONLY @metael/lang
+│                               + @vue/reactivity (enforced by an automated boundary test).
+└── vdom/     @metael/vdom    — [BUILT + GREEN] a Preact-signals-style virtual DOM built ENTIRELY on the
+                               kernel — the generality showcase AND the vehicle that hardens the runtime's
+                               keyed-list diff under full add/remove/reorder. A thin domain layer: a vnode
+                               HostEnvironment (lowercase head → element vnode; Capitalized → decline →
+                               transparent fragment) + materialize/reconcile/DOM-patcher + an output
+                               sanitizer. Two update paths, automatic: a reactive `let` read by ONE
+                               attribute/text position patches only that DOM node in place (a leaf effect,
+                               no re-render); a change to the tree's SHAPE re-derives + reconciles by key
+                               (DOM identity + focus + selection survive). Imports ONLY @metael/lang +
+                               @metael/runtime (enforced by an automated import-boundary test).
 ```
 
-Planned (design-only, not built): `@metael/vdom` (a Preact-like signal-VDOM showcase consumer + the forcing function that hardens the keyed diff), and landing + playground apps.
+Planned (design-only, not built): landing + playground apps (both dogfooded on `@metael/vdom`).
 
 `@metael/lang` source layout (`packages/lang/src/`), bottom-up dependency order:
 
@@ -119,10 +129,11 @@ Test runner is **Vitest** (node project only — neither package has a browser s
 
 ## Status
 
-**`@metael/{lang,runtime}` — BUILT & GREEN (the kernel is complete).**
+**`@metael/{lang,runtime,vdom}` — BUILT & GREEN (the kernel + the first showcase consumer are complete).**
 - **`@metael/lang`** — the eval-free interpreter + the 3 interface-review fixes + the generic child-collection walk (`lowerEntry`) + intrinsic seeded `rand`/`range` + the collections increment (spread in literals, the seven pure collection builtins, deep-freeze immutability with `ML-LANG-IMMUTABLE`, the `head { }` wrap shorthand); domain-specific lowering excluded. Self-contained (zero cross-imports); eval-free scan green.
 - **`@metael/runtime`** — the reactive core (signal/memo/effect + synchronous `change()` + converge guard over vendored `@vue/reactivity`) + the generic keyed-list diff (teardown-by-identity) + `RuntimeReactiveHost` (native-`Disposable` `runLeafEffect` + `DisposableStack` scope() + cellKey latch + cell-freeing) + the one-shot `derive()` (`ML-RT-CONVERGE`). Imports only `@metael/lang` + `@vue/reactivity` (automated boundary test).
+- **`@metael/vdom`** — a Preact-signals-style virtual DOM on the kernel: a vnode `HostEnvironment` (lowercase→element, Capitalized→decline→transparent fragment), `materialize` (component→fragment, unknown→`ML-VDOM-UNKNOWN`), a real-DOM keyed reconcile driven by `diffKeyed`'s ops (matched-in-place, move, teardown-on-remove), event delegation, an output sanitizer (attr-allowlist + URL-scheme block), and `mount()` — ONE tracked effect that auto-splits the two update paths (a value-only change fires only a leaf effect and patches that DOM node in place with NO re-render; a structural change re-derives on a fresh host, state latched via `exportState`/`priorState`, and keyed-reconciles the DOM). The example components + the dev demo harness are test/dev fixtures, NOT public API (an import-boundary test asserts it). Imports only `@metael/lang` + `@metael/runtime`.
 
-**18 test files / 219 tests green** across both packages; typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance review. One known limitation tracked in the docs backlog: the reactive re-run path shares the derive-time evaluator budget — to be addressed in the first interactive consumer (`@metael/vdom`).
+**Node: 25 test files / 259 tests + Browser: 3 files / 14 tests, all green** (the vdom package contributes 40 node + 14 Playwright/Chromium browser tests across 10 test files); typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance + preact-alignment + efficiency review. The recorded budget-lifetime limitation (a reactive re-run shares the derive-time evaluator budget) is **moot** for `@metael/vdom` and stays deferred: a value-only change fires only a leaf effect (no re-walk at all), and a structural change re-derives with a fresh `Runner` (budget resets each pass) — a multi-thousand-interaction regression test proves no `ML-LANG-BUDGET`. The epoch fix is reserved for a hypothetical future persistent-leaf-effect fast path only.
 
-**Next: `@metael/vdom`** — a Preact-like signal-VDOM showcase consumer that also hardens the runtime's keyed-reconciliation half (a VDOM forces full add/remove/reorder), and the first interactive consumer where the reactive-re-run-budget limitation gets addressed.
+**Next: landing + playground apps** — a landing pitch + a CodePen/W3Schools-style multi-target playground, both dogfooded on `@metael/vdom`.

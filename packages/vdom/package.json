@@ -1,0 +1,24 @@
+{
+  "name": "@metael/vdom",
+  "version": "0.0.0",
+  "private": true,
+  "description": "metael signal VDOM — a Preact-signals-style virtual DOM built on the metael reactive kernel.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["/dist"],
+  "scripts": {
+    "clean": "rimraf dist *.tsbuildinfo",
+    "build": "vite build",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/vdom"
+  },
+  "dependencies": {
+    "@metael/lang": "*",
+    "@metael/runtime": "*"
+  },
+  "license": "MIT"
+}
