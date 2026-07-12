@@ -1,0 +1,23 @@
+{
+  "name": "@metael/site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rimraf dist",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@metael/lang": "*",
+    "@metael/runtime": "*",
+    "@metael/vdom": "*"
+  },
+  "devDependencies": {
+    "vite": "^8.1"
+  },
+  "license": "MIT"
+}

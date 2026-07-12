@@ -1,0 +1,545 @@
+/* ============================================================================
+   metael showcase — visual system
+   Direction: "precision instrument on a blueprint." An editorial optical serif
+   (Fraunces) for display, a phosphor-terminal mono (JetBrains Mono) for code +
+   tool chrome, a humanist grotesk (Hanken Grotesk) for prose. Deep ink ground
+   with a faint blueprint dot-grid + a warm amber accent; the UI-target preview
+   is a warm "paper device" screen, the compute-target output a phosphor
+   terminal. All class names + DOM structure are unchanged (behavior is host TS).
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* ground + surfaces */
+  --ink: #0b0e14;            /* deep blue-black base */
+  --ink-2: #10141d;          /* raised panel */
+  --panel: #0a0d13;          /* editor/terminal well */
+  --paper: #f4efe6;          /* warm paper — the UI preview "device screen" */
+  --paper-ink: #211d17;      /* text on paper */
+  --paper-line: #d8cfbf;     /* hairlines on paper */
+  --border: #23293a;         /* cool hairline on ink */
+  --border-2: #2f3852;
+
+  /* text */
+  --fg: #e9e4d8;             /* warm off-white */
+  --muted: #8b93a7;          /* cool grey */
+  --faint: #5b6377;
+
+  /* accent — precision amber + a cool signal for links */
+  --amber: #e8a33d;
+  --amber-soft: #f3c987;
+  --signal: #6fb3d9;
+  --error: #ff6b6b;
+  --ok: #7ec48b;
+
+  /* syntax (warm phosphor set, not GitHub) */
+  --kw: #e8a33d;             /* keywords — amber */
+  --str: #9dd6a8;            /* strings — green */
+  --num: #7fb7e6;            /* numbers — blue */
+  --id: #e9e4d8;             /* identifiers — off-white */
+  --op: #e08fb4;             /* operators — rose */
+  --punct: #7b8398;          /* punctuation — muted */
+
+  --display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  --radius: 14px;
+  --radius-sm: 9px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  background-color: var(--ink);
+  /* blueprint dot-grid + a warm radial glow up top */
+  background-image:
+    radial-gradient(120% 80% at 50% -10%, rgba(232, 163, 61, 0.10), transparent 60%),
+    radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: auto, 22px 22px;
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: rgba(232, 163, 61, 0.28); color: #fff; }
+
+/* ── Playground shell ─────────────────────────────────────────────────────── */
+
+.pg-root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+.pg-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* chrome controls (scoped so preview content is NOT caught by these) */
+.pg-toolbar select,
+.pg-toolbar button {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--ink-2);
+  color: var(--fg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.05s ease;
+}
+.pg-toolbar select:hover,
+.pg-toolbar button:hover { border-color: var(--amber); }
+.pg-toolbar select:focus-visible,
+.pg-toolbar button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.pg-toolbar button:active { transform: translateY(1px); }
+
+.pg-target { font-weight: 700; }
+
+button.pg-share {
+  margin-left: auto;
+  background: linear-gradient(180deg, var(--amber-soft), var(--amber));
+  border-color: var(--amber);
+  color: #2a1c05;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 16px rgba(232, 163, 61, 0.25);
+}
+button.pg-share:hover { filter: brightness(1.06); border-color: var(--amber); }
+
+/* compact-embed toolbar action: "Open the full editor ↗" — far right, mirroring Share's placement */
+.pg-open {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #2a1c05;
+  text-decoration: none;
+  background: linear-gradient(180deg, var(--amber-soft), var(--amber));
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  box-shadow: 0 4px 16px rgba(232, 163, 61, 0.25);
+  transition: filter 0.12s ease;
+}
+.pg-open:hover { filter: brightness(1.06); }
+
+.pg-blurb {
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+.pg-blurb::before { content: '// '; color: var(--faint); }
+
+.pg-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  min-height: 380px;
+}
+
+/* both panels: framed wells with a faint corner label */
+.pg-editor,
+.pg-preview {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 12px 40px -18px rgba(0, 0, 0, 0.7);
+}
+.pg-editor::after,
+.pg-preview::after {
+  position: absolute;
+  top: 9px; right: 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  pointer-events: none;
+  z-index: 3;
+}
+.pg-editor::after { content: 'source'; color: var(--faint); }
+.pg-preview::after { content: 'preview'; color: rgba(33, 29, 23, 0.35); }
+
+/* UI-target preview = warm paper device screen */
+.pg-preview {
+  background:
+    radial-gradient(140% 120% at 0% 0%, #fbf7ef, var(--paper));
+  color: var(--paper-ink);
+  padding: 22px;
+  overflow: auto;
+}
+.pg-preview-host { font-family: var(--sans); }
+
+/* compute-target output = phosphor terminal */
+.pg-compute {
+  margin: 0;
+  padding: 18px;
+  min-height: 100%;
+  background: var(--panel);
+  color: var(--str);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow: auto;
+  text-shadow: 0 0 12px rgba(157, 214, 168, 0.18);
+}
+
+/* ── Editor: transparent textarea over a highlighted <pre> (must align exactly) ─ */
+
+.pg-editor { background: var(--panel); }
+.ed-root { position: relative; height: 100%; min-height: 380px; }
+.ed-highlight,
+.ed-input {
+  margin: 0;
+  padding: 20px 20px 20px 22px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.62;
+  letter-spacing: 0;
+  border: 0;
+  white-space: pre;
+  overflow: auto;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  tab-size: 2;
+}
+.ed-highlight {
+  background: transparent;
+  pointer-events: none;
+  margin: 0;
+}
+.ed-input {
+  color: transparent;
+  background: transparent;
+  caret-color: var(--amber);
+  resize: none;
+}
+.ed-input:focus-visible { outline: none; }
+.ed-input::selection { background: rgba(232, 163, 61, 0.25); }
+
+.tok-keyword { color: var(--kw); font-weight: 500; }
+.tok-string  { color: var(--str); }
+.tok-number  { color: var(--num); }
+.tok-ident   { color: var(--id); }
+.tok-operator{ color: var(--op); }
+.tok-punct   { color: var(--punct); }
+.tok-plain   { color: var(--muted); }
+
+/* ── Diagnostics ──────────────────────────────────────────────────────────── */
+
+.pg-banner {
+  font-family: var(--mono);
+  color: var(--error);
+  font-size: 12.5px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 107, 107, 0.08);
+}
+.pg-diags {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pg-diag {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--error);
+  padding-left: 14px;
+  position: relative;
+}
+.pg-diag::before { content: '▸'; position: absolute; left: 0; color: rgba(255, 107, 107, 0.7); }
+.pg-diag-more { color: var(--faint); }
+.pg-diag-more::before { content: '…'; }
+.pg-error .pg-preview { opacity: 0.5; filter: saturate(0.6); transition: opacity 0.2s ease; }
+
+.pg-compact .pg-toolbar { justify-content: flex-start; }
+.pg-compact .pg-panes { min-height: 300px; }
+
+/* ── User-content normalization inside the UI preview (paper device) ──────────
+   The examples render generic tags/classes; give them a clean, deliberate look
+   so a demo reads as a real little app instead of inheriting the dark chrome. */
+
+.pg-preview-host button {
+  font-family: var(--sans);
+  font-size: 14px;
+  background: #fff;
+  color: var(--paper-ink);
+  border: 1px solid var(--paper-line);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.05s ease;
+}
+.pg-preview-host button:hover { border-color: var(--amber); background: #fffdf8; }
+.pg-preview-host button:active { transform: translateY(1px); }
+
+.pg-preview-host input {
+  font-family: var(--sans);
+  font-size: 14px;
+  color: var(--paper-ink);
+  background: #fff;
+  border: 1px solid var(--paper-line);
+  border-radius: 8px;
+  padding: 7px 11px;
+  outline: none;
+}
+.pg-preview-host input:focus { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(232, 163, 61, 0.18); }
+
+.pg-preview-host ul { list-style: none; margin: 0; padding: 0; }
+.pg-preview-host p { margin: 0.4em 0; }
+
+/* counter */
+.pg-preview-host .counter { display: flex; align-items: center; gap: 14px; }
+.pg-preview-host .counter .count {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+  min-width: 2ch;
+  text-align: center;
+  color: var(--paper-ink);
+}
+.pg-preview-host .counter button { width: 40px; height: 40px; font-size: 18px; line-height: 1; padding: 0; }
+
+/* todo */
+.pg-preview-host .todoapp { display: flex; flex-direction: column; gap: 12px; max-width: 420px; }
+.pg-preview-host .todoapp input.new { font-size: 15px; padding: 10px 12px; }
+.pg-preview-host .todoapp li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 4px; border-bottom: 1px solid var(--paper-line);
+}
+.pg-preview-host .todoapp li.done .label { text-decoration: line-through; color: #655c4b; }
+.pg-preview-host .todoapp .label { flex: 1; cursor: text; }
+.pg-preview-host .todoapp .toggle { min-width: 58px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.pg-preview-host .todoapp .del { color: #b4482f; border-color: #e3c3ba; }
+.pg-preview-host .todoapp .footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 6px; }
+.pg-preview-host .todoapp .footer .count { font-family: var(--mono); font-size: 13px; color: #6f6656; margin-right: auto; }
+
+/* tabs */
+.pg-preview-host .tabs .tabbar { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--paper-line); padding-bottom: 10px; }
+.pg-preview-host .tabs .tabbar button.on { background: var(--paper-ink); color: var(--paper); border-color: var(--paper-ink); }
+
+/* dashboard */
+.pg-preview-host .dashboard { display: flex; flex-direction: column; gap: 18px; }
+.pg-preview-host .dashboard .stats { display: flex; gap: 12px; }
+.pg-preview-host .dashboard .stat {
+  display: flex; flex-direction: column; gap: 2px; flex: 1;
+  background: #fff; border: 1px solid var(--paper-line); border-radius: 10px; padding: 12px 14px;
+}
+.pg-preview-host .dashboard .stat-value { font-family: var(--mono); font-size: 24px; font-weight: 700; }
+.pg-preview-host .dashboard .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #655c4b; }
+.pg-preview-host .dashboard .team { padding: 8px 0; border-bottom: 1px solid var(--paper-line); }
+.pg-preview-host .dashboard .team-name { font-weight: 600; }
+.pg-preview-host .dashboard .members { padding-left: 16px; margin-top: 4px; }
+.pg-preview-host .dashboard .members li { color: #6f6656; font-size: 14px; }
+
+/* namecard (form) */
+.pg-preview-host .namecard { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+.pg-preview-host .namecard .greeting { font-family: var(--display); font-size: 22px; font-weight: 600; }
+
+/* ── Landing ──────────────────────────────────────────────────────────────── */
+
+/* slim top header nav */
+.ln-header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 14px clamp(18px, 4vw, 40px);
+  border-bottom: 1px solid var(--border);
+  background: rgba(11, 14, 20, 0.72);
+  backdrop-filter: saturate(1.4) blur(10px);
+}
+.ln-wordmark {
+  font-family: var(--mono); font-weight: 700; font-size: 15px; letter-spacing: 0.02em;
+  color: var(--fg); text-decoration: none;
+}
+.ln-wordmark::before { content: '▚ '; color: var(--amber); }
+.ln-nav { display: flex; gap: clamp(12px, 2.5vw, 28px); align-items: center; }
+.ln-nav-link {
+  font-family: var(--mono); font-size: 13px; color: var(--muted); text-decoration: none;
+  transition: color 0.15s ease;
+}
+.ln-nav-link:hover { color: var(--amber); }
+
+.ln-root { max-width: 1080px; margin: 0 auto; padding: 56px 24px 24px; }
+
+.ln-hero { text-align: center; margin-bottom: 52px; }
+/* dogfood callout: this whole page is a metael program */
+.ln-dogfood {
+  display: inline-block; text-decoration: none;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em;
+  color: var(--amber-soft);
+  border: 1px solid rgba(232, 163, 61, 0.35);
+  background: rgba(232, 163, 61, 0.07);
+  border-radius: 999px;
+  padding: 5px 14px;
+  transition: border-color 0.15s ease;
+  margin: 0 auto 24px;
+}
+.ln-dogfood:hover { border-color: var(--amber); }
+.ln-title {
+  font-family: var(--display);
+  font-optical-sizing: auto;
+  font-weight: 600;
+  font-size: clamp(2.4rem, 6vw, 4.2rem);
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  margin: 0 auto 20px;
+  color: #fff;
+}
+/* each sentence is its own line (a deterministic break); a sentence balances only if it must wrap on a
+   narrow viewport */
+.ln-title-line { display: block; text-wrap: balance; }
+.ln-title::after {
+  content: '';
+  display: block;
+  width: 64px; height: 3px;
+  margin: 22px auto 0;
+  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+}
+.ln-sub {
+  font-size: clamp(1rem, 1.6vw, 1.15rem);
+  color: var(--muted);
+  max-width: 62ch;
+  margin: 0 auto 40px;
+  line-height: 1.7;
+}
+
+.ln-hero-playground {
+  text-align: left;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--ink-2);
+  box-shadow: 0 40px 120px -40px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(232, 163, 61, 0.06);
+}
+
+/* staggered hero reveal */
+.ln-title, .ln-sub, .ln-hero-playground {
+  opacity: 0;
+  transform: translateY(16px);
+  animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.ln-title { animation-delay: 0.05s; }
+.ln-sub { animation-delay: 0.16s; }
+.ln-hero-playground { animation-delay: 0.28s; }
+@keyframes rise { to { opacity: 1; transform: none; } }
+
+.ln-section { margin: 64px auto 0; max-width: 760px; }
+.ln-section h2 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.7rem;
+  color: #fff;
+  margin: 0 0 18px;
+  letter-spacing: -0.01em;
+}
+.ln-section h2::before {
+  content: '§';
+  color: var(--amber);
+  margin-right: 10px;
+  font-family: var(--mono);
+  font-weight: 400;
+}
+.ln-section ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.ln-section li {
+  position: relative;
+  padding: 14px 16px 14px 44px;
+  background: var(--ink-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.ln-section li:hover { border-color: var(--border-2); transform: translateX(3px); }
+.ln-section li::before {
+  content: '→';
+  position: absolute; left: 16px; top: 14px;
+  color: var(--amber);
+  font-family: var(--mono);
+}
+
+/* hero playground frame: a caption bar (label + "open the full editor" link) sitting atop the live embed */
+.ln-hero-frame { margin: 0; }
+.ln-hero-caption {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 0 2px;
+}
+.ln-hero-caption-label {
+  font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: 0.01em;
+}
+.ln-hero-caption-label::before { content: '▸ '; color: var(--amber); }
+.ln-hero-caption-link {
+  font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 0.02em;
+  color: #2a1c05; text-decoration: none;
+  background: linear-gradient(180deg, var(--amber-soft), var(--amber));
+  padding: 7px 16px; border-radius: 8px;
+  box-shadow: 0 6px 20px -8px rgba(232, 163, 61, 0.5);
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+.ln-hero-caption-link:hover { transform: translateY(-1px); filter: brightness(1.05); }
+
+/* footer: the honest dogfood note + a link into the playground */
+.ln-footer {
+  margin: 72px auto 0; max-width: 760px;
+  border-top: 1px solid var(--border);
+  padding-top: 24px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+/* "How this page is built" source viewer — the landing's own code, syntax-highlighted */
+/* offset the anchor target so the sticky header doesn't cover the heading when jumped to via #how-built */
+#how-built { scroll-margin-top: 80px; }
+.ln-built-lead { color: var(--muted); font-size: 1rem; margin: 0 0 16px; line-height: 1.6; }
+.ln-source { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.ln-source-code {
+  margin: 0;
+  padding: 20px 22px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.ln-footer-copy { font-family: var(--mono); font-size: 13px; color: var(--faint); }
+.ln-footer-link { font-family: var(--mono); font-size: 13px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+.ln-footer-link:hover { color: var(--amber); text-decoration: underline; }
+
+/* playground page: give the header + playground a shared max width, and top padding under the sticky header */
+.pg-page { max-width: 1280px; margin: 0 auto; }
+
+/* ── Responsive: stack the panes on narrow viewports ──────────────────────── */
+@media (max-width: 720px) {
+  .pg-panes { grid-template-columns: 1fr; }
+  .ed-root, .pg-panes { min-height: 260px; }
+  .ln-root { padding: 48px 18px 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ln-title, .ln-sub, .ln-hero-playground { animation: none; opacity: 1; transform: none; }
+  html { scroll-behavior: auto; }
+}

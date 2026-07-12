@@ -19,7 +19,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['packages/**/src/**/*.test.ts'],
+          include: ['packages/**/src/**/*.test.ts', 'apps/**/src/**/*.test.ts'],
           exclude: ['**/*.browser.test.ts', '**/dist/**'],
         },
       },
@@ -27,7 +27,7 @@ export default defineConfig({
         resolve: { alias },
         test: {
           name: 'browser',
-          include: ['packages/**/src/**/*.browser.test.ts'],
+          include: ['packages/**/src/**/*.browser.test.ts', 'apps/**/src/**/*.browser.test.ts'],
           exclude: ['**/dist/**'],
           browser: {
             enabled: true,

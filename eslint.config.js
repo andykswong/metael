@@ -19,5 +19,6 @@ export default tseslint.config(
       }],
     },
   },
-  { ignores: ['**/dist/**', '**/coverage/**'] },
+  // public/api holds generated TypeDoc output (minified JS/HTML) — a build artifact, never linted.
+  { ignores: ['**/dist/**', '**/coverage/**', '**/public/api/**'] },
 );
