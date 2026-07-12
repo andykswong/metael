@@ -46,13 +46,13 @@ Planned (design-only, not built): `@metael/vdom` (a Preact-like signal-VDOM show
 
 ```
 diagnostics.ts   SourceSpan, Diagnostic, makeDiagnostic (dependency-graph root; zero imports)
-ast.ts           Expr/Stmt/Program/Pattern/BinOp discriminated unions + FORBIDDEN_KEYS
+ast.ts           Expr/Stmt/Program/Pattern/BinOp discriminated unions + ArrayElement/ObjectEntry (spread-carrying) + FORBIDDEN_KEYS
 determinism.ts   makeSeededRng (mulberry32) + range + MAX_RANGE (pure seeded-PRNG primitive)
 environment.ts   Environment — Map-based chained lexical scope + BindingMeta
 ports.ts         the 3 host-injection port INTERFACES + Region/LangWrapper/Arg/Scope + 3 test doubles + didYouMean
-lexer.ts         lex() → tokens (ML-LANG-LEX diagnostics)
-parser.ts        recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE)
-evaluate.ts      evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range
+lexer.ts         lex() → tokens (ML-LANG-LEX diagnostics); the `ellipsis` (...) token for spread
+parser.ts        recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE); spread in literals + the head{} wrap shorthand
+evaluate.ts      evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range + the pure collection builtins + deep-freeze immutability
 lower.ts         the generic child-collection walk (lowerEntry): entry-component instantiation → child collection → resolveCall/key-minting/Region+Wrapper emission
 index.ts         the public barrel (exports the generic lowerEntry; excludes any domain-specific lowering)
 ```
@@ -101,7 +101,11 @@ Test runner is **Vitest** (node project only — neither package has a browser s
 - **Dependency discipline per package.** `@metael/lang` is a pure, self-contained kernel with **zero runtime dependencies** — do not add one (a signal library like `@vue/reactivity` is a `@metael/runtime` concern, not `lang`). `@metael/runtime` may import **only** `@metael/lang` + `@vue/reactivity` — nothing domain-specific, no other package.
 - **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). A `safety.test.ts` source-scan asserts this; do not defeat it.
 - **Vocabulary-agnostic core.** The grammar/reactivity/composition/registry hardcode **no** concrete heads. A domain's vocabulary change needs **zero** grammar/AST change. Do not add domain keywords — vocabulary is identifiers resolved through `HostEnvironment.resolveCall`.
-- **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (`@metael/lang`), `ML-RT-*` for the runtime (`@metael/runtime`; `ML-RT-CONVERGE` on a non-converging flush). A domain owns its own prefix for its own diagnostics. Fail-loud.
+- **Immutable collections.** DSL-created arrays/objects (literals + builtin results) are **deep-frozen** at eval — immutable by construction. A member/index write (`o.a = 2`, `a[0] = 9`) is a fail-loud `ML-LANG-IMMUTABLE`; the update path is reassignment + spread/builtins. An **identifier**-LHS assign (a reactive `let` write / `ML-LANG-CONST`) is unaffected — only member/index LHS writes are rejected (a computed forbidden key still surfaces `ML-LANG-FORBIDDEN`). Injected `data` is bound as-is (not frozen) but the write path is blocked for every value, so the DSL cannot mutate it. Do not reintroduce an in-place member/index write.
+- **Spread is supported in literals** (`[...a, x]`, `{ ...o, k: v }`) via the `ellipsis` token — array + object literals only, not call args. A spread of a non-array/non-object is a fail-loud `ML-LANG-SPREAD` + a safe skip.
+- **Seven pure collection builtins** — `map`/`filter`/`reduce`/`keys`/`values`/`entries`/`fromEntries` — are bound **intrinsically** (the same unbound-head-only, budget-ticked, deterministic pattern as `rand`/`range`): a user `function` of the same name shadows them; each ticks the budget per call + per element (a large collection fails closed with `ML-LANG-BUDGET`); each returns a **new frozen** collection and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` + a frozen-empty result. Callbacks may be an arrow OR a user-declared `function`.
+- **`head { … }` wrap shorthand.** A bare identifier followed by a **same-line** `{` is a zero-arg wrapping call (`group { … }` ≡ `group() { … }`) — the parser synthesizes the `call` node. A next-line `{` after a bare ident stays two statements (the newline guard); a `{` after a *call* wraps on either line (unchanged).
+- **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (`@metael/lang`; including `ML-LANG-IMMUTABLE` for a member/index write, `ML-LANG-SPREAD` for a spread of a non-array/non-object, `ML-LANG-BUILTIN-ARG` for a wrong-shape collection-builtin arg), `ML-RT-*` for the runtime (`@metael/runtime`; `ML-RT-CONVERGE` on a non-converging flush). A domain owns its own prefix for its own diagnostics. Fail-loud.
 - **TDD for everything** (there is no un-unit-testable surface here). Red → green → commit; a change to logic gets a test.
 - **No comments unless the "why" is non-obvious.**
 
@@ -116,9 +120,9 @@ Test runner is **Vitest** (node project only — neither package has a browser s
 ## Status
 
 **`@metael/{lang,runtime}` — BUILT & GREEN (the kernel is complete).**
-- **`@metael/lang`** — the eval-free interpreter + the 3 interface-review fixes + the generic child-collection walk (`lowerEntry`) + intrinsic seeded `rand`/`range`; domain-specific lowering excluded. Self-contained (zero cross-imports); eval-free scan green.
+- **`@metael/lang`** — the eval-free interpreter + the 3 interface-review fixes + the generic child-collection walk (`lowerEntry`) + intrinsic seeded `rand`/`range` + the collections increment (spread in literals, the seven pure collection builtins, deep-freeze immutability with `ML-LANG-IMMUTABLE`, the `head { }` wrap shorthand); domain-specific lowering excluded. Self-contained (zero cross-imports); eval-free scan green.
 - **`@metael/runtime`** — the reactive core (signal/memo/effect + synchronous `change()` + converge guard over vendored `@vue/reactivity`) + the generic keyed-list diff (teardown-by-identity) + `RuntimeReactiveHost` (native-`Disposable` `runLeafEffect` + `DisposableStack` scope() + cellKey latch + cell-freeing) + the one-shot `derive()` (`ML-RT-CONVERGE`). Imports only `@metael/lang` + `@vue/reactivity` (automated boundary test).
 
-**18 test files / 182 tests green** across both packages; typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance review. One known limitation tracked in the docs backlog: the reactive re-run path shares the derive-time evaluator budget — to be addressed in the first interactive consumer (`@metael/vdom`).
+**18 test files / 219 tests green** across both packages; typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance review. One known limitation tracked in the docs backlog: the reactive re-run path shares the derive-time evaluator budget — to be addressed in the first interactive consumer (`@metael/vdom`).
 
 **Next: `@metael/vdom`** — a Preact-like signal-VDOM showcase consumer that also hardens the runtime's keyed-reconciliation half (a VDOM forces full add/remove/reorder), and the first interactive consumer where the reactive-re-run-budget limitation gets addressed.

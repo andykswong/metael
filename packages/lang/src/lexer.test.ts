@@ -26,3 +26,19 @@ describe('lexer', () => {
     expect(r.diagnostics[0]?.code).toBe('ML-LANG-LEX');
   });
 });
+
+describe('ellipsis token', () => {
+  it('lexes `...` as a single ellipsis token, not three dots', () => {
+    const { tokens } = lex('[...a]');
+    const types = tokens.map((t) => t.type);
+    expect(types).toContain('ellipsis');
+    expect(types.filter((t) => t === 'dot')).toEqual([]);   // no stray dots
+    expect(types).toEqual(['lbracket', 'ellipsis', 'ident', 'rbracket', 'eof']);
+  });
+  it('a single dot is still a dot (member access)', () => {
+    expect(lex('a.b').tokens.map((t) => t.type)).toEqual(['ident', 'dot', 'ident', 'eof']);
+  });
+  it('two dots lex as two dots (no ellipsis false-match)', () => {
+    expect(lex('a..b').tokens.filter((t) => t.type === 'ellipsis')).toEqual([]);
+  });
+});

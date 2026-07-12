@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- narrowed-Stmt access in test scaffolding */
 import { describe, it, expect } from 'vitest';
 import { parseProgram } from './parser.ts';
+import type { Stmt } from './ast.ts';
 
 const prog = (src: string) => parseProgram(src).program.stmts;
 
@@ -83,5 +84,43 @@ describe('statement + wrapping parser', () => {
     }
     // …and a truncated expression still surfaces a parse diagnostic (never silently swallowed).
     expect(parseProgram('const a =').diagnostics.some((d) => d.code === 'ML-LANG-PARSE')).toBe(true);
+  });
+});
+
+describe('wrap shorthand: head { } (bare ident, no parens)', () => {
+  it('`group { … }` parses as a zero-arg wrapping call with a block', () => {
+    const { program, diagnostics } = parseProgram('component Story() { group { text("hi") } }');
+    expect(diagnostics).toEqual([]);
+    const story = program.stmts.find((s) => s.kind === 'component')!;
+    const bodyStmt = (story as Extract<typeof story, { kind: 'component' }>).body[0]!;
+    expect(bodyStmt.kind).toBe('expr');
+    const call = (bodyStmt as Extract<typeof bodyStmt, { kind: 'expr' }>).expr;
+    expect(call.kind).toBe('call');
+    const c = call as Extract<typeof call, { kind: 'call' }>;
+    expect(c.callee).toMatchObject({ kind: 'ident', name: 'group' });
+    expect(c.args).toEqual([]);            // zero args (synthesized)
+    expect(c.block).toBeDefined();          // the { text("hi") } block attached
+  });
+  it('`group() { … }` (explicit parens) still parses identically', () => {
+    const { diagnostics } = parseProgram('component Story() { group() { text("hi") } }');
+    expect(diagnostics).toEqual([]);
+  });
+  it('a bare ident NOT followed by `{` is a plain expression (no synthesized call)', () => {
+    const { program } = parseProgram('component Story() { x }');
+    const story = program.stmts.find((s) => s.kind === 'component')!;
+    const expr = ((story as Extract<typeof story, { kind: 'component' }>).body[0] as Extract<Stmt, { kind: 'expr' }>).expr;
+    expect(expr.kind).toBe('ident');       // NOT a call
+  });
+  it('a bare ident then a NEXT-LINE `{` does NOT wrap (two statements — the newline guard)', () => {
+    const { program, diagnostics } = parseProgram('component Story() { group\n{ a: 1 } }');
+    expect(diagnostics).toEqual([]);
+    const body = (program.stmts.find((s) => s.kind === 'component') as Extract<Stmt, { kind: 'component' }>).body;
+    expect(body.length).toBe(2);                                   // two separate statements
+    expect((body[0] as Extract<Stmt, { kind: 'expr' }>).expr.kind).toBe('ident');    // `group` — NOT a call
+    expect((body[1] as Extract<Stmt, { kind: 'expr' }>).expr.kind).toBe('object');   // `{ a: 1 }` — an object literal
+  });
+  it('a CALL then a next-line `{` still wraps (unchanged — a call callee disambiguates)', () => {
+    const { diagnostics } = parseProgram('component Story() { box()\n{ text("x") } }');
+    expect(diagnostics).toEqual([]);   // box()⏎{…} wraps (shipped behavior preserved)
   });
 });

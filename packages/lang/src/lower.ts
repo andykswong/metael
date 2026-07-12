@@ -15,6 +15,7 @@
 import type { Diagnostic } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
 import type { Expr, Stmt } from './ast.ts';
+import { FORBIDDEN_KEYS } from './ast.ts';
 import { parseProgram } from './parser.ts';
 import { Environment } from './environment.ts';
 import type { HostValue, KeyMinter, Arg } from './ports.ts';
@@ -351,10 +352,23 @@ function argContent(args: unknown[]): Record<string, unknown> {
  *  A bare component/function reference passed as a value stays the producer itself (a render-prop).
  *  Returns the RAW lowered value/object/Region — the top-level call site lifts it into an Arg. */
 function lowerArg(arg: Expr, env: Environment, ctx: KeyContext, r: Runner, opts: LowerOptions): unknown {
-  // An object literal: lower each entry independently (each entry is itself an arg position).
+  // An object literal ARG: lower each entry independently (each is its own arg position). A spread
+  // entry (`{ ...o }`) copies the spread source's own non-forbidden keys in (last-wins), mirroring the
+  // evaluator's object-spread. The spread source is resolved by evaluating it (a reactive spread source
+  // resolves to its current value here, consistent with the rest of arg resolution). This arg object is
+  // NOT frozen — it may carry Region thunks that must stay live for leaf effects.
   if (arg.kind === 'object') {
     const out: Record<string, unknown> = {};
-    for (const { key, value } of arg.entries) out[key] = lowerArg(value, env, ctx, r, opts);
+    for (const entry of arg.entries) {
+      if (entry.spread) {
+        const src = evalExpr(entry.value, env, r);
+        if (src !== null && typeof src === 'object' && !Array.isArray(src)) {
+          for (const [k, v] of Object.entries(src as Record<string, unknown>)) if (!FORBIDDEN_KEYS.has(k)) out[k] = v;
+        } else r.error('ML-LANG-SPREAD', 'spread of a non-object in an object argument', arg.span);
+        continue;
+      }
+      out[entry.key] = lowerArg(entry.value, env, ctx, r, opts);
+    }
     return out;
   }
   // A SLOT FIRST — before the reactive-Region check: an arg that is a call to an in-DSL COMPONENT
@@ -402,7 +416,7 @@ function readsReactiveLet(expr: Expr, env: Environment): boolean {
     case 'object':
       return expr.entries.some((e) => readsReactiveLet(e.value, env));
     case 'array':
-      return expr.elements.some((e) => readsReactiveLet(e, env));
+      return expr.elements.some((e) => readsReactiveLet(e.value, env));
     case 'call':
       return (expr.callee.kind !== 'ident' && readsReactiveLet(expr.callee, env)) || expr.args.some((a) => readsReactiveLet(a, env));
     // Literals and arrows do not (statically) read a reactive let for the purpose of prop reactivity.

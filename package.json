@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:packages": "npm run build --ws --if-present",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
+    "build": "npm run build --ws --if-present",
     "clean": "npm run clean --ws --if-present && rimraf dist *.tsbuildinfo",
     "lint": "eslint",
     "typecheck": "tsc --noEmit && npm run typecheck --ws --if-present",
-    "test": "vitest run --passWithNoTests",
-    "test:node": "vitest run --project node --passWithNoTests"
+    "test": "vitest run",
+    "test:node": "vitest run --project node"
   },
   "devDependencies": {
     "@eslint/js": "^10.0",

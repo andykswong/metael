@@ -10,13 +10,19 @@ export type Expr =
   | { kind: 'ident'; name: string; span: SourceSpan }
   | { kind: 'member'; object: Expr; property: string; span: SourceSpan }
   | { kind: 'index'; object: Expr; index: Expr; span: SourceSpan }
-  | { kind: 'object'; entries: { key: string; value: Expr }[]; span: SourceSpan }
-  | { kind: 'array'; elements: Expr[]; span: SourceSpan }
+  | { kind: 'object'; entries: ObjectEntry[]; span: SourceSpan }
+  | { kind: 'array'; elements: ArrayElement[]; span: SourceSpan }
   | { kind: 'arrow'; params: Pattern[]; body: Expr | Stmt[]; span: SourceSpan }   // Stmt[] = block body `=> { … }`
   | { kind: 'call'; callee: Expr; args: Expr[]; block?: Stmt[]; span: SourceSpan }  // block present ⇒ wrapping element
   | { kind: 'unary'; op: '-' | '!'; operand: Expr; span: SourceSpan }
   | { kind: 'binary'; op: BinOp; left: Expr; right: Expr; span: SourceSpan }
   | { kind: 'cond'; test: Expr; then: Expr; else: Expr; span: SourceSpan };   // ternary `?:`
+
+/** An array literal element: a normal value, or `...expr` splicing an array's elements in. */
+export interface ArrayElement { readonly value: Expr; readonly spread: boolean }
+/** An object literal entry: a `key: value` pair, or `...expr` spreading an object's own keys in
+ *  (spread entries carry no key; `key` is '' and ignored). */
+export interface ObjectEntry { readonly key: string; readonly value: Expr; readonly spread: boolean }
 
 export type BinOp = '+' | '-' | '*' | '/' | '%' | '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||';
 

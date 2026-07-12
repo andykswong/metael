@@ -6,7 +6,7 @@ export type TokenType =
   | 'component' | 'function' | 'const' | 'let' | 'if' | 'else' | 'for' | 'of' | 'while' | 'return'
   | 'true' | 'false' | 'null'
   | 'lbrace' | 'rbrace' | 'lbracket' | 'rbracket' | 'lparen' | 'rparen'
-  | 'dot' | 'comma' | 'colon' | 'semi' | 'arrow' | 'assign' | 'question'
+  | 'dot' | 'comma' | 'colon' | 'semi' | 'arrow' | 'assign' | 'question' | 'ellipsis'
   | 'eq' | 'neq' | 'lt' | 'le' | 'gt' | 'ge' | 'plus' | 'minus' | 'star' | 'slash' | 'percent'
   | 'and' | 'or' | 'not' | 'eof';
 
@@ -62,6 +62,8 @@ export function lex(src: string): LexResult {
       push('string', str, start);
       continue;
     }
+    // three-char operator first (only `...`), before two/one-char so `...` never lexes as three dots.
+    if (src.slice(i, i + 3) === '...') { i += 3; push('ellipsis', '...', start); continue; }
     // two-char operators first
     const two = src.slice(i, i + 2);
     const twoMap: Record<string, TokenType> = { '=>': 'arrow', '==': 'eq', '!=': 'neq', '<=': 'le', '>=': 'ge', '&&': 'and', '||': 'or' };

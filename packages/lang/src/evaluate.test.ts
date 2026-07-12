@@ -32,8 +32,10 @@ describe('evaluator core + budgets', () => {
   it('an explicit return yields the returned value (and stops the body)', () => {
     expect(run('function f() { return 7; 99 } f();').value).toBe(7);
   });
-  it('assigns through a member LValue (o.x = v)', () => {
-    expect(run('const o = { x: 1 }; o.x = 9; o.x;').value).toBe(9);
+  it('a member write on an immutable value is ML-LANG-IMMUTABLE (was in-place mutation)', () => {
+    const r = run('const o = { x: 1 }; o.x = 9; o.x;');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toBe(1);   // unchanged — the read after the blocked write still sees 1
   });
   it('reassigning a const is a ML-LANG-CONST diagnostic', () => {
     expect(run('const a = 1; a = 2;').diagnostics.some((d) => d.code === 'ML-LANG-CONST')).toBe(true);
@@ -176,5 +178,126 @@ describe('seeded rand/range builtins (intrinsic, EvalOptions.seed)', () => {
   it('rand() is budget-charged: an unbounded loop of rand() trips ML-LANG-BUDGET (does not hang)', () => {
     const res = evaluateProgram('while (true) { rand() }', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0, maxSteps: 1000 });
     expect(res.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
+  });
+});
+
+describe('spread evaluation', () => {
+  it('array spread splices elements in order', () => {
+    expect(run('const a = [1, 2]; [0, ...a, 3]').value).toEqual([0, 1, 2, 3]);
+  });
+  it('object spread merges; later keys win', () => {
+    expect(run('const o = { a: 1, b: 2 }; { ...o, b: 9, c: 3 }').value).toEqual({ a: 1, b: 9, c: 3 });
+  });
+  it('spread of a non-array is a fail-loud ML-LANG-SPREAD (+ skipped)', () => {
+    const r = run('[...5]');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-SPREAD')).toBe(true);
+    expect(r.value).toEqual([]);
+  });
+  it('a forbidden key cannot be introduced via object spread', () => {
+    expect(run('const o = { a: 1 }; { ...o }').value).toEqual({ a: 1 });
+  });
+});
+
+describe('immutability: DSL-created collections are frozen; member/index writes fail loud', () => {
+  it('an array literal is frozen — an index write is now ML-LANG-IMMUTABLE', () => {
+    const r = run('const a = [1, 2]; a[0] = 9; a');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toEqual([1, 2]);
+  });
+  it('an object member write is now ML-LANG-IMMUTABLE (was in-place mutation)', () => {
+    const r = run('const o = { x: 1 }; o.x = 9; o');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toEqual({ x: 1 });
+  });
+  it('the immutable-update path (spread reassignment) works and is itself frozen', () => {
+    expect(run('const o = { x: 1 }; { ...o, x: 9 }').value).toEqual({ x: 9 });
+  });
+  it('a reactive let reassignment (identifier LHS) is NOT blocked by the immutability guard', () => {
+    const r = evaluateProgram('let n = 1; n = n + 1; n', { host: new PlainStorageHost(), env: new RecordingHostEnv(), insideComponent: true });
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(false);
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-LET-SCOPE')).toBe(false);
+    expect(r.value).toBe(2);
+  });
+  it('an array in a component let updates via reassignment + spread (identifier LHS — OK)', () => {
+    const ok = evaluateProgram('let items = [1]; items = [...items, 2]; items', { host: new PlainStorageHost(), env: new RecordingHostEnv(), insideComponent: true });
+    expect(ok.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(false);
+    expect(ok.value).toEqual([1, 2]);
+  });
+});
+
+describe('pure collection builtins (intrinsic free functions)', () => {
+  it('map transforms into a new array', () => {
+    expect(run('map([1, 2, 3], (x) => x * 2)').value).toEqual([2, 4, 6]);
+  });
+  it('map passes the index as the second arg', () => {
+    expect(run('map([10, 20], (x, i) => i)').value).toEqual([0, 1]);
+  });
+  it('filter selects', () => {
+    expect(run('filter([1, 2, 3, 4], (x) => x % 2 == 0)').value).toEqual([2, 4]);
+  });
+  it('reduce aggregates (the only fold available in a pure function)', () => {
+    expect(run('reduce([1, 2, 3, 4], (acc, x) => acc + x, 0)').value).toBe(10);
+  });
+  it('keys / values / entries on an object', () => {
+    expect(run('keys({ a: 1, b: 2 })').value).toEqual(['a', 'b']);
+    expect(run('values({ a: 1, b: 2 })').value).toEqual([1, 2]);
+    expect(run('entries({ a: 1, b: 2 })').value).toEqual([['a', 1], ['b', 2]]);
+  });
+  it('fromEntries builds an object from pairs', () => {
+    expect(run('fromEntries([["a", 1], ["b", 2]])').value).toEqual({ a: 1, b: 2 });
+  });
+  it('round-trips: fromEntries(entries(o)) == o', () => {
+    expect(run('const o = { a: 1, b: 2 }; fromEntries(entries(o))').value).toEqual({ a: 1, b: 2 });
+  });
+  it('a builtin result is frozen (immutable)', () => {
+    const r = run('const m = map([1], (x) => x); m[0] = 9; m');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+  });
+  it('a non-array arg is fail-loud ML-LANG-BUILTIN-ARG + a safe empty result', () => {
+    const r = run('map(5, (x) => x)');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(r.value).toEqual([]);
+  });
+  it('a user `function map` SHADOWS the intrinsic (unbound-head-only)', () => {
+    expect(run('function map() { 99 } map([1,2], (x) => x)').value).toBe(99);
+  });
+  it('a user-declared `function` works as a callback (not just an arrow)', () => {
+    expect(run('function dbl(x) { x * 2 } map([1, 2, 3], dbl)').value).toEqual([2, 4, 6]);
+    expect(run('function even(x) { x % 2 == 0 } filter([1, 2, 3, 4], even)').value).toEqual([2, 4]);
+  });
+  it('fromEntries ignores a forbidden key (FORBIDDEN_KEYS-guarded)', () => {
+    const r = run('fromEntries([["__proto__", 1], ["a", 2]])');
+    expect((r.value as Record<string, unknown>).a).toBe(2);
+    expect(Object.getOwnPropertyNames(r.value as object)).not.toContain('__proto__');
+  });
+  it('map budget: a large mapped array fails closed via per-element ticks, never hangs', () => {
+    const r = evaluateProgram('map(range(2000), (x) => x + 1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps: 500 });
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
+  });
+});
+
+describe('collections increment preserves the invariants', () => {
+  it('DETERMINISM: same source + seed → identical result for a spread + builtins + rand mix', () => {
+    const src = 'map(range(3), (i) => ({ r: rand(), i: i }))';
+    const a = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const b = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    expect(a.value).toEqual(b.value);
+    const c = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 43 });
+    expect(a.value).not.toEqual(c.value);   // the seed genuinely drives the result
+  });
+  it('NEVER-THROWS: a builtin callback that recurses infinitely fails closed (ML-LANG-BUDGET), no host throw', () => {
+    const src = 'function loop(x) { loop(x) } map([1], (x) => loop(x))';
+    let r: ReturnType<typeof evaluateProgram>;
+    expect(() => { r = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxDepth: 20 }); }).not.toThrow();
+    expect(r!.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);   // did not escape into the host
+  });
+  it('FREEZE does not break equality / serialization of results', () => {
+    const r = evaluateProgram('[...[1,2], 3]', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(JSON.stringify(r.value)).toBe('[1,2,3]');   // frozen arrays serialize normally
+    expect(r.value).toEqual([1, 2, 3]);                 // and compare structurally
+  });
+  it('FREEZE is deep + a nested frozen result still serializes', () => {
+    const r = evaluateProgram('map([1, 2], (x) => ({ v: x }))', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(JSON.stringify(r.value)).toBe('[{"v":1},{"v":2}]');
   });
 });

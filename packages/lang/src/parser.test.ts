@@ -17,7 +17,7 @@ describe('expression parser', () => {
     });
   });
   it('parses an array literal', () => {
-    expect(ast('[1, 2, 3]')).toMatchObject({ kind: 'array', elements: [{ value: 1 }, { value: 2 }, { value: 3 }] });
+    expect(ast('[1, 2, 3]')).toMatchObject({ kind: 'array', elements: [{ value: { kind: 'number', value: 1 } }, { value: { kind: 'number', value: 2 } }, { value: { kind: 'number', value: 3 } }] });
   });
   it('parses member access chains', () => {
     expect(ast('data.kpis')).toMatchObject({ kind: 'member', object: { kind: 'ident', name: 'data' }, property: 'kpis' });
@@ -41,5 +41,28 @@ describe('expression parser', () => {
   it('reports member access to a forbidden key as a diagnostic', () => {
     const r = parseExpr('a.__proto__');
     expect(r.diagnostics[0]?.code).toBe('ML-LANG-FORBIDDEN');
+  });
+});
+
+describe('spread in literals', () => {
+  it('array spread: [...a, x] parses with a spread element', () => {
+    const { expr, diagnostics } = parseExpr('[...a, 1]');
+    expect(diagnostics).toEqual([]);
+    expect(expr.kind).toBe('array');
+    const arr = expr as Extract<typeof expr, { kind: 'array' }>;
+    expect(arr.elements[0]).toMatchObject({ spread: true });
+    expect(arr.elements[1]).toMatchObject({ spread: false });
+  });
+  it('object spread: {...o, k: 1} parses with a spread entry', () => {
+    const { expr, diagnostics } = parseExpr('{ ...o, k: 1 }');
+    expect(diagnostics).toEqual([]);
+    expect(expr.kind).toBe('object');
+    const obj = expr as Extract<typeof expr, { kind: 'object' }>;
+    expect(obj.entries[0]).toMatchObject({ spread: true });
+    expect(obj.entries[1]).toMatchObject({ key: 'k', spread: false });
+  });
+  it('a non-spread array/object is unchanged (spread false)', () => {
+    const arr = parseExpr('[1, 2]').expr as Extract<ReturnType<typeof parseExpr>['expr'], { kind: 'array' }>;
+    expect(arr.elements.every((e) => e.spread === false)).toBe(true);
   });
 });

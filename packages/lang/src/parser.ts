@@ -1,7 +1,7 @@
 import { lex, type Token, type TokenType } from './lexer.ts';
 import type { Diagnostic } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
-import type { Expr, Stmt, BinOp, Pattern, Program } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
+import type { Expr, Stmt, BinOp, Pattern, Program, ArrayElement, ObjectEntry } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
 import { FORBIDDEN_KEYS } from './ast.ts';
 
 export interface ParseExprResult { readonly expr: Expr; readonly diagnostics: Diagnostic[] }
@@ -174,12 +174,17 @@ export class Parser {
 
   private parseObject(): Expr {
     const start = this.peek().span; this.next(); // {
-    const entries: { key: string; value: Expr }[] = [];
+    const entries: ObjectEntry[] = [];
     while (this.peek().type !== 'rbrace' && this.peek().type !== 'eof') {
-      const key = this.next().value;
-      if (FORBIDDEN_KEYS.has(key)) this.diagnostics.push(makeDiagnostic('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, this.peek().span));
-      this.eat('colon');
-      entries.push({ key, value: this.parseExpression() });
+      if (this.peek().type === 'ellipsis') {
+        this.next();
+        entries.push({ key: '', value: this.parseExpression(), spread: true });
+      } else {
+        const key = this.next().value;
+        if (FORBIDDEN_KEYS.has(key)) this.diagnostics.push(makeDiagnostic('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, this.peek().span));
+        this.eat('colon');
+        entries.push({ key, value: this.parseExpression(), spread: false });
+      }
       if (this.peek().type === 'comma') this.next(); else break;
     }
     this.eat('rbrace');
@@ -188,9 +193,11 @@ export class Parser {
 
   private parseArray(): Expr {
     const start = this.peek().span; this.next(); // [
-    const elements: Expr[] = [];
+    const elements: ArrayElement[] = [];
     while (this.peek().type !== 'rbracket' && this.peek().type !== 'eof') {
-      elements.push(this.parseExpression());
+      const spread = this.peek().type === 'ellipsis';
+      if (spread) this.next();
+      elements.push({ value: this.parseExpression(), spread });
       if (this.peek().type === 'comma') this.next(); else break;
     }
     this.eat('rbracket');
@@ -310,7 +317,18 @@ export class Parser {
    *  the SAME logical line (no newline, no `;`). A newline/`;` between `)` and the next call makes
    *  them siblings — otherwise `KPI(a)⏎KPI(b)` would mis-nest b inside a. A `{` block always wraps. */
   private parseWrappable(): Expr {
-    const e = this.parseExpression();
+    let e = this.parseExpression();
+    // Wrap shorthand: a bare identifier immediately followed by a SAME-LINE `{` is a zero-arg wrapping
+    // call (`group { … }` ≡ `group() { … }`). Synthesize the call node so the block attaches uniformly.
+    // The `!newlineBefore` guard is REQUIRED here (and only here): a `group` ident followed by a
+    // NEXT-line `{` parses as two clean statements (a `group` ident expr, then an object-literal expr);
+    // without the guard the shorthand would wrongly merge them. Only a SAME-LINE `{` after a bare ident is a wrap.
+    if (e.kind === 'ident' && this.peek().type === 'lbrace' && !this.peek().newlineBefore) {
+      e = { kind: 'call', callee: e, args: [], span: e.span };
+    }
+    // The existing call-block attach is UNCHANGED: a `{` block after a CALL always wraps, including on
+    // the next line (`box()⏎{ … }` wraps — a `call` callee already disambiguates it from a standalone
+    // object literal, so no newline guard is needed or wanted on this line).
     if (e.kind === 'call') {
       if (this.peek().type === 'lbrace') { e.block = this.parseBlock(); }
       else if (this.startsStatement() && !this.peek().newlineBefore) { e.block = [this.parseStatement()!]; }

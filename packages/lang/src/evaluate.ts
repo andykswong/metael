@@ -126,13 +126,32 @@ export function evalExpr(expr: Expr, env: Environment, r: Runner): unknown {
     }
     case 'object': {
       const out: Record<string, unknown> = {};
-      for (const { key, value } of expr.entries) {
-        if (FORBIDDEN_KEYS.has(key)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, expr.span); continue; }
-        out[key] = evalExpr(value, env, r);
+      for (const entry of expr.entries) {
+        if (entry.spread) {
+          const src = evalExpr(entry.value, env, r);
+          if (src !== null && typeof src === 'object' && !Array.isArray(src)) {
+            for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+              if (!FORBIDDEN_KEYS.has(k)) out[k] = v;
+            }
+          } else r.error('ML-LANG-SPREAD', 'spread of a non-object in an object literal', expr.span);
+          continue;
+        }
+        if (FORBIDDEN_KEYS.has(entry.key)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${entry.key}'`, expr.span); continue; }
+        out[entry.key] = evalExpr(entry.value, env, r);
       }
-      return out;
+      return deepFreeze(out);
     }
-    case 'array': return expr.elements.map((e) => evalExpr(e, env, r));
+    case 'array': {
+      const out: unknown[] = [];
+      for (const el of expr.elements) {
+        const val = evalExpr(el.value, env, r);
+        if (el.spread) {
+          if (Array.isArray(val)) out.push(...val);
+          else r.error('ML-LANG-SPREAD', 'spread of a non-array in an array literal', expr.span);
+        } else out.push(val);
+      }
+      return deepFreeze(out);
+    }
     case 'unary': return evalUnary(expr, env, r);
     case 'binary': return evalBinary(expr, env, r);
     case 'cond': return truthy(evalExpr(expr.test, env, r)) ? evalExpr(expr.then, env, r) : evalExpr(expr.else, env, r);
@@ -272,6 +291,63 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
     r.tick();
     const n = Number(evalExpr(expr.args[0] ?? { kind: 'number', value: 0, span: expr.span }, env, r));
     return seededRange(Number.isFinite(n) ? n : 0);
+  }
+  // Pure collection builtins — intrinsic free functions that RETURN NEW frozen collections (never
+  // mutate). Unbound-head-only (a user function of the same name shadows via evalCall's callee
+  // resolution, which never reaches here). Each ticks the budget per call + per element so a large
+  // collection fails closed with ML-LANG-BUDGET. Callbacks are ordinary closures invoked as fn(x, i).
+  if (head === 'map' || head === 'filter' || head === 'reduce' || head === 'keys' || head === 'values' || head === 'entries' || head === 'fromEntries') {
+    r.tick();
+    const a = expr.args.map((x) => evalExpr(x, env, r));
+    // A callback may be EITHER an arrow (a real JS closure — typeof 'function') OR a user-declared
+    // `function` (a structured callable object, invoked via callUserFn). Normalize both to a uniform
+    // `(...xs) => unknown` invoker so a named function works as a callback, not just an arrow.
+    const asFn = (v: unknown): ((...xs: unknown[]) => unknown) | null => {
+      if (typeof v === 'function') return v as (...xs: unknown[]) => unknown;   // an arrow closure
+      if (isUserFn(v)) return (...xs: unknown[]) => callUserFn(v, xs, r);        // a user `function`
+      return null;
+    };
+    const badArg = (msg: string): unknown => { r.error('ML-LANG-BUILTIN-ARG', msg, expr.span); return deepFreeze([]); };
+
+    switch (head) {
+      case 'map': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`map(array, fn) — bad arguments`);
+        const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); out.push(fn(x, i)); }); return deepFreeze(out);
+      }
+      case 'filter': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`filter(array, fn) — bad arguments`);
+        const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); if (truthy(fn(x, i))) out.push(x); }); return deepFreeze(out);
+      }
+      case 'reduce': {
+        const xs = a[0]; const fn = asFn(a[1]); const init = a[2];
+        if (!Array.isArray(xs) || !fn) return badArg(`reduce(array, fn, init) — bad arguments`);
+        let acc = init; xs.forEach((x, i) => { r.tick(); acc = fn(acc, x, i); }); return acc;   // acc may be a scalar; a collection acc is already frozen by its own eval
+      }
+      case 'keys': {
+        const o = a[0];
+        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`keys(object) — bad argument`);
+        return deepFreeze(Object.keys(o as object));
+      }
+      case 'values': {
+        const o = a[0];
+        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`values(object) — bad argument`);
+        return deepFreeze(Object.values(o as Record<string, unknown>));
+      }
+      case 'entries': {
+        const o = a[0];
+        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`entries(object) — bad argument`);
+        return deepFreeze(Object.entries(o as Record<string, unknown>).map(([k, v]) => [k, v]));
+      }
+      case 'fromEntries': {
+        const pairs = a[0];
+        if (!Array.isArray(pairs)) return badArg(`fromEntries(array of [key, value]) — bad argument`);
+        const out: Record<string, unknown> = {};
+        for (const p of pairs) { r.tick(); if (Array.isArray(p) && typeof p[0] === 'string' && !FORBIDDEN_KEYS.has(p[0])) out[p[0]] = p[1]; }
+        return deepFreeze(out);
+      }
+    }
   }
   const args = expr.args.map((a) => evalExpr(a, env, r));
   // Wrap each evaluated value into the Arg shape. lang's evaluator does NOT populate name/reactive
@@ -438,40 +514,23 @@ function execAssign(stmt: Extract<Stmt, { kind: 'assign' }>, env: Environment, r
   }
 
   if (target.kind === 'member') {
+    // A forbidden-key write is a prototype-pollution attempt — surface the specific security diagnostic
+    // (it is blocked as immutable too, but the more-specific code is the useful one).
     if (FORBIDDEN_KEYS.has(target.property)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${target.property}'`, stmt.span); return; }
-    const container = evalExpr(target.object, env, r);
-    writeMember(container, target.property, value, stmt.span, r);
+    r.error('ML-LANG-IMMUTABLE', `cannot assign to a member of an immutable value; rebuild with spread instead (e.g. o = { ...o, ${target.property}: … })`, stmt.span);
     return;
   }
 
   if (target.kind === 'index') {
-    const container = evalExpr(target.object, env, r);
+    // Resolve the key only to catch a computed forbidden key (prototype pollution); the write itself is
+    // rejected as immutable regardless of the key.
     const key = evalExpr(target.index, env, r);
-    // COMPUTED-key guard: the parse-time guard only covers literal `.k`/`["lit"]`; guard the case
-    // where a computed key EVALUATES to a forbidden string here.
     if (typeof key === 'string' && FORBIDDEN_KEYS.has(key)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, stmt.span); return; }
-    if (typeof key !== 'string' && typeof key !== 'number') { writeMember(container, String(key), value, stmt.span, r); return; }
-    writeMember(container, key, value, stmt.span, r);
+    r.error('ML-LANG-IMMUTABLE', 'cannot assign to an index of an immutable value; rebuild with spread or a builtin (map/filter/…) instead', stmt.span);
     return;
   }
 
   r.error('ML-LANG-BAD-LVALUE', 'unsupported assignment target', stmt.span);
-}
-
-/** Guarded in-place write. On an array, only a canonical in-bounds index is written (no `.length`
- *  mutation, no sparse holes). On a plain object any non-forbidden key is set. Else fails closed. */
-function writeMember(container: unknown, key: string | number, value: unknown, span: Expr['span'], r: Runner): void {
-  if (typeof key === 'string' && FORBIDDEN_KEYS.has(key)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, span); return; }
-  if (Array.isArray(container)) {
-    let idx: number | null = null;
-    if (typeof key === 'number') idx = key;
-    else { const n = Number(key); if (String(n) === key) idx = n; }
-    if (idx !== null && Number.isInteger(idx) && idx >= 0 && idx < container.length) container[idx] = value;
-    else r.error('ML-LANG-INDEX-RANGE', `index ${String(key)} out of range`, span);
-    return;
-  }
-  if (container !== null && typeof container === 'object') { (container as Record<string, unknown>)[String(key)] = value; return; }
-  r.error('ML-LANG-ASSIGN-INDEX', 'cannot assign into a non-object/array', span);
 }
 
 // ─────────────────────────────────────────── member read + coercions ───────────────────────────────────────────
@@ -512,6 +571,16 @@ function strOf(v: unknown): string {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   try { return JSON.stringify(v) ?? ''; } catch { return ''; }
+}
+/** Deep-freeze a DSL-created collection so it is immutable by construction. Recurses into arrays +
+ *  plain objects; a function short-circuits at the first guard (typeof !== 'object'), so a handler
+ *  value stays callable. Short-circuits already-frozen values (idempotent, cycle-safe for the acyclic
+ *  values the evaluator builds). */
+function deepFreeze<T>(v: T): T {
+  if (v === null || typeof v !== 'object' || Object.isFrozen(v)) return v;
+  if (Array.isArray(v)) { for (const x of v) deepFreeze(x); return Object.freeze(v) as T; }
+  for (const val of Object.values(v as Record<string, unknown>)) deepFreeze(val);
+  return Object.freeze(v) as T;
 }
 function looseEquals(a: unknown, b: unknown): boolean {
   if (a === b) return true;
