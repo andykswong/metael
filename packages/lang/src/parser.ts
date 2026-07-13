@@ -1,5 +1,5 @@
 import { lex, type Token, type TokenType } from './lexer.ts';
-import type { Diagnostic } from './diagnostics.ts';
+import type { Diagnostic, SourceSpan } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
 import type { Expr, Stmt, BinOp, Pattern, Program, ArrayElement, ObjectEntry } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
 import { FORBIDDEN_KEYS } from './ast.ts';
@@ -14,10 +14,17 @@ export const MAX_PARSE_DEPTH = 512;
 /** Thrown internally when the nesting cap trips; caught by the public entrypoints → diagnostic. */
 class ParseDepthSignal extends Error {}
 
+// Reserved-word token types that are still legal as a `.member` property name (JS allows `x.if`,
+// `x.const`, etc.). A property after `.` must be one of these, an `ident`, or a quoted `string`.
+const KEYWORD_TOKENS: ReadonlySet<TokenType> = new Set<TokenType>([
+  'component', 'function', 'const', 'let', 'if', 'else', 'for', 'of', 'while', 'return', 'true', 'false', 'null',
+]);
+
 // Precedence tiers (low→high). Each entry: matching token types → BinOp.
 const BINARY_TIERS: Array<Partial<Record<TokenType, BinOp>>> = [
   { or: '||' }, { and: '&&' },
-  { eq: '==', neq: '!=', lt: '<', le: '<=', gt: '>', ge: '>=' },
+  { eq: '==', neq: '!=' },                                 // equality — looser than relational (JS-conformant)
+  { lt: '<', le: '<=', gt: '>', ge: '>=' },               // relational — binds tighter than == / != so `a == b > c` = `a == (b > c)`
   { plus: '+', minus: '-' }, { star: '*', slash: '/', percent: '%' },
 ];
 
@@ -25,6 +32,15 @@ export class Parser {
   protected toks: Token[];
   protected pos = 0;
   private depth = 0;
+  // Open-grouping nesting depth: >0 while parsing INSIDE a `( … )` / `[ … ]` / `{ … }` / ternary
+  // branch / arrow body — any context where a newline is NOT a statement boundary. The newline guards
+  // on postfix `(` / `[` (and the wrap rule) fire ONLY at `groupDepth === 0` (statement/block level),
+  // so a line-leading `(` / `[` still continues a postfix chain inside a grouping (`f(g(x)⏎(y))`).
+  private groupDepth = 0;
+  // Expr nodes written inside grouping parens `( … )`. A parenthesized arrow is a legitimate value
+  // (`handler || (() => x)`), so it is NOT flagged as a bare binary operand; only an un-parenthesized
+  // arrow (`1 + x => 2`) is. Tracked by identity so the AST stays clean (no `parenthesized` field).
+  private parenthesized = new WeakSet<object>();
   readonly diagnostics: Diagnostic[] = [];
   constructor(src: string) { const r = lex(src); this.toks = r.tokens; this.diagnostics.push(...r.diagnostics); }
 
@@ -38,6 +54,55 @@ export class Parser {
     if (this.peek().type === type) return this.next();
     this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', `expected ${type}, got ${this.peek().type}`, this.peek().span));
     return undefined;
+  }
+
+  /** Does a newline before `t` end the current statement? Only at STATEMENT/BLOCK level (`groupDepth
+   *  === 0`): a newline before a postfix `(` / `[` there starts a fresh statement. Inside an open
+   *  `( … )` / `[ … ]` / ternary branch / arrow body there is no statement boundary, so a leading
+   *  newline never breaks — a postfix chain (e.g. a curried call `f(g(x)⏎(y))`) continues. */
+  private newlineBreaks(t: Token): boolean { return t.newlineBefore && this.groupDepth === 0; }
+
+  /** Emit ONE named diagnostic for an unsupported-but-natural-JS construct at STATEMENT level, then
+   *  skip forward to the next statement boundary so the rest of the source still parses cleanly —
+   *  instead of letting a later `eat()` mismatch cascade into a pile of misleading diagnostics +
+   *  phantom statements. "Boundary" = a `;` (consumed), a statement-boundary newline, a `}` that would
+   *  close the enclosing block (not consumed), or `eof`. Any `([{` opened while skipping is balanced so
+   *  we don't stop on a nested delimiter. Fails closed: bounded by eof, so it always terminates. */
+  private recoverToStatementBoundary(message: string, span: SourceSpan): void {
+    this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', message, span));
+    let depth = 0;
+    for (;;) {
+      const t = this.peek();
+      if (t.type === 'eof') return;
+      if (depth === 0) {
+        if (t.type === 'semi') { this.next(); return; }               // consume the terminator
+        if (t.type === 'rbrace') return;                              // let the enclosing block close it
+        if (t.newlineBefore) return;                                  // a statement-boundary newline
+      }
+      if (t.type === 'lparen' || t.type === 'lbracket' || t.type === 'lbrace') depth++;
+      else if (t.type === 'rparen' || t.type === 'rbracket' || t.type === 'rbrace') { if (depth > 0) depth--; }
+      this.next();
+    }
+  }
+
+  /** Emit ONE named diagnostic for a malformed construct that occurs INSIDE an already-open grouping
+   *  (a call-arg list, an `if`/`while` condition), then skip to — but do NOT consume — that grouping's
+   *  matching close delimiter, so the caller's normal `eat(')')` closes it and parsing continues past
+   *  the whole grouping. Balances any nested `([{` opened while skipping; stops at our grouping's close,
+   *  or `eof`. Fails closed: bounded by eof. */
+  private skipMalformedToGroupClose(message: string, span: SourceSpan): void {
+    this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', message, span));
+    let depth = 0;   // counts groupings opened AFTER this point; a close at depth 0 is OUR grouping's close
+    for (;;) {
+      const t = this.peek();
+      if (t.type === 'eof') return;
+      if (t.type === 'lparen' || t.type === 'lbracket' || t.type === 'lbrace') { depth++; this.next(); continue; }
+      if (t.type === 'rparen' || t.type === 'rbracket' || t.type === 'rbrace') {
+        if (depth === 0) return;   // our grouping's close — leave it for the caller
+        depth--; this.next(); continue;
+      }
+      this.next();
+    }
   }
 
   parseExpression(): Expr {
@@ -57,9 +122,16 @@ export class Parser {
     const test = this.parseBinary(0);
     if (this.peek().type !== 'question') return test;
     const span = this.peek().span; this.next();
+    // The THEN branch is bounded by the mandatory `:`, so a newline in it is not a statement boundary —
+    // raise groupDepth across it. The ELSE branch has NO closing delimiter: at statement level it IS the
+    // statement tail, so it must inherit the caller's groupDepth (0 → the postfix `(`/`[` guard still
+    // fires, starting a fresh statement; >0 inside a real grouping → still chains). Hence decrement
+    // BEFORE parsing `els`, not after — raising across the else would reopen the leading-paren footgun.
+    this.groupDepth++;
     const then = this.parseExpression();   // middle is a full expression
     this.eat('colon');
-    const els = this.parseExpression();     // right-assoc: recurse for chained ternaries
+    this.groupDepth--;
+    const els = this.parseExpression();     // right-assoc: recurse for chained ternaries; inherits caller depth
     return { kind: 'cond', test, then, else: els, span };
   }
 
@@ -71,6 +143,10 @@ export class Parser {
       if (!op) return left;
       const span = this.peek().span; this.next();
       const right = this.parseBinary(tier + 1);
+      // A BARE arrow as a binary operand (`1 + x => 2`) is invalid — JS forbids it, and here it would
+      // silently absorb the right side as `1 + (x => 2)`. Flag it. A PARENTHESIZED arrow (`1 + (x => 2)`,
+      // the idiomatic default-callback `handler || (() => x)`) is a legitimate value — never flagged.
+      if (right.kind === 'arrow' && !this.parenthesized.has(right)) this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', 'an arrow function cannot be an operand of a binary operator; wrap it in parentheses', right.span));
       left = { kind: 'binary', op, left, right, span };
     }
   }
@@ -90,18 +166,35 @@ export class Parser {
       const t = this.peek();
       if (t.type === 'dot') {
         this.next(); const name = this.next();
+        // The property must be a NAME-like token: an identifier, a keyword (JS allows `x.if`), or a
+        // quoted string (the printer's round-trip form `a."x-y"`). A number/operator/punctuation after
+        // `.` is a fail-loud parse error, not a silent bogus member (`obj.5`, `obj.` → ML-LANG-PARSE).
+        const nameLike = name.type === 'ident' || name.type === 'string' || KEYWORD_TOKENS.has(name.type);
+        if (!nameLike) this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', `expected property name after '.', got ${name.type}`, name.span));
         if (FORBIDDEN_KEYS.has(name.value)) this.diagnostics.push(makeDiagnostic('ML-LANG-FORBIDDEN', `forbidden property '${name.value}'`, name.span));
         e = { kind: 'member', object: e, property: name.value, span: t.span };
-      } else if (t.type === 'lbracket') {
-        this.next(); const index = this.parseExpression(); this.eat('rbracket');
+      } else if (t.type === 'lbracket' && !this.newlineBreaks(t)) {
+        // The newline guard mirrors the wrap guards at parseWrappable: at STATEMENT level a `[` opening
+        // the NEXT line is a fresh array-literal statement, not an index of the previous value (without
+        // it, `let xs = base⏎[0, 1]` silently mis-parses as `base[0]` + an error cascade). Inside an open
+        // grouping (groupDepth>0) there is no statement boundary, so the guard is suspended and the `[`
+        // still indexes (`render(⏎items⏎[0]⏎)`).
+        this.next(); this.groupDepth++; const index = this.parseExpression(); this.groupDepth--; this.eat('rbracket');
         e = { kind: 'index', object: e, index, span: t.span };
-      } else if (t.type === 'lparen') {
-        this.next(); const args: Expr[] = [];
+      } else if (t.type === 'lparen' && !this.newlineBreaks(t)) {
+        // Same rationale as the `[` branch: at statement level a `(` opening the NEXT line is a fresh
+        // parenthesized statement (the classic leading-paren hazard — `let s = pow(a,b)⏎(c+d)*e` must be
+        // two statements, and an implicit-last-expression return must not be silently swallowed); inside
+        // an open grouping the guard is suspended so a curried call still chains (`f(g(x)⏎(y))`).
+        this.next(); this.groupDepth++; const args: Expr[] = [];
         while (this.peek().type !== 'rparen' && this.peek().type !== 'eof') {
+          // Call-argument spread (`f(...args)`) is not supported (spread is literals-only). Emit ONE
+          // named diagnostic + skip to the call's `)` rather than letting `...` derail parsePrimary.
+          if (this.peek().type === 'ellipsis') { this.skipMalformedToGroupClose('spread is not allowed in a call argument (spread is limited to array/object literals)', this.peek().span); break; }
           args.push(this.parseExpression());
           if (this.peek().type === 'comma') this.next(); else break;
         }
-        this.eat('rparen');
+        this.groupDepth--; this.eat('rparen');
         e = { kind: 'call', callee: e, args, span: t.span };
         // NOTE: a trailing `{}` child block or single trailing statement is attached by parseWrappable.
       } else return e;
@@ -160,7 +253,9 @@ export class Parser {
       return { kind: 'arrow', params: names.map((n) => ({ kind: 'name', name: n })), body: this.parseArrowBody(), span: start };
     }
     this.pos = save;
-    const e = this.parseExpression(); this.eat('rparen'); return e;
+    this.groupDepth++; const e = this.parseExpression(); this.groupDepth--; this.eat('rparen');
+    this.parenthesized.add(e);   // mark as grouped so a parenthesized arrow is a legit operand/value
+    return e;
   }
 
   /** Arrow body after `=>` (`Arrow ::= … "=>" (Expr | Block)`). JS-identical rule: a leading `{`
@@ -169,17 +264,38 @@ export class Parser {
    *  token is a single expression body. */
   private parseArrowBody(): Expr | Stmt[] {
     if (this.peek().type === 'lbrace') return this.parseBlock();
-    return this.parseExpression();
+    const body = this.parseExpression();
+    // Assignment is a STATEMENT, not an expression — so an expression-bodied arrow whose body is
+    // followed by `=` (`() => count = count + 1`) is a mistake. Emit ONE targeted diagnostic pointing
+    // at the block-body form, and consume the `= …` RHS so it does not derail the caller.
+    if (this.peek().type === 'assign') {
+      this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', 'assignment is a statement; use a block body for a state-mutating arrow: () => { x = v }', this.peek().span));
+      // Discard the whole assignment tail (incl. a chain `a = b = c`) so no stray `= …` leaks out as
+      // phantom statements — one diagnostic, clean recovery.
+      while (this.peek().type === 'assign') { this.next(); this.parseExpression(); }
+    }
+    return body;
   }
 
   private parseObject(): Expr {
-    const start = this.peek().span; this.next(); // {
+    const start = this.peek().span; this.next(); this.groupDepth++; // {  (a literal body is not a statement boundary)
     const entries: ObjectEntry[] = [];
     while (this.peek().type !== 'rbrace' && this.peek().type !== 'eof') {
       if (this.peek().type === 'ellipsis') {
         this.next();
         entries.push({ key: '', value: this.parseExpression(), spread: true });
       } else {
+        // An entry must be `key : value` — key = ident, quoted string, OR a keyword used as a name
+        // (`{ if: 1 }`, `{ true: 2 }`; JS-familiar, and the printer emits keyword keys bare, so this
+        // must round-trip). If the key is not name-like or is not followed by `:`, this is not a valid
+        // object literal — emit ONE diagnostic + skip to the closing `}` rather than flailing per-token
+        // into a cascade (e.g. a stray `{ compute() }` after a call). One clear message, clean recovery.
+        const keyTok = this.peek();
+        const keyIsName = keyTok.type === 'ident' || keyTok.type === 'string' || KEYWORD_TOKENS.has(keyTok.type);
+        if (!keyIsName || this.toks[this.pos + 1]?.type !== 'colon') {
+          this.skipMalformedToGroupClose('malformed object literal — an entry must be `key: value` (a bare block/wrap is not valid in value position)', keyTok.span);
+          break;
+        }
         const key = this.next().value;
         if (FORBIDDEN_KEYS.has(key)) this.diagnostics.push(makeDiagnostic('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, this.peek().span));
         this.eat('colon');
@@ -187,12 +303,12 @@ export class Parser {
       }
       if (this.peek().type === 'comma') this.next(); else break;
     }
-    this.eat('rbrace');
+    this.groupDepth--; this.eat('rbrace');
     return { kind: 'object', entries, span: start };
   }
 
   private parseArray(): Expr {
-    const start = this.peek().span; this.next(); // [
+    const start = this.peek().span; this.next(); this.groupDepth++; // [  (a literal body is not a statement boundary)
     const elements: ArrayElement[] = [];
     while (this.peek().type !== 'rbracket' && this.peek().type !== 'eof') {
       const spread = this.peek().type === 'ellipsis';
@@ -200,7 +316,7 @@ export class Parser {
       elements.push({ value: this.parseExpression(), spread });
       if (this.peek().type === 'comma') this.next(); else break;
     }
-    this.eat('rbracket');
+    this.groupDepth--; this.eat('rbracket');
     return { kind: 'array', elements, span: start };
   }
 
@@ -213,8 +329,12 @@ export class Parser {
       if (s) {
         if ((s.kind === 'const' || s.kind === 'let' || s.kind === 'function' || s.kind === 'component')) {
           const name = (s as { name: string }).name;
-          if (declared.has(name)) this.diagnostics.push(makeDiagnostic('ML-LANG-REDECL', `'${name}' already declared in this scope`, s.span));
-          declared.add(name);
+          // An empty name is a recovery placeholder (e.g. destructuring-in-declaration recovery), never a
+          // real binding — skip it so two recovered decls don't spuriously report `'' already declared`.
+          if (name) {
+            if (declared.has(name)) this.diagnostics.push(makeDiagnostic('ML-LANG-REDECL', `'${name}' already declared in this scope`, s.span));
+            declared.add(name);
+          }
         }
         stmts.push(s);
       } else break;
@@ -224,12 +344,32 @@ export class Parser {
 
   private parseBlock(): Stmt[] {
     this.eat('lbrace');
+    // A block body is a STATEMENT context even when nested inside a grouping (an arrow/function body
+    // passed as a call arg, e.g. `map(xs, (x) => { let a = f(x)⏎(y) })`). Reset groupDepth to 0 for the
+    // block's statements so the newline guard fires again inside it, then restore on exit.
+    const saved = this.groupDepth; this.groupDepth = 0;
     const stmts: Stmt[] = [];
     while (this.peek().type !== 'rbrace' && this.peek().type !== 'eof') {
       const s = this.parseStatement(); if (s) stmts.push(s); else break;
     }
-    this.eat('rbrace');
+    this.groupDepth = saved; this.eat('rbrace');
     return stmts;
+  }
+
+  /** The `( … )` condition head of `if` / `while`. The parens are a grouping (no statement boundary
+   *  inside), so raise groupDepth around the test. If the test is immediately followed by `=`, the
+   *  author wrote an assignment in a condition (`if (a = b)`) — unsupported (assignment is a statement,
+   *  and `==` was almost certainly meant); emit ONE named diagnostic + recover past the `= …)` tail. */
+  private parseParenCondition(): Expr {
+    this.eat('lparen');
+    this.groupDepth++;
+    const test = this.parseExpression();
+    if (this.peek().type === 'assign') {
+      // `if (a = b)` — assignment in a condition (unsupported; `==` was almost certainly meant).
+      this.skipMalformedToGroupClose('assignment is not allowed in a condition (did you mean `==`?)', this.peek().span);
+    }
+    this.groupDepth--; this.eat('rparen');
+    return test;
   }
 
   /** A control-flow body (`Body ::= Block | Stmt`): a braced block, OR a single brace-less
@@ -265,8 +405,22 @@ export class Parser {
     const t = this.peek();
     switch (t.type) {
       case 'const': case 'let': {
-        this.next(); const name = this.eat('ident')?.value ?? ''; this.eat('assign');
-        const init = this.parseExpression(); if (this.peek().type === 'semi') this.next();
+        this.next();
+        // Destructuring in a declaration (`const { a } = props` / `const [x] = xs`) is not supported.
+        // Detect the pattern-opening `{`/`[` before eating the name and emit ONE named diagnostic +
+        // recover, rather than letting `eat('ident')` mismatch cascade through the whole pattern.
+        if (this.peek().type === 'lbrace' || this.peek().type === 'lbracket') {
+          this.recoverToStatementBoundary('destructuring in a declaration is not supported; bind a name and read fields (e.g. `const p = props`)', t.span);
+          return { kind: t.type, name: '', init: { kind: 'null', span: t.span }, span: t.span };
+        }
+        const name = this.eat('ident')?.value ?? '';
+        this.eat('assign');
+        const init = this.parseWrappable();   // RHS may be a wrapping element (`const root = group { … }`)
+        // Multi-declarator (`const a = 1, b = 2`) is not supported: emit ONE named diagnostic + recover
+        // to the statement boundary, rather than letting the stray `, b = 2` fall through as phantom
+        // statements (the eat()-cascade this replaces).
+        if (this.peek().type === 'comma') this.recoverToStatementBoundary('multiple declarators in one statement are not supported; use one `const`/`let` per line', t.span);
+        else if (this.peek().type === 'semi') this.next();
         return { kind: t.type, name, init, span: t.span };
       }
       case 'function': case 'component': {
@@ -274,7 +428,7 @@ export class Parser {
         return { kind: t.type, name, params, body, span: t.span };   // token type === Stmt kind for both
       }
       case 'if': {
-        this.next(); this.eat('lparen'); const test = this.parseExpression(); this.eat('rparen');
+        this.next(); const test = this.parseParenCondition();
         const then = this.parseBody();   // Body ::= Block | Stmt
         let elseBody: Stmt[] | undefined;
         if (this.peek().type === 'else') { this.next(); elseBody = this.peek().type === 'if' ? [this.parseStatement()!] : this.parseBody(); }
@@ -282,11 +436,11 @@ export class Parser {
       }
       case 'for': {
         this.next(); this.eat('lparen'); this.eat('const'); const binding = this.eat('ident')?.value ?? ''; this.eat('of');
-        const iterable = this.parseExpression(); this.eat('rparen'); const body = this.parseBody();   // brace-less single stmt OK
+        this.groupDepth++; const iterable = this.parseExpression(); this.groupDepth--; this.eat('rparen'); const body = this.parseBody();   // brace-less single stmt OK
         return { kind: 'for', binding, iterable, body, span: t.span };
       }
       case 'while': {
-        this.next(); this.eat('lparen'); const test = this.parseExpression(); this.eat('rparen'); const body = this.parseBody();
+        this.next(); const test = this.parseParenCondition(); const body = this.parseBody();
         return { kind: 'while', test, body, span: t.span };
       }
       case 'return': {
@@ -294,14 +448,22 @@ export class Parser {
         // an expression. Only parse a return value when a real expression token follows.
         this.next();
         const tt = this.peek().type;
-        const value = (tt === 'semi' || tt === 'rbrace' || tt === 'eof') ? undefined : this.parseExpression();
+        const value = (tt === 'semi' || tt === 'rbrace' || tt === 'eof') ? undefined : this.parseWrappable();   // return value may be a wrapping element
         if (this.peek().type === 'semi') this.next();
         return { kind: 'return', value, span: t.span };
       }
       case 'ident': {
         // expression / assignment / wrapping element (no root-block production — the root is an entry component)
         const expr = this.parseWrappable();
-        if (this.peek().type === 'assign') { this.next(); const value = this.parseExpression(); if (this.peek().type === 'semi') this.next(); return { kind: 'assign', target: expr, value, span: t.span }; }
+        if (this.peek().type === 'assign') {
+          // An assignment TARGET must be an lvalue (ident / member / index). Rejecting a non-lvalue
+          // LHS at parse time catches the common `==` mistyped as `=` (`ready == loaded = true`) and
+          // `f() = 1`, which would otherwise build a valid-looking assign node and only fail at eval.
+          if (expr.kind !== 'ident' && expr.kind !== 'member' && expr.kind !== 'index') {
+            this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', `invalid assignment target (${expr.kind})`, expr.span));
+          }
+          this.next(); const value = this.parseWrappable(); if (this.peek().type === 'semi') this.next(); return { kind: 'assign', target: expr, value, span: t.span };   // RHS may be a wrapping element (`root = group { … }`)
+        }
         if (this.peek().type === 'semi') this.next();
         return { kind: 'expr', expr, span: t.span };
       }
@@ -311,26 +473,32 @@ export class Parser {
     }
   }
 
-  /** A call expression optionally followed by a `{}` child block OR a single trailing statement
-   *  (the uniform wrapping rule). Attaches `block` to the outermost call node.
-   *  GUARD: the brace-less single-trailing-statement wrap fires ONLY when the next token is on
-   *  the SAME logical line (no newline, no `;`). A newline/`;` between `)` and the next call makes
-   *  them siblings — otherwise `KPI(a)⏎KPI(b)` would mis-nest b inside a. A `{` block always wraps. */
+  /** Parse an expression that may be a WRAPPING ELEMENT — a head applied to children via either a
+   *  `{ … }` child block or a single same-line trailing statement. Attaches `block` to the head call
+   *  node. Used in every position a wrap is legal: statement position AND a value RHS (const/let/return/
+   *  assign) so `const root = group { … }` wraps identically to a statement-level `group { … }`.
+   *
+   *  The exact rules (all SAME-LINE only — a newline before the `{`/child is a statement boundary,
+   *  consistent across every wrap form so identical-looking lines never nest differently by whitespace):
+   *   1. `ident { … }`      — a bare identifier + a SAME-LINE `{` is a zero-arg wrapping call
+   *                           (`group { … }` ≡ `group() { … }`). A NEXT-line `{` → two statements.
+   *   2. `call() { … }`     — a `{` block on the SAME line as the `)` wraps. A NEXT-line `{` does NOT
+   *                           wrap (it starts a fresh statement — no silent cross-newline swallow).
+   *   3. `call() child()`   — a single same-line trailing statement wraps (`transform(…) shape(…)`).
+   *                           A newline/`;` makes them siblings (else `KPI(a)⏎KPI(b)` would mis-nest).
+   *  A non-ident, non-call head (a member/index like `ui.panel`) does NOT wrap — only a bare ident or
+   *  a call head is a wrapping head; `ui.panel { … }` is a member expr then a separate `{ … }`. */
   private parseWrappable(): Expr {
     let e = this.parseExpression();
-    // Wrap shorthand: a bare identifier immediately followed by a SAME-LINE `{` is a zero-arg wrapping
-    // call (`group { … }` ≡ `group() { … }`). Synthesize the call node so the block attaches uniformly.
-    // The `!newlineBefore` guard is REQUIRED here (and only here): a `group` ident followed by a
-    // NEXT-line `{` parses as two clean statements (a `group` ident expr, then an object-literal expr);
-    // without the guard the shorthand would wrongly merge them. Only a SAME-LINE `{` after a bare ident is a wrap.
+    // Rule 1 — bare-ident + same-line `{` → synthesized zero-arg wrapping call.
     if (e.kind === 'ident' && this.peek().type === 'lbrace' && !this.peek().newlineBefore) {
       e = { kind: 'call', callee: e, args: [], span: e.span };
     }
-    // The existing call-block attach is UNCHANGED: a `{` block after a CALL always wraps, including on
-    // the next line (`box()⏎{ … }` wraps — a `call` callee already disambiguates it from a standalone
-    // object literal, so no newline guard is needed or wanted on this line).
+    // Rules 2 & 3 — a call head wraps a SAME-LINE `{` block or a single same-line trailing statement.
+    // The `!newlineBefore` guard now applies to the `{` branch too (rule 2): a next-line `{` after a
+    // call is a fresh statement, matching the bare-ident rule — no silent cross-newline block swallow.
     if (e.kind === 'call') {
-      if (this.peek().type === 'lbrace') { e.block = this.parseBlock(); }
+      if (this.peek().type === 'lbrace' && !this.peek().newlineBefore) { e.block = this.parseBlock(); }
       else if (this.startsStatement() && !this.peek().newlineBefore) { e.block = [this.parseStatement()!]; }
     }
     return e;

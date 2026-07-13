@@ -42,11 +42,24 @@ export function lex(src: string): LexResult {
     if (isIdStart(c)) {
       while (i < src.length && isId(src[i]!)) i++;
       const word = src.slice(start, i);
-      push(KEYWORDS[word] ?? 'ident', word, start);
+      // `Object.hasOwn`, not `KEYWORDS[word] ?? 'ident'`: a plain-object lookup resolves inherited
+      // members (`toString`/`valueOf`/`constructor`/…) to native functions via the prototype chain,
+      // so those very common identifier names would otherwise lex to a bogus function-valued type.
+      push(Object.hasOwn(KEYWORDS, word) ? KEYWORDS[word]! : 'ident', word, start);
       continue;
     }
     if (/[0-9]/.test(c)) {
-      while (i < src.length && /[0-9.]/.test(src[i]!)) i++;
+      // Numbers are `[0-9][0-9.]*` with AT MOST one `.`; a second dot or an identifier-start char
+      // immediately abutting the digits is malformed (`1.2.3`, `0xFF`, `1e3`, `1_000`, `10n`). Emit a
+      // fail-loud ML-LANG-LEX rather than silently producing NaN (multi-dot) or splitting into a bare
+      // number + an orphan identifier (adjacency). We consume the whole run so recovery resumes cleanly.
+      let dots = 0;
+      while (i < src.length && /[0-9.]/.test(src[i]!)) { if (src[i] === '.') dots++; i++; }
+      const adjacentId = i < src.length && isIdStart(src[i]!);
+      while (i < src.length && isId(src[i]!)) i++;   // absorb the abutting identifier chars into the bad token
+      if (dots > 1 || adjacentId) {
+        diagnostics.push(makeDiagnostic('ML-LANG-LEX', `malformed number '${src.slice(start, i)}'`, { start, end: i }));
+      }
       push('number', src.slice(start, i), start);
       continue;
     }

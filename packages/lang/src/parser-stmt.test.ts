@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- narrowed-Stmt access in test scaffolding */
 import { describe, it, expect } from 'vitest';
 import { parseProgram } from './parser.ts';
-import type { Stmt } from './ast.ts';
+import type { Stmt, Expr } from './ast.ts';
 
 const prog = (src: string) => parseProgram(src).program.stmts;
 
@@ -119,8 +119,19 @@ describe('wrap shorthand: head { } (bare ident, no parens)', () => {
     expect((body[0] as Extract<Stmt, { kind: 'expr' }>).expr.kind).toBe('ident');    // `group` — NOT a call
     expect((body[1] as Extract<Stmt, { kind: 'expr' }>).expr.kind).toBe('object');   // `{ a: 1 }` — an object literal
   });
-  it('a CALL then a next-line `{` still wraps (unchanged — a call callee disambiguates)', () => {
-    const { diagnostics } = parseProgram('component Story() { box()\n{ text("x") } }');
-    expect(diagnostics).toEqual([]);   // box()⏎{…} wraps (shipped behavior preserved)
+  it('a CALL then a NEXT-LINE `{` does NOT wrap (newline guard — matches the bare-ident rule)', () => {
+    // The `{`-after-call wrap is same-line only, consistent with the bare-ident rule above: a newline
+    // between `)` and `{` is a statement boundary, so `render()⏎{ … }` no longer silently swallows the
+    // block. `box()` becomes a childless call; the next-line `{ … }` starts a fresh statement.
+    const body = (parseProgram('component Story() {\n  box()\n  { compute() }\n}').program.stmts[0] as Extract<Stmt, { kind: 'component' }>).body;
+    const boxCall = (body[0] as Extract<Stmt, { kind: 'expr' }>).expr as Extract<Expr, { kind: 'call' }>;
+    expect(boxCall).toMatchObject({ kind: 'call', callee: { name: 'box' } });
+    expect(boxCall.block).toBeUndefined();          // no cross-newline swallow
+    expect(body.length).toBeGreaterThanOrEqual(2);  // the `{ … }` is a separate statement, not box's child
+  });
+  it('a CALL then a SAME-LINE `{` still wraps (`box() { text("x") }`)', () => {
+    const body = (parseProgram('component Story() { box() { text("x") } }').program.stmts[0] as Extract<Stmt, { kind: 'component' }>).body;
+    const boxCall = (body[0] as Extract<Stmt, { kind: 'expr' }>).expr as Extract<Expr, { kind: 'call' }>;
+    expect(boxCall.block).toHaveLength(1);
   });
 });
