@@ -36,6 +36,21 @@ describe('lowerEntry — entry component + child collection', () => {
     expect(textKeys).toEqual(['Story#0/text[x]', 'Story#0/text[y]']);
   });
 
+  it('a for-of over a STRING iterates characters in child position (consistent with statement-position for-of)', () => {
+    const env = new RecordingHostEnv();
+    const src = `component Story() { for (const c of "abc") { text(c) } }`;
+    const { diagnostics } = lowerEntry(src, { host: new PlainStorageHost(), env, minter: new PathKeyMinter() });
+    expect(diagnostics.some((d) => d.code === 'ML-LANG-FOR-ITER')).toBe(false);   // string is iterable here too
+    const textCalls = env.calls.filter((c) => c.head === 'text');
+    expect(textCalls.length).toBe(3);   // one child per character
+  });
+
+  it('a for-of over a non-array, non-string in child position still errors', () => {
+    const env = new RecordingHostEnv();
+    const { diagnostics } = lowerEntry(`component Story() { for (const x of 5) { text(x) } }`, { host: new PlainStorageHost(), env, minter: new PathKeyMinter() });
+    expect(diagnostics.some((d) => d.code === 'ML-LANG-FOR-ITER')).toBe(true);
+  });
+
   it('a declined head becomes an unknown-wrapper carrying Arg[] (name/reactive preserved)', () => {
     // Decline every head: the entry (Story) is also offered to resolveCall, so to keep the ROOT a
     // wrapper (isWrapper(root) below) the host must decline Story too — not just sankey.

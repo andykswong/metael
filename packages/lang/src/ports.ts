@@ -57,13 +57,17 @@ export interface Arg {
  *  `Region` (reactive); a host that wants live reactivity registers a leaf effect per Region, while
  *  `RecordingHostEnv` just reads `region.run()` once. */
 export interface HostEnvironment {
+  // A resolved result defaults to a NODE (kind absent): an opaque domain value, valid only in child
+  // position — a non-array object in expression position is rejected. A host may instead return
+  // `kind: 'value'` to declare a PURE scalar/array/record VALUE: it is deep-frozen and allowed in
+  // expression position. A `kind:'value'` result MUST be pure + deterministic (no live/mutable node).
   resolveCall(
     head: string,
     key: string,
     args: Arg[],
     children: HostValue[],
     span: SourceSpan,
-  ): { handled: true; value: HostValue } | { handled: false };
+  ): { handled: true; value: HostValue; kind?: 'value' } | { handled: false };
   // The set of heads this host builds — lang uses it for a did-you-mean on an unknown head.
   // OPTIONAL so test doubles + non-diagnosing hosts still satisfy the contract.
   knownHeads?: ReadonlySet<string>;

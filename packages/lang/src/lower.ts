@@ -162,8 +162,14 @@ function collectStmt(stmt: Stmt, env: Environment, ctx: KeyContext, r: Runner, o
       collectValue(lowerExprToChildren(stmt.expr, env, ctx, r, opts, undefined), out);
       return;
     case 'for': {
-      const iter = evalExpr(stmt.iterable, env, r);
-      if (!Array.isArray(iter)) { r.error('ML-LANG-FOR-ITER', 'for-of expects an array to iterate', stmt.span); return; }
+      const iterValue = evalExpr(stmt.iterable, env, r);
+      // Arrays iterate elements; strings iterate Unicode code points (Array.from — matching the
+      // statement-position for-of + chars()/split("")). NOTE: this differs from string indexing s[i]
+      // and .length (UTF-16 code units) for astral characters. Any other value is not iterable.
+      let iter: unknown[];
+      if (Array.isArray(iterValue)) iter = iterValue;
+      else if (typeof iterValue === 'string') iter = Array.from(iterValue);
+      else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return; }
       iter.forEach((item, ordinal) => {
         r.tick();
         const loopEnv = new Environment(env);

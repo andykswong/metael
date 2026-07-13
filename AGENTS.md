@@ -50,21 +50,25 @@ packages/
                                @metael/runtime (enforced by an automated import-boundary test).
 ```
 
-Planned (design-only, not built): landing + playground apps (both dogfooded on `@metael/vdom`).
+The **showcase apps** (`apps/site/` — a landing + a multi-target playground, dogfooded on `@metael/vdom`) are also built + green; they add no package source.
 
 `@metael/lang` source layout (`packages/lang/src/`), bottom-up dependency order:
 
 ```
-diagnostics.ts   SourceSpan, Diagnostic, makeDiagnostic (dependency-graph root; zero imports)
-ast.ts           Expr/Stmt/Program/Pattern/BinOp discriminated unions + ArrayElement/ObjectEntry (spread-carrying) + FORBIDDEN_KEYS
-determinism.ts   makeSeededRng (mulberry32) + range + MAX_RANGE (pure seeded-PRNG primitive)
-environment.ts   Environment — Map-based chained lexical scope + BindingMeta
-ports.ts         the 3 host-injection port INTERFACES + Region/LangWrapper/Arg/Scope + 3 test doubles + didYouMean
-lexer.ts         lex() → tokens (ML-LANG-LEX diagnostics); the `ellipsis` (...) token for spread
-parser.ts        recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE); spread in literals + the head{} wrap shorthand
-evaluate.ts      evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range + the pure collection builtins + deep-freeze immutability
-lower.ts         the generic child-collection walk (lowerEntry): entry-component instantiation → child collection → resolveCall/key-minting/Region+Wrapper emission
-index.ts         the public barrel (exports the generic lowerEntry; excludes any domain-specific lowering)
+diagnostics.ts        SourceSpan, Diagnostic, makeDiagnostic (dependency-graph root; zero imports)
+ast.ts                Expr/Stmt/Program/Pattern/BinOp discriminated unions + ArrayElement/ObjectEntry (spread-carrying) + FORBIDDEN_KEYS
+determinism.ts        makeSeededRng (mulberry32) + range + MAX_RANGE (pure seeded-PRNG primitive)
+environment.ts        Environment — Map-based chained lexical scope + BindingMeta
+ports.ts              the 3 host-injection port INTERFACES + Region/LangWrapper/Arg/Scope + 3 test doubles + didYouMean
+builtins-registry.ts  BUILTINS catalog (name → {profile, portability, takesClosure, arity, future?}) + isBuiltin + IMPLEMENTED_BUILTINS
+classify.ts           classifyProfile(fn) → {core, reasons}: a pure static core-compliance check over the registry
+sort.ts               defaultCompare (total type-ranked order, NaN pinned) + stableSort (non-mutating merge sort) — the `sort` builtin's engine
+lexer.ts              lex() → tokens (ML-LANG-LEX diagnostics); the `ellipsis` (...) token for spread
+parser.ts             recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE); spread in literals + the head{} wrap shorthand
+evaluate.ts           evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range + the pure builtin set (collection/query/ordering/string/numeric) + deep-freeze immutability + string for-of
+lower.ts              the generic child-collection walk (lowerEntry): entry-component instantiation → child collection → resolveCall/key-minting/Region+Wrapper emission
+index.ts              the public barrel (exports the generic lowerEntry + the registry/classifier; excludes any domain-specific lowering)
+sandbox.test.ts       the standing sandbox-escape adversarial gate (P0)
 ```
 
 `@metael/runtime` source layout (`packages/runtime/src/`), bottom-up dependency order:
@@ -98,12 +102,13 @@ npm install                 # install workspace devDeps (TS 6, vite 8, vitest 4,
 npm run typecheck           # tsc --noEmit (root) + every package's typecheck (--ws)
 npm run lint                # eslint (root + packages)
 npm run build:packages      # build @metael/* packages → dist/ (.js + .d.ts, preserveModules)
-npm test                    # vitest run (node project)
-npx vitest run packages/lang      # the @metael/lang suite specifically
-npx vitest run packages/runtime   # the @metael/runtime suite specifically
+npm test                    # vitest run — node + Playwright/Chromium browser projects
+npx vitest run --project node       # the pure-logic node suite only
+npx vitest run --project browser    # the @metael/vdom real-DOM proofs only (Chromium)
+npx vitest run packages/lang        # the @metael/lang suite specifically
 ```
 
-Test runner is **Vitest** (node project only — neither package has a browser surface). Both packages are pure logic and **fully CPU-unit-tested** (no GPU/visual path). The test suite is the conformance bar; keep it green and add a test with any logic change.
+Test runner is **Vitest** across two projects: a **`node`** project (pure-logic unit tests for `@metael/{lang,runtime}` and most of `@metael/vdom`) and a Playwright/Chromium **`browser`** project (`@metael/vdom`'s `*.browser.test.ts` real-DOM proofs — a node survives a reorder, focus/selection persist, event delegation fires, unsafe URLs are dropped, a removed subtree is torn down). `@metael/lang` and `@metael/runtime` are pure logic with no browser surface. The test suite is the conformance bar; keep it green and add a test with any logic change.
 
 ## Key Conventions
 
@@ -111,9 +116,10 @@ Test runner is **Vitest** (node project only — neither package has a browser s
 - **Dependency discipline per package.** `@metael/lang` is a pure, self-contained kernel with **zero runtime dependencies** — do not add one (a signal library like `@vue/reactivity` is a `@metael/runtime` concern, not `lang`). `@metael/runtime` may import **only** `@metael/lang` + `@vue/reactivity` — nothing domain-specific, no other package.
 - **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). A `safety.test.ts` source-scan asserts this; do not defeat it.
 - **Vocabulary-agnostic core.** The grammar/reactivity/composition/registry hardcode **no** concrete heads. A domain's vocabulary change needs **zero** grammar/AST change. Do not add domain keywords — vocabulary is identifiers resolved through `HostEnvironment.resolveCall`.
-- **Immutable collections.** DSL-created arrays/objects (literals + builtin results) are **deep-frozen** at eval — immutable by construction. A member/index write (`o.a = 2`, `a[0] = 9`) is a fail-loud `ML-LANG-IMMUTABLE`; the update path is reassignment + spread/builtins. An **identifier**-LHS assign (a reactive `let` write / `ML-LANG-CONST`) is unaffected — only member/index LHS writes are rejected (a computed forbidden key still surfaces `ML-LANG-FORBIDDEN`). Injected `data` is bound as-is (not frozen) but the write path is blocked for every value, so the DSL cannot mutate it. Do not reintroduce an in-place member/index write.
+- **Immutable collections.** DSL-created arrays/objects (literals + builtin results) are **deep-frozen** at eval — immutable by construction. A member/index write (`o.a = 2`, `a[0] = 9`) is a fail-loud `ML-LANG-IMMUTABLE`; the update path is reassignment + spread/builtins. An **identifier**-LHS assign (a reactive `let` write / `ML-LANG-CONST`) is unaffected — only member/index LHS writes are rejected (a computed forbidden key still surfaces `ML-LANG-FORBIDDEN`). **Injected `data` is deep-frozen at the boundary** (a shallow walk, not a copy) so a builtin result aliasing `data`'s own objects never silently freezes a live host object — do not revert to binding it un-frozen, and do not reintroduce an in-place member/index write.
 - **Spread is supported in literals** (`[...a, x]`, `{ ...o, k: v }`) via the `ellipsis` token — array + object literals only, not call args. A spread of a non-array/non-object is a fail-loud `ML-LANG-SPREAD` + a safe skip.
-- **Seven pure collection builtins** — `map`/`filter`/`reduce`/`keys`/`values`/`entries`/`fromEntries` — are bound **intrinsically** (the same unbound-head-only, budget-ticked, deterministic pattern as `rand`/`range`): a user `function` of the same name shadows them; each ticks the budget per call + per element (a large collection fails closed with `ML-LANG-BUDGET`); each returns a **new frozen** collection and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` + a frozen-empty result. Callbacks may be an arrow OR a user-declared `function`.
+- **The pure builtin set** — collection (`map`/`filter`/`reduce`), query (`some`/`every`/`find`/`findIndex`/`includes`), ordering (`sort`/`slice`/`reverse`), object⇄array (`keys`/`values`/`entries`/`fromEntries`), string bridge (`split`/`join`/`chars`/`toUpperCase`/`toLowerCase`/`trim`), numeric (`min`/`max`/`abs`/`sign`/`floor`/`ceil`/`round`/`clamp`/`sqrt`/`pow`/`format`), plus seeded `rand`/`range` — is bound **intrinsically** (unbound-head-only: a user `function` of the same name shadows). Each ticks the budget per call + per element (a large collection/comparison fails closed with `ML-LANG-BUDGET`); each collection-returning builtin returns a **new frozen** value and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` (never a throw); callbacks may be an arrow OR a user `function`. New builtins go in the registry (`builtins-registry.ts`) with a profile/portability tag; a cross-check test binds the registry to real dispatch. `sort` has a total/stable/deterministic order (`sort.ts`, NaN pinned). `round` is round-half-to-even. Collection builtins are **array-only**; strings bridge via `split`/`join`/`chars`. `for-of` iterates arrays + strings (code points).
+- **Capability profiles.** Each builtin is tagged `core` (closure-free/scalar — restricted-target-lowerable) vs `host` (closure/heap — interpreter-backed), with a numeric portability class (`exact`/`gpu-tolerant`/`cpu-only`). `classifyProfile(fn)` decides a function's core-compliance from its AST. This is metadata + a pure classifier only — no codegen/dispatch engine is built. Do not add domain-flavored builtins to the core; niche/domain ops belong behind `resolveCall` (which may return `kind: 'value'` for a pure, deep-frozen value in expression position).
 - **`head { … }` wrap shorthand.** A bare identifier followed by a **same-line** `{` is a zero-arg wrapping call (`group { … }` ≡ `group() { … }`) — the parser synthesizes the `call` node. A next-line `{` after a bare ident stays two statements (the newline guard); a `{` after a *call* wraps on either line (unchanged).
 - **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (`@metael/lang`; including `ML-LANG-IMMUTABLE` for a member/index write, `ML-LANG-SPREAD` for a spread of a non-array/non-object, `ML-LANG-BUILTIN-ARG` for a wrong-shape collection-builtin arg), `ML-RT-*` for the runtime (`@metael/runtime`; `ML-RT-CONVERGE` on a non-converging flush). A domain owns its own prefix for its own diagnostics. Fail-loud.
 - **TDD for everything** (there is no un-unit-testable surface here). Red → green → commit; a change to logic gets a test.
@@ -129,11 +135,8 @@ Test runner is **Vitest** (node project only — neither package has a browser s
 
 ## Status
 
-**`@metael/{lang,runtime,vdom}` — BUILT & GREEN (the kernel + the first showcase consumer are complete).**
-- **`@metael/lang`** — the eval-free interpreter + the 3 interface-review fixes + the generic child-collection walk (`lowerEntry`) + intrinsic seeded `rand`/`range` + the collections increment (spread in literals, the seven pure collection builtins, deep-freeze immutability with `ML-LANG-IMMUTABLE`, the `head { }` wrap shorthand); domain-specific lowering excluded. Self-contained (zero cross-imports); eval-free scan green.
-- **`@metael/runtime`** — the reactive core (signal/memo/effect + synchronous `change()` + converge guard over vendored `@vue/reactivity`) + the generic keyed-list diff (teardown-by-identity) + `RuntimeReactiveHost` (native-`Disposable` `runLeafEffect` + `DisposableStack` scope() + cellKey latch + cell-freeing) + the one-shot `derive()` (`ML-RT-CONVERGE`). Imports only `@metael/lang` + `@vue/reactivity` (automated boundary test).
-- **`@metael/vdom`** — a Preact-signals-style virtual DOM on the kernel: a vnode `HostEnvironment` (lowercase→element, Capitalized→decline→transparent fragment), `materialize` (component→fragment, unknown→`ML-VDOM-UNKNOWN`), a real-DOM keyed reconcile driven by `diffKeyed`'s ops (matched-in-place, move, teardown-on-remove), event delegation, an output sanitizer (attr-allowlist + URL-scheme block), and `mount()` — ONE tracked effect that auto-splits the two update paths (a value-only change fires only a leaf effect and patches that DOM node in place with NO re-render; a structural change re-derives on a fresh host, state latched via `exportState`/`priorState`, and keyed-reconciles the DOM). The example components + the dev demo harness are test/dev fixtures, NOT public API (an import-boundary test asserts it). Imports only `@metael/lang` + `@metael/runtime`.
+**`@metael/{lang,runtime,vdom}` + the showcase apps (`apps/site/`) — BUILT & GREEN.** Full gate: **435 tests (395 node + 40 Playwright/Chromium browser)**, typecheck · lint (0 warnings) · build:packages · site production build all clean; each package self-contained behind its dependency seam (automated boundary tests).
 
-**Node: 25 test files / 259 tests + Browser: 3 files / 14 tests, all green** (the vdom package contributes 40 node + 14 Playwright/Chromium browser tests across 10 test files); typecheck · lint · build:packages clean. Built TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + FULL spec-conformance + preact-alignment + efficiency review. The recorded budget-lifetime limitation (a reactive re-run shares the derive-time evaluator budget) is **moot** for `@metael/vdom` and stays deferred: a value-only change fires only a leaf effect (no re-walk at all), and a structural change re-derives with a fresh `Runner` (budget resets each pass) — a multi-thousand-interaction regression test proves no `ML-LANG-BUDGET`. The epoch fix is reserved for a hypothetical future persistent-leaf-effect fast path only.
+The language kernel carries the full builtin set (collection/query/ordering/string/numeric) + the capability-profile registry & classifier + string `for-of` + the additive `kind:'value'` extension seam + a standing sandbox-escape suite; `@metael/runtime` the reactive core + keyed diff + `RuntimeReactiveHost` + `derive()`; `@metael/vdom` a Preact-signals-style VDOM that auto-splits value-only (leaf-effect patch, no re-render) from structural (fresh-host re-derive + keyed reconcile) updates. Built TDD (subagent-driven, a review per task) + a final comprehensive adversarial review (findings folded at root). A recorded budget-lifetime limitation (a reactive re-run sharing the derive-time budget) stays deferred — moot for `@metael/vdom`, reserved for a hypothetical persistent-leaf-effect fast path.
 
-**Next: landing + playground apps** — a landing pitch + a CodePen/W3Schools-style multi-target playground, both dogfooded on `@metael/vdom`.
+**Docs:** [README.md](./README.md) (install + usage) · [GUIDE.md](./GUIDE.md) (the language, example-driven) · this file (architecture + guardrails).

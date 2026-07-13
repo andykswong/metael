@@ -1,70 +1,125 @@
 # metael
 
-**The generic, reusable, eval-free reactive-DSL substrate — the language kernel, extracted once.**
+**A generic, eval-free, reactive scripting-language kernel — the language, reactivity, and host-injection seam that domain frameworks build on.**
 
-metael is the language + reactivity + host-injection seam that domain frameworks build on. It owns exactly the *domain-agnostic* core: a legible JS/ES-syntax surface run by an **eval-free tree-walking interpreter**; a serializable, editable **reactive-component AST** (reka *State*); a **fine-grained reactive runtime**; and the **host-injection contract** by which a domain supplies *which heads exist* and *what they build*. metael knows how to declare, compose, resolve, and react — never which vocabulary exists or what it renders to.
+metael owns the *domain-agnostic* core and nothing else: a legible JS/ES-syntax surface run by an **eval-free tree-walking interpreter**; a serializable, editable **reactive-component AST**; a **fine-grained reactive runtime**; and the **host-injection seam** by which a domain supplies *which words exist* and *what they build*. It knows how to declare, compose, resolve, and react — never which vocabulary exists or what it renders to. A domain framework = **metael + its vocabulary + its renderer**, so the same kernel can drive a virtual DOM, a scene graph, or a pure data pipeline.
 
-A domain = **metael + its vocabulary + its derived View/renderers**. The same kernel serves a 3D scene graph, a compute shader, and a signal-VDOM.
+- **Eval-free & sandbox-safe** — no `eval`/`new Function`; a program can't reach host globals, and it's budgeted so it can't hang or exhaust memory. Safe to run arbitrary source inline.
+- **Deterministic** — `result = f(source, data, seed, state)`; the only randomness is seeded. Same inputs → same output, every time. Machine-verifiable.
+- **Immutable by construction** — everything a program creates is deep-frozen; it can't mutate injected data.
 
-> **Why it exists:** the same eval-free reactive-DSL kernel keeps getting re-implemented per domain. metael consolidates it into **one durable, tested substrate** each domain instantiates with its own vocabulary — instead of hand-rolling it again.
+📖 **New to the language? Read [GUIDE.md](./GUIDE.md)** — the practical, example-driven tour of the syntax, builtins, and AST.
 
-## Status — `@metael/{lang,runtime,vdom}` built & green
+## Packages
 
-The kernel + the first showcase consumer are **complete, tested, and merged-ready** across three packages:
+| Package | What it is | Depends on |
+|---|---|---|
+| **`@metael/lang`** | The eval-free interpreter kernel: lexer → parser → discriminated-union AST → tree-walking evaluator (fuel/time/depth budgets + prototype guards), the host-injection port **interfaces** + test doubles, the generic child-collection walk, the builtin set + a capability-profile registry & classifier. | nothing (zero runtime deps) |
+| **`@metael/runtime`** | The fine-grained reactive core (`signal`/`memo`/`effect` + a synchronous `change()` batch/flush + a converge guard), the generic **keyed-list diff** (add/remove/move + teardown), the real `ReactiveHost`, and the one-shot `derive()` composition root. | `@metael/lang` + `@vue/reactivity` |
+| **`@metael/vdom`** | A Preact-signals-style virtual DOM built entirely on the kernel — write a `component` in the metael DSL and it renders to real, live DOM. A worked example of a full domain on top of metael. | `@metael/{lang,runtime}` |
 
-- **`@metael/lang`** — the eval-free, port-injected JS/ES interpreter (lexer → parser → discriminated-union AST → tree-walking evaluator with fuel/time/depth budgets + `__proto__`/`constructor`/`prototype` guards), the host-injection port **interfaces** (`HostEnvironment` / `ReactiveHost` / `KeyMinter`) + their test doubles, the generic child-collection **walk** (`lowerEntry`) as view-free lang machinery, and intrinsic seeded `rand`/`range`. Zero runtime dependencies; imports nothing domain-specific.
-- **`@metael/runtime`** — the fine-grained reactive core (`signal`/`memo`/`effect` + a synchronous `change()` batch/flush boundary + a converge guard, over vendored `@vue/reactivity`), the generic **keyed-list diff** (add/remove/move + teardown-by-identity on `remove`), the real **`RuntimeReactiveHost`** (native-`Disposable` `runLeafEffect` + `DisposableStack` owner scopes + cellKey latch + cell-freeing), and the one-shot **`derive()`** composition root. Depends only on `@metael/lang` + `@vue/reactivity`.
-- **`@metael/vdom`** — a **Preact-signals-style virtual DOM built entirely on the kernel**: write a `component` in the metael DSL, and it renders to real, live DOM. Two update paths, chosen automatically — a reactive `let` read by a single attribute/text position patches **only that node** (a leaf effect, no re-render); a change to the tree's **shape** re-derives the affected subtree and reconciles it **by key**, reusing existing DOM nodes so focus + selection survive. It is the *generality showcase* (a wildly-different-from-scene-graph target falls out of the substrate with a thin domain layer) **and** the forcing function that hardens the runtime's keyed-list diff under full add/remove/reorder. Depends only on `@metael/lang` + `@metael/runtime`.
+## Install
 
-Three interface-review fixes are baked into the host-injection ports (native-`Disposable` disposal, an ordered `Arg[]` on `resolveCall`, an optional fail-loud `knownHeads`/`didYouMean`). Determinism is a language-level guarantee: `result = f(source, data, seed, state)`, with cross-consumer conformance fixtures (same source + seed → identical host-value trace) + disposal fixtures (a keyed `remove` leaves no lingering effect and no retained cell-key state).
+The `@metael/*` packages are **workspace-internal and not yet published** to npm. Use them from a clone of this monorepo (see [Develop](#develop)) — build with `npm run build:packages` and consume via a workspace or `file:` reference. The layering is `@metael/lang` (the kernel alone) → `@metael/runtime` (+ reactivity) → `@metael/vdom` (+ the VDOM domain).
 
-**Node: 25 test files / 259 tests + Browser: 3 files / 14 tests, all green** (the vdom package adds 40 node + 14 Playwright/Chromium browser tests); typecheck · lint · build clean; each package **self-contained** behind the port seam (`lang` imports nothing; `runtime` imports only `@metael/lang` + `@vue/reactivity`; `vdom` imports only `@metael/{lang,runtime}` — all enforced by automated boundary tests). Built subagent-driven / TDD with a two-lens adversarial review per task + a final comprehensive whole-branch + spec-conformance + preact-alignment + efficiency pass.
+Requires Node 24+ / a 2024+ browser (uses native `Symbol.dispose`). ESM-only.
 
-**Next:** landing + playground apps — a landing pitch + a CodePen/W3Schools-style multi-target playground, both dogfooded on `@metael/vdom`.
+## Usage
 
-## Quick start
+### Evaluate a program to a value (`@metael/lang`)
 
-Requires Node 26+.
+Run source as a pure computation. You supply a `HostEnvironment` (resolves any non-builtin call), a `ReactiveHost` (cells/effects — a plain double is fine for pure eval), optional `data`, and a `seed`.
+
+```ts
+import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from '@metael/lang';
+
+const { value, diagnostics } = evaluateProgram(
+  `map(data.items, (it) => it.price * 2)`,
+  {
+    data: { items: [{ price: 3 }, { price: 5 }] },
+    seed: 1,
+    host: new PlainStorageHost(),   // stores reactive cells; no domain needed for pure eval
+    env: new RecordingHostEnv(),    // resolves calls; the doubles answer permissively
+  },
+);
+
+value;          // → [6, 10]
+diagnostics;    // → []  (a fail-loud diagnostic list — never thrown exceptions)
+```
+
+`evaluateProgram` **never throws**: author errors, budget trips, and unknown calls all come back as `ML-LANG-*` diagnostics plus a safe value (often `null`).
+
+### Lex or parse for tooling
+
+```ts
+import { lex, parseProgram } from '@metael/lang';
+
+lex('map(xs, (x) => x)');            // → tokens (drives syntax highlighting)
+const { program, diagnostics } = parseProgram('const x = 1; x + 2');
+program.stmts;                        // → the AST (discriminated-union nodes, each span-tagged)
+```
+
+### Render a reactive UI (`@metael/vdom`)
+
+Write a `component` in the metael DSL; `mount` renders it to real DOM and keeps it live — a reactive `let` read by one attribute patches only that node; a change to the tree's shape reconciles by key.
+
+```ts
+import { mount } from '@metael/vdom';
+
+// The entry component is named `Story` by default (override with the `entry` option).
+const source = `
+  component Story() {
+    let count = 0
+    div {
+      button({ onClick: () => { count = count + 1 } }, "+")
+      span("clicked " + count + " times")
+    }
+  }
+`;
+
+const container = document.getElementById('app')!;
+const handle = mount(source, container, {});   // third arg = MountOptions (all fields optional; e.g. { seed, data, entry })
+// … later:
+handle.unmount();
+```
+
+*(`div`/`button`/`span` are `@metael/vdom`'s vocabulary — a lowercase head becomes an element. A different host defines different words. `count` is read only by `span`, so a click patches just that text node — no re-render.)*
+
+### Provide your own vocabulary (a custom host)
+
+A domain implements a small `HostEnvironment` (plus, for stateful output, a `ReactiveHost` + `KeyMinter`) and gets the whole language/AST/reactivity/determinism substrate for free. `resolveCall` turns a head into a value — return `{ handled: true, value }` for a node, `{ handled: true, value, kind: 'value' }` for a pure scalar/record value usable in expression position, or `{ handled: false }` to let metael emit a wrapper.
+
+```ts
+import type { HostEnvironment, Arg } from '@metael/lang';
+
+const env: HostEnvironment = {
+  resolveCall(head, key, args: Arg[]) {
+    if (head === 'rgb') {
+      const [r, g, b] = args.map((a) => a.value as number);
+      return { handled: true, kind: 'value', value: { r, g, b } };   // a pure value builtin
+    }
+    return { handled: false };
+  },
+};
+// evaluateProgram('rgb(255, 0, 0).r', { host, env, … }) → 255
+```
+
+See [GUIDE.md](./GUIDE.md) §8–§10 for the composition model and the port shapes, and the generated API docs (`npm run docs:api`).
+
+## Develop
 
 ```shell
-npm install
-npm run typecheck
-npm test
+npm install                 # workspace devDeps (TS 6, Vite 8, Vitest 4, ESLint 10); no runtime deps
+npm run typecheck           # tsc --noEmit (root + every package)
+npm run lint                # eslint (0 warnings)
+npm run build:packages      # build @metael/* → dist/ (.js + .d.ts)
+npm test                    # vitest run (node + Playwright/Chromium browser projects)
+npm run docs:api            # generate the TypeDoc API reference
 ```
 
-## Architecture
+`@metael/{lang,runtime}` are pure logic, fully CPU-unit-tested. `@metael/vdom` adds a Chromium (Playwright) project for real-DOM proofs (a node survives a reorder, focus/selection persist, event delegation fires, unsafe URLs are dropped, removed subtrees are torn down). A `safety.test.ts` source-scan asserts the kernel stays eval-free; a `sandbox.test.ts` suite proves a program can't escape the sandbox; per-package `boundary.test.ts` files enforce the dependency seams. The tests are the conformance bar — keep them green and add one with any change.
 
-- **Eval-free & deterministic.** The AST is inert data; a tree-walking interpreter evaluates it — never `eval`/`new Function`. Budgeted (fuel/wall-clock/recursion/string-growth, all fail-closed) and seeded, so `result = f(source, data, seed, state)` and LLM-emitted source is machine-verifiable.
-- **Vocabulary-agnostic core.** The grammar, reactivity, composition, and registry hardcode **no** concrete heads. A `call` node is identical whether the head is a user component or a domain vocabulary word — so a domain's vocabulary change needs zero grammar change. *This* is why one kernel serves a scene graph, a shader, and a dataframe query alike.
-- **Host-injection seam.** A domain implements three interfaces — `HostEnvironment` (resolve a head → an opaque host value), `ReactiveHost` (cells + leaf effects + owner scopes), `KeyMinter` (identity keys for reconciliation) — and gets the whole DSL / AST / reactivity / determinism substrate for free. metael calls the ports; the domain builds the values.
-
-```
-packages/
-├── lang/     @metael/lang    — [BUILT] the eval-free, port-injected interpreter kernel (zero deps, self-contained)
-│                               diagnostics · ast · determinism · environment · ports · lexer · parser · evaluate · lower
-├── runtime/  @metael/runtime — [BUILT] the reactive runtime + port implementations (deps: @metael/lang + @vue/reactivity)
-│                               reactive · reactive-host · keyed-diff · derive
-└── vdom/     @metael/vdom    — [BUILT] a Preact-signals-style VDOM on the kernel — the generality showcase + the
-                               keyed-diff forcing function (deps: @metael/lang + @metael/runtime)
-                               vnode · sanitize · host-env · materialize · patch · reconcile · delegate · mount
-
-(planned, design-only)
-   landing + playground apps — a landing pitch + a multi-target playground, both dogfooded on @metael/vdom
-```
-
-See [AGENTS.md](./AGENTS.md) for the architecture, conventions, and editing guardrails.
-
-## Tests
-
-```shell
-npm run typecheck        # tsc --noEmit (root + every package)
-npm run lint             # eslint (root + packages)
-npm run build:packages   # build @metael/* → dist/ (.js + .d.ts)
-npm test                 # vitest run (the node project — the whole monorepo)
-npm run test:browser     # vitest run --project browser (the Playwright/Chromium real-DOM proofs)
-```
-
-`@metael/{lang,runtime}` are pure logic and fully CPU-unit-tested. `@metael/vdom` adds a **browser** vitest project (Playwright/Chromium) for the real-DOM proofs — same DOM node survives a reorder, focus + input selection persist across add/remove/reorder, event delegation fires, `javascript:` hrefs are dropped, and a removed subtree is torn down. The tests are the conformance bar. `@metael/lang`'s `safety.test.ts` source-scan asserts the kernel stays eval-free; `@metael/runtime`'s `boundary.test.ts` and `@metael/vdom`'s `boundary.test.ts` assert each package imports nothing beyond its allowed dependencies.
+See [AGENTS.md](./AGENTS.md) for architecture, conventions, and editing guardrails.
 
 ## License
 

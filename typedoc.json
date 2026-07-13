@@ -9,6 +9,7 @@
   "out": "apps/site/public/api",
   "name": "metael API",
   "readme": "none",
+  "projectDocuments": ["GUIDE.md"],
   "excludeInternal": true,
   "hideGenerator": false,
   "navigationLinks": {

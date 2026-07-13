@@ -240,18 +240,13 @@ map(passing, (r) => ({
   grade: gradeOf(r.score)
 }))`;
 
-const GROUP_COUNT = `// Word frequency — and building your own helper when a
-// builtin is missing: there is no includes()/some(), so
-// define has() with reduce; there are no computed object
-// keys, so build the result from [key, value] pairs.
-function has(xs, v) {
-  reduce(xs, (found, x) => found || x == v, false)
-}
-
+const GROUP_COUNT = `// Word frequency — now with includes() for membership.
+// (Object keys are still built from [key, value] pairs via
+// fromEntries — the deterministic, immutable-rebuild idiom.)
 const words = ["red", "blue", "red", "green", "blue", "red"]
 const uniq = reduce(
   words,
-  (acc, w) => has(acc, w) ? acc : [...acc, w],
+  (acc, w) => includes(acc, w) ? acc : [...acc, w],
   []
 )
 

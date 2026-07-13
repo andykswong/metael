@@ -11,6 +11,8 @@ import { FORBIDDEN_KEYS } from './ast.ts';
 import { parseProgram } from './parser.ts';
 import { Environment } from './environment.ts';
 import { makeSeededRng, range as seededRange } from './determinism.ts';
+import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
+import { defaultCompare, stableSort } from './sort.ts';
 import type { HostEnvironment, ReactiveHost, CellRef } from './ports.ts';
 
 export const DEFAULT_MAX_STEPS = 100_000;
@@ -296,7 +298,7 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
   // mutate). Unbound-head-only (a user function of the same name shadows via evalCall's callee
   // resolution, which never reaches here). Each ticks the budget per call + per element so a large
   // collection fails closed with ML-LANG-BUDGET. Callbacks are ordinary closures invoked as fn(x, i).
-  if (head === 'map' || head === 'filter' || head === 'reduce' || head === 'keys' || head === 'values' || head === 'entries' || head === 'fromEntries') {
+  if (IMPLEMENTED_BUILTINS.has(head) && head !== 'rand' && head !== 'range') {
     r.tick();
     const a = expr.args.map((x) => evalExpr(x, env, r));
     // A callback may be EITHER an arrow (a real JS closure — typeof 'function') OR a user-declared
@@ -347,6 +349,163 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         for (const p of pairs) { r.tick(); if (Array.isArray(p) && typeof p[0] === 'string' && !FORBIDDEN_KEYS.has(p[0])) out[p[0]] = p[1]; }
         return deepFreeze(out);
       }
+      case 'some': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`some(array, fn) — bad arguments`);
+        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return true; }
+        return false;
+      }
+      case 'every': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`every(array, fn) — bad arguments`);
+        for (let i = 0; i < xs.length; i++) { r.tick(); if (!truthy(fn(xs[i], i))) return false; }
+        return true;
+      }
+      case 'find': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`find(array, fn) — bad arguments`);
+        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return xs[i] ?? null; }
+        return null;
+      }
+      case 'findIndex': {
+        const xs = a[0]; const fn = asFn(a[1]);
+        if (!Array.isArray(xs) || !fn) return badArg(`findIndex(array, fn) — bad arguments`);
+        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return i; }
+        return -1;
+      }
+      case 'includes': {
+        const xs = a[0]; const v = a[1];
+        if (!Array.isArray(xs)) return badArg(`includes(array, value) — bad argument`);
+        for (const x of xs) { r.tick(); if (looseEquals(x, v)) return true; }
+        return false;
+      }
+      case 'sort': {
+        const xs = a[0]; const cmpArg = a[1];
+        if (!Array.isArray(xs)) return badArg(`sort(array, comparator?) — bad argument`);
+        // Tick PER COMPARISON on the default path too — an O(n log n) sort of a large array must be
+        // budget-charged or it bypasses the step + time guards (tick() is the only deadline check point).
+        if (cmpArg === undefined) return deepFreeze(stableSort(xs, (x, y) => { r.tick(); return defaultCompare(x, y); }));
+        const cmpFn = asFn(cmpArg);
+        if (!cmpFn) return badArg(`sort(array, comparator) — comparator is not callable`);
+        let flagged = false;
+        const cmp = (x: unknown, y: unknown): number => {
+          r.tick();
+          const res = cmpFn(x, y);
+          if (typeof res !== 'number' || Number.isNaN(res)) {
+            if (!flagged) { flagged = true; r.error('ML-LANG-BUILTIN-ARG', 'sort comparator must return a number', expr.span); }
+            return 0;   // keep relative order on a bad return (stable)
+          }
+          return res;
+        };
+        return deepFreeze(stableSort(xs, cmp));
+      }
+      case 'slice': {
+        const xs = a[0];
+        if (!Array.isArray(xs)) return badArg(`slice(array, start, end?) — bad argument`);
+        const len = xs.length;
+        const norm = (v: unknown, dflt: number): number => {
+          if (v === undefined) return dflt;
+          const n = Math.trunc(toNum(v));
+          if (Number.isNaN(n)) return dflt;
+          return n < 0 ? Math.max(len + n, 0) : Math.min(n, len);
+        };
+        const start = norm(a[1], 0);
+        const end = norm(a[2], len);
+        const out: unknown[] = [];
+        for (let i = start; i < end; i++) { r.tick(); out.push(xs[i]); }
+        return deepFreeze(out);
+      }
+      case 'reverse': {
+        const xs = a[0];
+        if (!Array.isArray(xs)) return badArg(`reverse(array) — bad argument`);
+        const out: unknown[] = [];
+        for (let i = xs.length - 1; i >= 0; i--) { r.tick(); out.push(xs[i]); }
+        return deepFreeze(out);
+      }
+      case 'split': {
+        const s = a[0]; const sep = a[1];
+        if (typeof s !== 'string' || typeof sep !== 'string') return badArg(`split(string, separator) — bad arguments`);
+        const parts = sep === '' ? Array.from(s) : s.split(sep);
+        parts.forEach(() => r.tick());
+        return deepFreeze(parts);
+      }
+      case 'join': {
+        const xs = a[0]; const sep = a[1];
+        if (!Array.isArray(xs) || typeof sep !== 'string') return badArg(`join(array, separator) — bad arguments`);
+        const parts: string[] = [];
+        // Fail CLOSED before the result crosses the string cap (mirrors the `+` operator): a large
+        // collection of large strings could otherwise build a string past the engine limit and throw
+        // a raw RangeError. Treat the cap as a budget trip, before allocating the joined string.
+        let total = 0;
+        for (let i = 0; i < xs.length; i++) {
+          r.tick();
+          const s = strOf(xs[i]);
+          total += s.length + (i > 0 ? sep.length : 0);
+          if (total > r.opt.maxStringLength) {
+            r.error('ML-LANG-BUDGET', `string result would exceed the ${r.opt.maxStringLength}-character limit`, expr.span);
+            return null;
+          }
+          parts.push(s);
+        }
+        return parts.join(sep);
+      }
+      case 'chars': {
+        const s = a[0];
+        if (typeof s !== 'string') return badArg(`chars(string) — bad argument`);
+        const cs = Array.from(s);
+        cs.forEach(() => r.tick());
+        return deepFreeze(cs);
+      }
+      case 'toUpperCase': {
+        const s = a[0];
+        if (typeof s !== 'string') return badArg(`toUpperCase(string) — bad argument`);
+        return s.toUpperCase();
+      }
+      case 'toLowerCase': {
+        const s = a[0];
+        if (typeof s !== 'string') return badArg(`toLowerCase(string) — bad argument`);
+        return s.toLowerCase();
+      }
+      case 'trim': {
+        const s = a[0];
+        if (typeof s !== 'string') return badArg(`trim(string) — bad argument`);
+        return s.trim();
+      }
+      case 'min': case 'max': case 'abs': case 'sign': case 'floor':
+      case 'ceil': case 'round': case 'clamp': case 'sqrt': case 'pow': {
+        // Coerce a numeric arg or fail: returns null when the value is not a finite/coercible number.
+        const num = (v: unknown): number | null => {
+          if (typeof v === 'number') return Number.isNaN(v) ? null : v;
+          const n = toNum(v);
+          return Number.isNaN(n) ? null : n;
+        };
+        const bad = (): unknown => badArg(`${head}(number, …) — non-numeric argument`);
+        switch (head) {
+          case 'min': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.min(x, y); }
+          case 'max': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.max(x, y); }
+          case 'abs': { const x = num(a[0]); return x === null ? bad() : Math.abs(x); }
+          case 'sign': { const x = num(a[0]); return x === null ? bad() : Math.sign(x); }
+          case 'floor': { const x = num(a[0]); return x === null ? bad() : Math.floor(x); }
+          case 'ceil': { const x = num(a[0]); return x === null ? bad() : Math.ceil(x); }
+          case 'round': { const x = num(a[0]); return x === null ? bad() : roundHalfEven(x); }
+          case 'clamp': { const x = num(a[0]); const lo = num(a[1]); const hi = num(a[2]); return (x === null || lo === null || hi === null) ? bad() : Math.min(Math.max(x, lo), hi); }
+          case 'sqrt': { const x = num(a[0]); if (x === null) return bad(); if (x < 0) return badArg(`sqrt(x) — x must be >= 0`); return Math.sqrt(x); }
+          case 'pow': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.pow(x, y); }
+        }
+        return null;   // unreachable (inner switch is exhaustive) but satisfies the block's return type
+      }
+      case 'format': {
+        const x = a[0]; const digits = a[1];
+        if (typeof x !== 'number' || Number.isNaN(x)) return badArg(`format(number, digits) — first argument must be a number`);
+        if (typeof digits !== 'number' || !Number.isInteger(digits) || digits < 0 || digits > 100) return badArg(`format(number, digits) — digits must be an integer in [0, 100]`);
+        return x.toFixed(digits);
+      }
+      default: {
+        // A registry-admitted name with no case yet fails loud here, with args evaluated exactly once —
+        // never silently falling through to the host resolveCall path (which would re-evaluate args).
+        r.error('ML-LANG-UNKNOWN-CALL', `unknown call '${head}'`, expr.span);
+        return null;
+      }
     }
   }
   const args = expr.args.map((a) => evalExpr(a, env, r));
@@ -359,6 +518,10 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
     // permissive node-builder env answered an unknown head): a node is only valid in CHILD
     // position (collected by the runtime derive), NOT in scalar expression position — fail closed here.
     const v = resolved.value ?? null;
+    // A host may return a PURE value (kind:'value') — allowed in expression position and deep-frozen so
+    // it carries the same immutability guarantee as an intrinsic result. Without the tag, a non-array
+    // object is a domain NODE (only valid in child position) → fail closed here as before.
+    if (resolved.kind === 'value') return deepFreeze(v);
     if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
       r.error('ML-LANG-UNKNOWN-CALL', `unknown call '${head}' (node head is not valid in expression position)`, expr.span);
       return null;
@@ -464,8 +627,15 @@ export function execStmt(stmt: Stmt, env: Environment, r: Runner, insideComponen
       return null;
     }
     case 'for': {
-      const iter = evalExpr(stmt.iterable, env, r);
-      if (!Array.isArray(iter)) { r.error('ML-LANG-FOR-ITER', 'for-of expects an array to iterate', stmt.span); return null; }
+      const iterValue = evalExpr(stmt.iterable, env, r);
+      // Arrays iterate elements; strings iterate Unicode code points (Array.from — matching chars()/
+      // split("") and JS for..of). NOTE: this deliberately differs from string indexing s[i] and
+      // .length, which are UTF-16 code-unit based — for astral characters (emoji, CJK Ext-B) the item
+      // count differs from .length and s[i] may return a lone surrogate. Any other value → fail-loud.
+      let iter: unknown[];
+      if (Array.isArray(iterValue)) iter = iterValue;
+      else if (typeof iterValue === 'string') iter = Array.from(iterValue);
+      else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return null; }
       for (const item of iter) {
         r.tick();
         const loopEnv = new Environment(env);
@@ -572,6 +742,15 @@ function strOf(v: unknown): string {
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   try { return JSON.stringify(v) ?? ''; } catch { return ''; }
 }
+/** Round half-to-even ("banker's rounding") — matches the shader `round` builtins so a `core` numeric
+ *  result is bit-identical across targets (JS Math.round is half-up, which would diverge at x.5). */
+function roundHalfEven(x: number): number {
+  const f = Math.floor(x);
+  const diff = x - f;
+  if (diff < 0.5) return f;
+  if (diff > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;   // exactly .5 → nearest even
+}
 /** Deep-freeze a DSL-created collection so it is immutable by construction. Recurses into arrays +
  *  plain objects; a function short-circuits at the first guard (typeof !== 'object'), so a handler
  *  value stays callable. Short-circuits already-frozen values (idempotent, cycle-safe for the acyclic
@@ -615,7 +794,12 @@ export function evaluateProgram(source: string, options: EvalOptions): EvalResul
   };
   const runner = new Runner(opt);
   const root = new Environment();
-  if ('data' in options) root.define('data', options.data, { kind: 'const' });
+  // Deep-freeze injected data at the boundary so it is immutable-by-construction like every DSL value.
+  // Without this, a builtin that returns deepFreeze(out) over an array aliasing data's own element
+  // objects (sort/slice/reverse/map/values) would freeze the host's LIVE objects in place — a silent
+  // cross-boundary mutation. Freezing here makes those re-freezes no-ops (deepFreeze short-circuits
+  // already-frozen values) and realizes "the DSL cannot mutate anything it sees" structurally.
+  if ('data' in options) root.define('data', deepFreeze(options.data), { kind: 'const' });
   let value: unknown = null;
   try {
     // Parse INSIDE the try: a deeply-nested source can overflow the recursive-descent parser

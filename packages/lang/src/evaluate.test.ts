@@ -3,6 +3,7 @@ import { evaluateProgram } from './evaluate.ts';
 import { makeSeededRng } from './determinism.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import type { Arg } from './ports.ts';
+import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
 
 const run = (src: string, data?: unknown) =>
   evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv() });
@@ -299,5 +300,221 @@ describe('collections increment preserves the invariants', () => {
   it('FREEZE is deep + a nested frozen result still serializes', () => {
     const r = evaluateProgram('map([1, 2], (x) => ({ v: x }))', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
     expect(JSON.stringify(r.value)).toBe('[{"v":1},{"v":2}]');
+  });
+});
+
+describe('query + predicate builtins', () => {
+  it('some / every short-circuit and return booleans', () => {
+    expect(run('some([1,2,3], (x) => x > 2);').value).toBe(true);
+    expect(run('some([1,2,3], (x) => x > 9);').value).toBe(false);
+    expect(run('every([2,4], (x) => x % 2 == 0);').value).toBe(true);
+    expect(run('every([2,3], (x) => x % 2 == 0);').value).toBe(false);
+  });
+  it('find returns the element or null; findIndex returns the index or -1', () => {
+    expect(run('find([1,2,3], (x) => x > 1);').value).toBe(2);
+    expect(run('find([1,2,3], (x) => x > 9);').value).toBe(null);
+    expect(run('findIndex([1,2,3], (x) => x > 1);').value).toBe(1);
+    expect(run('findIndex([1,2,3], (x) => x > 9);').value).toBe(-1);
+  });
+  it('includes tests value membership using == semantics', () => {
+    expect(run('includes([1,2,3], 2);').value).toBe(true);
+    expect(run('includes([1,2,3], 9);').value).toBe(false);
+    expect(run('includes(["a","b"], "b");').value).toBe(true);
+  });
+  it('a user function shadows a query builtin', () => {
+    expect(run('function some(a, b) { 42 } some([1], (x) => x);').value).toBe(42);
+  });
+  it('a wrong-shape arg is fail-loud ML-LANG-BUILTIN-ARG, never a throw', () => {
+    expect(run('some(5, (x) => x);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('find([1], 5);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+  });
+  it('a callback may be a user function, not just an arrow', () => {
+    expect(run('function big(x) { x > 1 } find([1,2,3], big);').value).toBe(2);
+  });
+});
+
+describe('ordering + slicing builtins', () => {
+  it('sort uses the default total order and does not mutate', () => {
+    expect(run('sort([3,1,2]);').value).toEqual([1, 2, 3]);
+    expect(run('const a = [3,1,2]; sort(a); a;').value).toEqual([3, 1, 2]);   // original frozen + untouched
+    expect(run('sort([2, "a", null, true]);').value).toEqual([null, true, 2, 'a']);
+  });
+  it('sort with a comparator', () => {
+    expect(run('sort([1,2,3], (a, b) => b - a);').value).toEqual([3, 2, 1]);
+  });
+  it('sort with a non-number comparator return is fail-loud but keeps order', () => {
+    const r = run('sort([1,2,3], (a, b) => "x");');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(r.value).toEqual([1, 2, 3]);   // treated as 0 → stable keep-order
+  });
+  it('slice extracts a sub-array (JS index semantics incl. negatives), never mutating', () => {
+    expect(run('slice([1,2,3,4,5], 1, 3);').value).toEqual([2, 3]);
+    expect(run('slice([1,2,3,4,5], -2);').value).toEqual([4, 5]);
+    expect(run('slice([1,2,3], 1);').value).toEqual([2, 3]);
+    expect(run('slice([1,2,3,4,5], 1, -1);').value).toEqual([2, 3, 4]);   // negative END (exercises the end branch)
+    expect(run('slice([1,2,3,4,5], -3, -1);').value).toEqual([3, 4]);     // both negative
+  });
+  it('reverse returns a new reversed array, not mutating the input', () => {
+    expect(run('reverse([1,2,3]);').value).toEqual([3, 2, 1]);
+    expect(run('const a=[1,2,3]; reverse(a); a;').value).toEqual([1, 2, 3]);
+  });
+  it('the sort result is deep-frozen (a member write is ML-LANG-IMMUTABLE)', () => {
+    expect(run('const s = sort([3,1,2]); s[0] = 9;').diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+  });
+  it('slice + reverse results are deep-frozen (a member write is ML-LANG-IMMUTABLE)', () => {
+    expect(run('const s = slice([1,2,3], 0, 2); s[0] = 9;').diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(run('const r = reverse([1,2,3]); r[0] = 9;').diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+  });
+  it('collection builtins stay ARRAY-ONLY — a string arg is fail-loud ML-LANG-BUILTIN-ARG', () => {
+    expect(run('map("abc", (x) => x);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('filter("abc", (x) => x);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('reduce("abc", (a, x) => a, 0);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('sort("abc");').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);   // sort case exists after this task
+  });
+});
+
+describe('string-bridge builtins', () => {
+  it('split divides a string; join reassembles; chars decomposes', () => {
+    expect(run('split("a,b,c", ",");').value).toEqual(['a', 'b', 'c']);
+    expect(run('split("abc", "");').value).toEqual(['a', 'b', 'c']);
+    expect(run('join(["a","b","c"], "-");').value).toBe('a-b-c');
+    expect(run('chars("abc");').value).toEqual(['a', 'b', 'c']);
+  });
+  it('join coerces non-string elements deterministically', () => {
+    expect(run('join([1,2,3], ",");').value).toBe('1,2,3');
+  });
+  it('case + trim are locale-independent and pure', () => {
+    expect(run('toUpperCase("abc");').value).toBe('ABC');
+    expect(run('toLowerCase("ABC");').value).toBe('abc');
+    expect(run('trim("  hi  ");').value).toBe('hi');
+  });
+  it('split result is a real (frozen) array usable by map', () => {
+    expect(run('map(split("a,b", ","), (s) => toUpperCase(s));').value).toEqual(['A', 'B']);
+    expect(run('const cs = chars("ab"); cs[0] = "z";').diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+  });
+  it('wrong-shape args are fail-loud ML-LANG-BUILTIN-ARG', () => {
+    expect(run('split(5, ",");').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('join("notarray", ",");').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('toUpperCase(5);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+  });
+  it('join fails CLOSED with ML-LANG-BUDGET when the result would exceed the string cap (never a raw RangeError)', () => {
+    // A collection of large strings could otherwise build a string past the engine limit and throw a
+    // RangeError caught only as the internal-error code. join mirrors the `+` operator's cap.
+    const r = evaluateProgram('join(map(range(50), (i) => "x"), "y");', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxStringLength: 20 });
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-INTERNAL')).toBe(false);
+    expect(r.value).toBe(null);
+  });
+});
+
+describe('string for-of iterability (consistency with indexing + .length)', () => {
+  it('for-of over a string emits ML-LANG-FOR-ITER TODAY (RED) and must not after the fix', () => {
+    // Drive the loop directly at TOP LEVEL — evaluateProgram runs the top level, so the loop body
+    // executes without any component. (An uncalled `component C(){…}` would never run its body,
+    // making the test vacuous — verified against the built evaluator.)
+    const r = run('for (const c of "abc") { c }');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-FOR-ITER')).toBe(false);   // GREEN after the fix
+  });
+  it('for-of over a non-array, non-string still errors', () => {
+    const r = run('for (const x of 5) { x }');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-FOR-ITER')).toBe(true);
+  });
+  it('for-of over a string actually iterates each character (behavior, via a CALLED component)', () => {
+    // A reactive-let accumulator needs component scope; append `C();` so the body runs.
+    const r = run('component C() { let n = 0; for (const c of "abcde") { n = n + 1 } n } C();');
+    expect(r.value).toBe(5);   // one iteration per character
+  });
+});
+
+describe('numeric core builtins', () => {
+  it('min/max/abs/sign/clamp', () => {
+    expect(run('min(3, 7);').value).toBe(3);
+    expect(run('max(3, 7);').value).toBe(7);
+    expect(run('abs(-5);').value).toBe(5);
+    expect(run('sign(-3);').value).toBe(-1);
+    expect(run('sign(0);').value).toBe(0);
+    expect(run('clamp(15, 0, 10);').value).toBe(10);
+    expect(run('clamp(-5, 0, 10);').value).toBe(0);
+    expect(run('clamp(5, 0, 10);').value).toBe(5);
+  });
+  it('floor/ceil and round uses banker rounding (half-to-even) for cross-target exactness', () => {
+    expect(run('floor(2.9);').value).toBe(2);
+    expect(run('ceil(2.1);').value).toBe(3);
+    expect(run('round(2.5);').value).toBe(2);   // half-to-even (JS Math.round would give 3)
+    expect(run('round(3.5);').value).toBe(4);   // half-to-even
+    expect(run('round(2.4);').value).toBe(2);
+    expect(run('round(-2.5);').value).toBe(-2); // half-to-even
+  });
+  it('sqrt/pow', () => {
+    expect(run('sqrt(9);').value).toBe(3);
+    expect(run('pow(2, 10);').value).toBe(1024);
+  });
+  it('sqrt of a negative is fail-loud ML-LANG-BUILTIN-ARG, never a silent NaN', () => {
+    const r = run('sqrt(-1);');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(Number.isNaN(r.value as number)).toBe(false);
+  });
+  it('a non-number arg is fail-loud ML-LANG-BUILTIN-ARG', () => {
+    expect(run('abs("x");').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+  });
+  it('a user function shadows a numeric builtin', () => {
+    expect(run('function min(a, b) { 999 } min(1, 2);').value).toBe(999);
+  });
+});
+
+describe('format (number formatting)', () => {
+  it('format(x, digits) returns a fixed-decimal string', () => {
+    expect(run('format(3.14159, 2);').value).toBe('3.14');
+    expect(run('format(5, 0);').value).toBe('5');
+    expect(run('format(1.005, 2);').value).toBe('1.00');   // deterministic (IEEE-754 of 1.005), documented
+  });
+  it('format with a bad arg is fail-loud', () => {
+    expect(run('format("x", 2);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(run('format(1, -1);').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+  });
+});
+
+describe('registry ↔ dispatch cross-check', () => {
+  it('every IMPLEMENTED builtin is OWNED by dispatch (never falls through to a host unknown-call)', () => {
+    // Any implemented builtin, called with junk args, must return a value or ML-LANG-BUILTIN-ARG —
+    // NEVER ML-LANG-UNKNOWN-CALL (which would mean the registry advertises a name dispatch doesn't own,
+    // or a case exists without a registry row). rand/range are handled before the collection block.
+    for (const name of IMPLEMENTED_BUILTINS) {
+      if (name === 'rand' || name === 'range') continue;
+      const codes = run(`${name}(5, 5, 5);`).diagnostics.map((d) => d.code);
+      expect(codes, `builtin '${name}' fell through to UNKNOWN-CALL`).not.toContain('ML-LANG-UNKNOWN-CALL');
+    }
+  });
+});
+
+describe('extension seam — kind:value discriminant', () => {
+  it('a kind:value record return is allowed in expression position and deep-frozen', () => {
+    class ValueEnv extends RecordingHostEnv {
+      override resolveCall(head: string, _k: string, args: Arg[]): { handled: true; value: unknown; kind?: 'value' } | { handled: false } {
+        if (head === 'rgb') return { handled: true, kind: 'value', value: { r: (args[0]?.value as number), g: 0, b: 0 } };
+        return { handled: false };
+      }
+    }
+    const r = evaluateProgram('const c = rgb(255); c.r;', { host: new PlainStorageHost(), env: new ValueEnv() });
+    expect(r.value).toBe(255);
+    expect(r.diagnostics).toEqual([]);   // NO "node not valid in expression position" error
+  });
+  it('a kind:value return is frozen (a member write on it is ML-LANG-IMMUTABLE)', () => {
+    class ValueEnv extends RecordingHostEnv {
+      override resolveCall(head: string): { handled: true; value: unknown; kind?: 'value' } | { handled: false } {
+        return head === 'rgb' ? { handled: true, kind: 'value', value: { r: 1, g: 2, b: 3 } } : { handled: false };
+      }
+    }
+    const r = evaluateProgram('const c = rgb(); c.r = 9;', { host: new PlainStorageHost(), env: new ValueEnv() });
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+  });
+  it('a DEFAULT (no kind) object return is still rejected in expression position (back-compat)', () => {
+    class NodeEnv extends RecordingHostEnv {
+      override resolveCall(head: string): { handled: true; value: unknown } | { handled: false } {
+        return head === 'box' ? { handled: true, value: { kind: 'node' } } : { handled: false };
+      }
+    }
+    const r = evaluateProgram('box();', { host: new PlainStorageHost(), env: new NodeEnv() });
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-UNKNOWN-CALL')).toBe(true);   // node not valid here
   });
 });
