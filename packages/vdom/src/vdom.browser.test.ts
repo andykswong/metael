@@ -90,3 +90,55 @@ describe('@metael/vdom — real DOM', () => {
     h.unmount();
   });
 });
+
+describe('@metael/vdom — object-valued style prop (real DOM)', () => {
+  let host: HTMLElement;
+  beforeEach(() => { host = document.createElement('div'); document.body.appendChild(host); });
+
+  it('static object style serializes to CSS text', () => {
+    const src = `
+component Story() {
+  div({ style: { color: "red", fontSize: "12px" } }, "hi")
+}`;
+    const h = mount(src, host, {});
+    expect(h.diagnostics).toEqual([]);
+    const div = host.querySelector('div')!;
+    expect(div.getAttribute('style')).toBe('color: red; font-size: 12px');
+  });
+
+  it('nested-reactive style patches the live style attribute with NO walk re-run', () => {
+    const src = `
+component Story() {
+  let c = "red"
+  div() {
+    button({ onClick: () => { c = "blue" } }, "toggle")
+    span({ style: { color: c } }, "label")
+  }
+}`;
+    const h = mount(src, host, {});
+    expect(h.diagnostics).toEqual([]);
+    const span = host.querySelector('span')!;
+    expect(span.getAttribute('style')).toBe('color: red');
+    const before = h.passCount();
+    h.invokeHandler('Story#0/div#0/button#0', 'onClick', {});
+    expect(span.getAttribute('style')).toBe('color: blue');
+    expect(h.passCount()).toBe(before);   // fine-grained: no structural re-derive
+  });
+
+  it('whole-object-reactive style (a reactive let bound to a style object) patches in place', () => {
+    const src = `
+component Story() {
+  let s = { color: "red" }
+  div() {
+    button({ onClick: () => { s = { color: "green" } } }, "toggle")
+    span({ style: s }, "label")
+  }
+}`;
+    const h = mount(src, host, {});
+    expect(h.diagnostics).toEqual([]);
+    const span = host.querySelector('span')!;
+    expect(span.getAttribute('style')).toBe('color: red');
+    h.invokeHandler('Story#0/div#0/button#0', 'onClick', {});
+    expect(span.getAttribute('style')).toBe('color: green');
+  });
+});

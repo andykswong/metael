@@ -14,6 +14,21 @@ function isElementHead(head: string): boolean {
   return c >= 'a' && c <= 'z';
 }
 
+/** True if `v` is a plain object with at least one nested reactive Region value (a `{ color: <let> }`
+ *  style object). Such an object is not itself a Region, so it needs its own leaf-effect binding. */
+function isStyleWithRegion(v: unknown): boolean {
+  if (typeof v !== 'object' || v === null || Array.isArray(v) || isRegion(v)) return false;
+  return Object.values(v as Record<string, unknown>).some((x) => isRegion(x));
+}
+
+/** Resolve a style object's nested Regions to their current values (running each thunk), leaving
+ *  non-Region entries untouched. Returns a fresh plain object applyAttr can serialize to CSS text. */
+function resolveStyleRegions(style: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(style)) out[k] = isRegion(x) ? (x as Region).run() : x;
+  return out;
+}
+
 /**
  * The vnode HostEnvironment. Builds an element VNode for a lowercase head and declines a Capitalized one.
  * It is the single place a reactive scalar (a Region arg0) becomes a reactive TEXT node and a reactive
@@ -80,6 +95,15 @@ export class VDomHostEnv implements HostEnvironment {
       if (k === 'key') continue;
       if (typeof v === 'function' && isHandlerName(k)) {
         (node.handlers ??= []).push({ event: k, fn: v as (arg: unknown) => void });
+        continue;
+      }
+      // A `style` OBJECT whose entries contain a reactive Region (e.g. { color: c }) is a plain object,
+      // so the top-level isRegion(v) check below is false. Bind ONE leaf effect that re-reads the whole
+      // object (resolving each nested Region) and patches the single `style` attribute in place — the
+      // fine-grained path, whole-attribute granularity (style is one attribute). A static/no-Region
+      // object falls through to the plain assignment, which createDom/applyAttr serialize at build.
+      if (k === 'style' && isStyleWithRegion(v)) {
+        this.host!.runLeafEffect(() => resolveStyleRegions(v as Record<string, unknown>), (out) => { setAttr(node, k, out); });
         continue;
       }
       if (isRegion(v)) {

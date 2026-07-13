@@ -54,11 +54,38 @@ export function applyAttrs(el: Element, props: Record<string, unknown>): void {
   for (const [k, v] of Object.entries(props)) applyAttr(el, k, v);
 }
 
+/** Serialize a style OBJECT to a CSS declaration string ("a: b; c: d"). camelCase property names
+ *  become kebab-case; a `--custom` (or already-kebab) name is left as-is; null/undefined/false/true
+ *  entries are dropped (no CSS meaning); other values are coerced with String(). An empty result is
+ *  the empty string (the caller removes the attribute). This is the object-`style` path the minimal
+ *  "coerce-to-string → setAttribute" prop model did not cover — an object style previously stringified
+ *  to "[object Object]". Numeric values are emitted verbatim (`{ zIndex: 3 }` → "z-index: 3") — there is
+ *  no `px` auto-unit, so a unit must be written explicitly (`{ width: "3px" }`). */
+export function styleObjectToCss(style: Record<string, unknown>): string {
+  const decls: string[] = [];
+  for (const [prop, value] of Object.entries(style)) {
+    if (value === null || value === undefined || value === false || value === true) continue;
+    const name = prop.startsWith('--') ? prop : prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+    decls.push(`${name}: ${String(value)}`);
+  }
+  return decls.join('; ');
+}
+
 /** Set/patch ONE attribute on an element through the sanitizer (the single-attribute path a reactive-prop
  *  leaf effect drives — see setAttr). A null/undefined/false value or a blocked URL scheme removes it. */
 export function applyAttr(el: Element, k: string, v: unknown): void {
   if (!safeAttrName(k)) return;
   if (v === null || v === undefined || v === false) { el.removeAttribute(k); return; }
+  // Object-valued `style`: serialize to CSS text instead of String(v) → "[object Object]". An empty
+  // result removes the attribute. (A string style still flows through the scalar path below.)
+  if (k === 'style' && typeof v === 'object' && !Array.isArray(v)) {
+    const css = styleObjectToCss(v as Record<string, unknown>);
+    if (css === '') { el.removeAttribute(k); return; }
+    const safeCss = safeAttrValue(k, css);
+    if (safeCss === null) { el.removeAttribute(k); return; }
+    el.setAttribute(k, safeCss);
+    return;
+  }
   const raw = v === true ? '' : String(v);
   const safe = safeAttrValue(k, raw);
   if (safe === null) { el.removeAttribute(k); return; }

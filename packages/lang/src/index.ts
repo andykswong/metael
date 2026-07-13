@@ -19,3 +19,4 @@ export { lowerEntry } from './lower.ts';
 export type { LowerOptions, LowerResult } from './lower.ts';
 export { classifyProfile } from './classify.ts';
 export type { ProfileResult } from './classify.ts';
+export { printProgram, printExpr, printStmt, printString, printBlock, stripSpans, PrintDepthError, MAX_PRINT_DEPTH } from './print.ts';
