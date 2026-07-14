@@ -16,7 +16,7 @@ export function renderLanding(root: Element): void {
 
   // Fill the playground slot.
   const playSlot = root.querySelector('#hero-slot');
-  if (playSlot) createPlayground(playSlot, { compact: true, defaultExampleId: 'counter', openHref: '/play.html' });
+  if (playSlot) createPlayground(playSlot, { compact: true, defaultExampleId: 'counter', openHref: 'play.html' });
 
   // Fill the source-viewer slot: syntax-highlight the LANDING_SOURCE (the page's own code) using the same
   // lex()-driven highlighter the editor uses — so "this page shows its own source" is literally true.

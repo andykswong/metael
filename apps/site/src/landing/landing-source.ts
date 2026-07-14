@@ -6,14 +6,19 @@
 // slot. Copy names ONLY metael (clean-room). Keep this in sync with styles.css class names.
 export const REPO_URL = 'https://github.com/andykswong/metael';
 
+// In-app links are RELATIVE (no leading slash): index.html and play.html are siblings at the deploy root,
+// so `play.html` / `index.html` / `api/index.html` resolve correctly from either page under ANY mount
+// point — the GitHub Pages sub-path (…/metael/) today and a future root custom domain — with no config.
+// (See apps/site/vite.config.ts `base: './'`; a leading-slash path would 404 under the project sub-path.)
+
 // The shared top header, as a metael snippet reused verbatim by the landing (below) and the playground page
 // (main-play.ts mounts HEADER_SOURCE) — the same nav on both, both real metael programs.
 const HEADER = `header({ class: "ln-header" }) {
-    a({ class: "ln-wordmark", href: "/" }, "metael")
+    a({ class: "ln-wordmark", href: "index.html" }, "metael")
     nav({ class: "ln-nav" }) {
-      a({ class: "ln-nav-link", href: "/play.html" }, "Playground")
+      a({ class: "ln-nav-link", href: "play.html" }, "Playground")
       a({ class: "ln-nav-link", href: "${REPO_URL}", target: "_blank", rel: "noopener" }, "GitHub ↗")
-      a({ class: "ln-nav-link", href: "/api/index.html", target: "_blank", rel: "noopener" }, "API docs ↗")
+      a({ class: "ln-nav-link", href: "api/index.html", target: "_blank", rel: "noopener" }, "API docs ↗")
     }
   }`;
 

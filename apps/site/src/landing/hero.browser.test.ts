@@ -43,7 +43,7 @@ describe('renderLanding (real DOM) — a metael-rendered page', () => {
     expect(slot.querySelector('.pg-examples')).toBeNull();
     expect(slot.querySelector('.pg-share')).toBeNull();
     const open = slot.querySelector('a.pg-open') as HTMLAnchorElement;   // far-right toolbar action
-    expect(open.getAttribute('href')).toBe('/play.html');
+    expect(open.getAttribute('href')).toBe('play.html');   // relative — portable across mount points (sub-path / root domain)
     expect(open.textContent).toBe('Open in Playground →');   // consistent CTA, same-site arrow
     // the caption label is retained above the frame (no longer a link — the action moved into the toolbar)
     expect(container.querySelector('.ln-hero-caption-label')!.textContent).toContain('Live playground');
@@ -55,9 +55,9 @@ describe('renderLanding (real DOM) — a metael-rendered page', () => {
     renderLanding(container);
     const links = Array.from(container.querySelectorAll('.ln-nav-link')) as HTMLAnchorElement[];
     const byText = (t: string) => links.find((a) => a.textContent!.startsWith(t));
-    expect(byText('Playground')!.getAttribute('href')).toBe('/play.html');
+    expect(byText('Playground')!.getAttribute('href')).toBe('play.html');   // relative — portable across mount points
     expect(byText('GitHub')!.getAttribute('href')).toBe('https://github.com/andykswong/metael');
-    expect(byText('API docs')!.getAttribute('href')).toBe('/api/index.html');
+    expect(byText('API docs')!.getAttribute('href')).toBe('api/index.html');
     // external links open in a new tab safely
     expect(byText('GitHub')!.getAttribute('rel')).toBe('noopener');
   });

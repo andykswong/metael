@@ -8,12 +8,10 @@
   "entryPointStrategy": "resolve",
   "out": "apps/site/public/api",
   "name": "metael API",
-  "readme": "none",
-  "projectDocuments": ["GUIDE.md"],
+  "projectDocuments": ["README.md", "GUIDE.md"],
   "excludeInternal": true,
   "hideGenerator": false,
   "navigationLinks": {
-    "Playground": "/play.html",
     "GitHub": "https://github.com/andykswong/metael"
   }
 }

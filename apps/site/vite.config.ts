@@ -9,7 +9,11 @@ const alias = {
   '@metael/vdom': fileURLToPath(new URL('../../packages/vdom/src/index.ts', import.meta.url)),
 };
 
+// RELATIVE base (`./`): emitted asset URLs are relative to the HTML file, so the site works from ANY
+// mount point without reconfiguration — the GitHub Pages project sub-path today AND future root custom domain.
+// In-app links between pages are likewise relative (`play.html`, `api/index.html`) — see landing-source.ts.
 export default defineConfig({
+  base: './',
   resolve: { alias },
   build: {
     target: 'esnext',
