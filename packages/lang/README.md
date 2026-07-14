@@ -1,5 +1,9 @@
 # @metael/lang
 
+[![metael](https://img.shields.io/badge/project-metael-blueviolet.svg?style=flat-square&logo=github)](https://github.com/andykswong/metael)
+[![npm](https://img.shields.io/npm/v/@metael/lang?style=flat-square&logo=npm)](https://www.npmjs.com/package/@metael/lang)
+[![license: MIT](https://img.shields.io/badge/License-MIT-red.svg?style=flat-square)](./LICENSE)
+
 **The eval-free, port-injected JS/ES interpreter kernel** — the language layer of the [metael](../../README.md) substrate. Zero runtime dependencies; imports nothing domain-specific. (Its reactive runtime companion is [`@metael/runtime`](../runtime/README.md).)
 
 `@metael/lang` turns source text into a reactive-component AST and evaluates it against a domain's host, staying entirely vocabulary-agnostic:

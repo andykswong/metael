@@ -106,7 +106,27 @@ npm test                    # vitest run — node + Playwright/Chromium browser 
 npx vitest run --project node       # the pure-logic node suite only
 npx vitest run --project browser    # the @metael/vdom real-DOM proofs only (Chromium)
 npx vitest run packages/lang        # the @metael/lang suite specifically
+npm run test:coverage               # node suite with v8 coverage → coverage/lcov.info (Codecov)
 ```
+
+### Publishing (`@metael/{lang,runtime,vdom}` → npm)
+
+The three packages are **public, versioned in lockstep** (changesets `fixed`) and published with npm
+**provenance via Trusted Publishing (OIDC)** — no npm token; `@metael/site` is private (never published).
+Flow: add a changeset for any change (`npm run changeset`); the `release` workflow opens a "Version
+Packages" PR, and merging it bumps all three versions + changelogs and `changeset publish`es to npm.
+The registry exchanges the workflow's OIDC id-token for a short-lived publish credential (needs npm CLI
+≥ 11.5.1, which the workflow installs), so `id-token: write` is the only auth the publish step needs.
+CI (`build` workflow) runs build → typecheck → lint → test → coverage → Codecov on every push/PR to
+`main`; `pages` deploys the TypeDoc API + site to GitHub Pages.
+
+**One-time setup before the first release:** (1) a trusted publisher can only be configured on a package
+that already exists, so the **first `0.1.0` publish is a manual bootstrap** — `npm login`, then from a
+clean build `npm publish -w @metael/lang && npm publish -w @metael/runtime && npm publish -w @metael/vdom`
+(each has `publishConfig.access=public`; `npm publish --provenance` locally if you want provenance on the
+bootstrap). (2) On npmjs.com, for **each** of the three packages, add a GitHub Actions trusted publisher:
+org `andykswong`, repo `metael`, workflow filename `release.yaml`. (3) Add the `CODECOV_TOKEN` repo secret.
+After that, every release is tokenless OIDC — no `NPM_TOKEN` ever.
 
 Test runner is **Vitest** across two projects: a **`node`** project (pure-logic unit tests for `@metael/{lang,runtime}` and most of `@metael/vdom`) and a Playwright/Chromium **`browser`** project (`@metael/vdom`'s `*.browser.test.ts` real-DOM proofs — a node survives a reorder, focus/selection persist, event delegation fires, unsafe URLs are dropped, a removed subtree is torn down). `@metael/lang` and `@metael/runtime` are pure logic with no browser surface. The test suite is the conformance bar; keep it green and add a test with any logic change.
 

@@ -1,7 +1,6 @@
 {
   "name": "@metael/lang",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "metael eval-free JS/ES interpreter kernel — pure, port-injected. No deps.",
   "type": "module",
   "sideEffects": false,
@@ -9,12 +8,34 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["/dist"],
+  "engines": { "node": ">=24.0" },
   "scripts": {
     "clean": "rimraf dist *.tsbuildinfo",
+    "prebuild": "npm run lint",
     "build": "vite build",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "license": "MIT"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andykswong/metael.git",
+    "directory": "packages/lang"
+  },
+  "keywords": [
+    "metael",
+    "interpreter",
+    "eval-free",
+    "sandbox",
+    "dsl",
+    "language",
+    "reactive",
+    "ast",
+    "typescript"
+  ],
+  "author": "Andy K.S. Wong <andykswong@outlook.com>",
+  "license": "MIT",
+  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "homepage": "https://github.com/andykswong/metael#readme",
+  "publishConfig": { "access": "public", "provenance": true }
 }

@@ -1,0 +1,36 @@
+name: pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build:packages
+      - run: npm run docs:api                 # TypeDoc → apps/site/public/api (bundled into the site build)
+      - run: npm run build -w @metael/site     # → apps/site/dist (the site + the bundled API docs)
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./apps/site/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

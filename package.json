@@ -1,8 +1,10 @@
 {
   "name": "metael",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "A generic, eval-free, reactive scripting-language kernel — the monorepo for @metael/{lang,runtime,vdom}.",
   "type": "module",
+  "engines": { "node": ">=24.0" },
   "scripts": {
     "prepublishOnly": "npm run clean && npm run build:packages && npm test && npm run docs:api",
     "build:packages": "npm run build --ws --if-present",
@@ -12,12 +14,37 @@
     "typecheck": "tsc --noEmit && npm run typecheck --ws --if-present",
     "test": "vitest run",
     "test:node": "vitest run --project node",
-    "test:browser": "vitest run --project browser"
+    "test:browser": "vitest run --project browser",
+    "test:coverage": "vitest run --project node --coverage",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "npm run build:packages && changeset publish"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andykswong/metael.git"
+  },
+  "keywords": [
+    "metael",
+    "interpreter",
+    "eval-free",
+    "reactive",
+    "signals",
+    "dsl",
+    "vdom",
+    "sandbox",
+    "typescript"
+  ],
+  "author": "Andy K.S. Wong <andykswong@outlook.com>",
+  "license": "MIT",
+  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "homepage": "https://github.com/andykswong/metael#readme",
   "devDependencies": {
+    "@changesets/cli": "^2.27",
     "@eslint/js": "^10.0",
     "@types/node": "^26.0",
     "@vitest/browser-playwright": "^4.1",
+    "@vitest/coverage-v8": "^4.1",
     "eslint": "^10.0",
     "globals": "^17.0",
     "playwright": "^1.61",

@@ -1,0 +1,33 @@
+name: release
+on:
+  push:
+    branches: [main]
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+permissions:
+  contents: write        # push the "Version Packages" PR / tags / GitHub Release
+  pull-requests: write   # open/update the version PR
+  id-token: write        # npm Trusted Publishing (OIDC) — mints the short-lived publish token + provenance
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+        cache: 'npm'
+        # No `registry-url`: publishing auth comes from OIDC (Trusted Publishing), not a token in .npmrc.
+    # npm Trusted Publishing needs npm CLI >= 11.5.1 (newer than Node 24's bundled npm). The registry
+    # exchanges the workflow's OIDC id-token for a short-lived publish credential — so NO NPM_TOKEN, and
+    # provenance is generated automatically (no --provenance flag). The trusted publisher is configured
+    # per-package on npmjs.com (org/repo + this workflow filename); see the release note in README/AGENTS.
+    - run: npm install -g npm@latest
+    - run: npm ci
+    # Opens/updates a "Version Packages" PR when changesets are pending; when that PR is merged (versions
+    # already applied), runs `npm run release` → build + `changeset publish` (tokenless via OIDC).
+    - uses: changesets/action@v1
+      with:
+        version: npm run version
+        publish: npm run release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

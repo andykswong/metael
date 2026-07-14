@@ -1,5 +1,11 @@
 # metael
 
+[![metael](https://img.shields.io/badge/project-metael-blueviolet.svg?style=flat-square&logo=github)](https://github.com/andykswong/metael)
+[![npm](https://img.shields.io/npm/v/@metael/lang?style=flat-square&logo=npm)](https://www.npmjs.com/package/@metael/lang)
+[![license: MIT](https://img.shields.io/badge/License-MIT-red.svg?style=flat-square)](./LICENSE)
+[![build](https://img.shields.io/github/actions/workflow/status/andykswong/metael/build.yaml?style=flat-square)](https://github.com/andykswong/metael/actions/workflows/build.yaml)
+[![codecov](https://img.shields.io/codecov/c/github/andykswong/metael?style=flat-square&logo=codecov)](https://codecov.io/gh/andykswong/metael)
+
 **A generic, eval-free, reactive scripting-language kernel — the language, reactivity, and host-injection seam that domain frameworks build on.**
 
 metael owns the *domain-agnostic* core and nothing else: a legible JS/ES-syntax surface run by an **eval-free tree-walking interpreter**; a serializable, editable **reactive-component AST**; a **fine-grained reactive runtime**; and the **host-injection seam** by which a domain supplies *which words exist* and *what they build*. It knows how to declare, compose, resolve, and react — never which vocabulary exists or what it renders to. A domain framework = **metael + its vocabulary + its renderer**, so the same kernel can drive a virtual DOM, a scene graph, or a pure data pipeline.
@@ -20,7 +26,13 @@ metael owns the *domain-agnostic* core and nothing else: a legible JS/ES-syntax 
 
 ## Install
 
-The `@metael/*` packages are **workspace-internal and not yet published** to npm. Use them from a clone of this monorepo (see [Develop](#develop)) — build with `npm run build:packages` and consume via a workspace or `file:` reference. The layering is `@metael/lang` (the kernel alone) → `@metael/runtime` (+ reactivity) → `@metael/vdom` (+ the VDOM domain).
+```shell
+npm install @metael/lang                 # the kernel alone (zero runtime deps)
+npm install @metael/runtime               # + the reactive runtime (pulls @metael/lang)
+npm install @metael/vdom                  # + the VDOM domain (pulls @metael/{lang,runtime})
+```
+
+The layering is `@metael/lang` (the kernel alone) → `@metael/runtime` (+ reactivity) → `@metael/vdom` (+ the VDOM domain); install the layer you need and its dependencies come with it. To develop against the sources instead, clone this monorepo (see [Develop](#develop)) and `npm run build:packages`.
 
 Requires Node 24+ / a 2024+ browser (uses native `Symbol.dispose`). ESM-only.
 

@@ -1,5 +1,9 @@
 # @metael/vdom
 
+[![metael](https://img.shields.io/badge/project-metael-blueviolet.svg?style=flat-square&logo=github)](https://github.com/andykswong/metael)
+[![npm](https://img.shields.io/npm/v/@metael/vdom?style=flat-square&logo=npm)](https://www.npmjs.com/package/@metael/vdom)
+[![license: MIT](https://img.shields.io/badge/License-MIT-red.svg?style=flat-square)](./LICENSE)
+
 A small, signal-driven virtual DOM built entirely on the metael reactive kernel (`@metael/lang` +
 `@metael/runtime`). Write a `component` in the metael DSL; `@metael/vdom` renders it to real, live DOM.
 

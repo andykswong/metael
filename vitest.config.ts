@@ -13,6 +13,22 @@ const alias = {
 export default defineConfig({
   resolve: { alias },
   test: {
+    // Coverage (v8) is produced only for the publishable package SOURCES — the kernel + runtime + the
+    // vdom domain. Tests, build output, type-only barrels, dev-only demo/example fixtures, and the
+    // showcase app are excluded. Emitted as lcov (for Codecov) + text (local). Run via
+    // `npm run test:coverage` / `vitest --coverage`. NOTE: this is the NODE project only — parts of
+    // @metael/vdom (DOM reconcile/mount/patch) are exercised by *.browser.test.ts in real Chromium,
+    // which this run does not instrument, so their node-only lcov reads low; the Codecov gate accounts
+    // for that (informational, non-blocking) rather than forcing browser-coverage collection.
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      include: ['packages/*/src/**/*.ts'],
+      exclude: [
+        '**/*.test.ts', '**/*.browser.test.ts', '**/index.ts', '**/dist/**', 'apps/**',
+        'packages/vdom/src/demo.ts', 'packages/vdom/src/examples.ts',   // dev-only fixtures, not public API
+      ],
+    },
     projects: [
       {
         resolve: { alias },

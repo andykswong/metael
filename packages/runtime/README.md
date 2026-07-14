@@ -1,5 +1,9 @@
 # @metael/runtime
 
+[![metael](https://img.shields.io/badge/project-metael-blueviolet.svg?style=flat-square&logo=github)](https://github.com/andykswong/metael)
+[![npm](https://img.shields.io/npm/v/@metael/runtime?style=flat-square&logo=npm)](https://www.npmjs.com/package/@metael/runtime)
+[![license: MIT](https://img.shields.io/badge/License-MIT-red.svg?style=flat-square)](./LICENSE)
+
 **The fine-grained reactive runtime + the real host-injection port implementations** — the back half of the [metael](../../README.md) substrate. Depends only on [`@metael/lang`](../lang/README.md) + vendored `@vue/reactivity`.
 
 `@metael/runtime` turns a parsed program into host values and keeps them reactive: it supplies the reactive core the language layer's port *interfaces* were designed around, the real `ReactiveHost`, the generic structural diff, and a one-shot composition root that drives the whole derive.
