@@ -78,3 +78,50 @@ describe('@metael/vdom mount — fine-grained value path (real DOM)', () => {
     h.unmount();
   });
 });
+
+// A controlled input whose reactive `value` is reset after the user types must clear the DISPLAYED value.
+// The DOM tracks a dirty input's live value in the `.value` PROPERTY; `setAttribute('value', …)` only sets
+// the default and is ignored once the field is dirty — so `value` (and `checked`) must be patched as DOM
+// PROPERTIES, not attributes. Reproduces the Todo "input not cleared after Enter" bug.
+const CONTROLLED_INPUT = `
+component Story() {
+  let draft = ""
+  div() {
+    input({ class: "field", value: draft, onInput: (e) => { draft = e.value } })
+    button({ onClick: () => { draft = "" } }, "clear")
+  }
+}`;
+
+describe('@metael/vdom mount — controlled form-control value/checked (real DOM property, not attribute)', () => {
+  it('resetting a reactive `value` clears the input even after the user has typed (dirty field)', () => {
+    const h = mount(CONTROLLED_INPUT, container, {});
+    expect(h.diagnostics).toEqual([]);
+    const input = container.querySelector('input.field') as HTMLInputElement;
+    // Simulate the user typing (dirties the field — the live value now lives on the .value PROPERTY).
+    input.value = 'walk the dog';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(input.value).toBe('walk the dog');
+    // Reset the reactive state → the value prop must clear (the bug: only the attribute was cleared).
+    (container.querySelector('button') as HTMLButtonElement).click();
+    expect(input.value).toBe('');                      // the DISPLAYED value cleared (property patched)
+    h.unmount();
+  });
+
+  it('a reactive `checked` reflects on the live checkbox property (not just the attribute)', () => {
+    const src = `
+component Story() {
+  let on = false
+  div() {
+    input({ type: "checkbox", class: "cb", checked: on })
+    button({ onClick: () => { on = true } }, "check")
+  }
+}`;
+    const h = mount(src, container, {});
+    expect(h.diagnostics).toEqual([]);
+    const cb = container.querySelector('input.cb') as HTMLInputElement;
+    expect(cb.checked).toBe(false);
+    (container.querySelector('button') as HTMLButtonElement).click();
+    expect(cb.checked).toBe(true);                     // the live property flipped, not just the attribute
+    h.unmount();
+  });
+});

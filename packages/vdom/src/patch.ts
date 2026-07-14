@@ -71,10 +71,25 @@ export function styleObjectToCss(style: Record<string, unknown>): string {
   return decls.join('; ');
 }
 
+// Form-control attributes the browser tracks as LIVE DOM PROPERTIES that diverge from the attribute once
+// the control is "dirty" (user-edited): the attribute is only the *default*, so `setAttribute('value', …)`
+// is ignored after the user types. A controlled input whose reactive `value` is reset (e.g. clearing a
+// field after submit) must patch the `.value` PROPERTY; likewise a checkbox/radio `.checked`, a
+// `<select>`/`<option>` `.selected`, and the boolean `.disabled`. We mirror onto the property AND keep the
+// attribute in sync below (so createDom/reconcile + the a11y tree stay authoritative).
+const DOM_PROPERTIES = new Set(['value', 'checked', 'selected', 'disabled']);
+
 /** Set/patch ONE attribute on an element through the sanitizer (the single-attribute path a reactive-prop
  *  leaf effect drives — see setAttr). A null/undefined/false value or a blocked URL scheme removes it. */
 export function applyAttr(el: Element, k: string, v: unknown): void {
   if (!safeAttrName(k)) return;
+  // Mirror form-control live properties BEFORE the attribute paths (which early-return on a removal), so a
+  // dirty field's displayed value/checked actually updates. `value` is a string; the rest are booleans.
+  if (DOM_PROPERTIES.has(k) && k in el) {
+    const cleared = v === null || v === undefined || v === false;
+    if (k === 'value') (el as unknown as Record<string, unknown>).value = cleared ? '' : String(v);
+    else (el as unknown as Record<string, unknown>)[k] = !cleared;
+  }
   if (v === null || v === undefined || v === false) { el.removeAttribute(k); return; }
   // Object-valued `style`: serialize to CSS text instead of String(v) → "[object Object]". An empty
   // result removes the attribute. (A string style still flows through the scalar path below.)
