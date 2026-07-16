@@ -177,6 +177,33 @@ const TABS = `component Story() {
   }
 }`;
 
+// BUFFER_UI — the interactive custom-value demo: a reactive `let` typed array
+// mutated IN PLACE by buttons. It shows both element access (for-of over the
+// cells) AND whole-buffer display ("" + buf), so the per-value generation
+// signal drives a re-render on an in-place write.
+const BUFFER_UI = `component Story() {
+  let buf = f32([0, 0, 0, 0])
+  let cursor = 0
+  div({ class: "buffers" }) {
+    p("in-place typed-array mutation is reactive")
+    div({ class: "cells" }) {
+      for (const x of buf) { span({ class: "cell" }, x) }
+    }
+    p({ class: "disp" }, "" + buf)
+    div({ class: "row" }) {
+      button(
+        { onClick: () => { cursor = (cursor + 1) % 4 } },
+        "cell " + cursor
+      )
+      button(
+        { onClick: () => { buf[cursor] = buf[cursor] + 1 } },
+        "+1"
+      )
+      button({ onClick: () => { buf[cursor] = 0 } }, "reset")
+    }
+  }
+}`;
+
 // DASHBOARD — data-driven UI: a stat grid + a nested map (rows within cards), a Stat sub-component,
 // derived totals via reduce. Demonstrates function sub-components rendering into a component tree.
 const DASHBOARD = `function Stat({ label, value }) {
@@ -263,12 +290,32 @@ fromEntries(
   map(entries(bumped), (kv) => [kv[0], kv[1] * 2])
 )`;
 
+// CUSTOM_MATH — vec/mat operators + swizzles + dot/cross/length, plus a
+// generator-filled typed-array buffer. Every custom value is rendered via
+// indexing or display (a bare custom value would print as its display too).
+const CUSTOM_MATH = `const a = vec3(1, 2, 3)
+const b = vec3(4, 5, 6)
+const squares = f32(6, (i) => i * i)
+{
+  sum: (a + b).x,
+  scaled: (a * 2).z,
+  dot: dot(a, b),
+  cross_z: cross(a, b).z,
+  length: length(vec3(3, 4, 0)),
+  mat_vec: (mat3() * vec3(7, 8, 9)).y,
+  swizzle: a.xy.y,
+  vec_display: "" + a,
+  buffer: "" + squares,
+  first_four: [squares[0], squares[1], squares[2], squares[3]]
+}`;
+
 export const EXAMPLES: readonly Example[] = [
   { id: 'counter', label: 'Counter', target: 'ui', blurb: 'fine-grained updates — a click patches one text node, no re-render', source: COUNTER },
   { id: 'todo', label: 'Todo (full-featured)', target: 'ui', blurb: 'multi-component, per-row edit, callback props, keyed reconcile, filters', source: TODO },
   { id: 'form', label: 'Form binding', target: 'ui', blurb: 'reactive inputs + a live derived value; focus survives re-derive', source: FORM },
   { id: 'tabs', label: 'Tabs', target: 'ui', blurb: 'conditional rendering via if / else-if / else on a reactive let', source: TABS },
   { id: 'dashboard', label: 'Data dashboard', target: 'ui', blurb: 'data-driven UI: sub-components, nested lists, reduce-derived totals', source: DASHBOARD },
+  { id: 'buffer', label: 'Live buffer (reactive)', target: 'ui', blurb: 'in-place typed-array mutation re-renders via the per-value generation signal', source: BUFFER_UI },
   { id: 'fib', label: 'Fibonacci', target: 'compute', blurb: 'recursion + a pure map over a range', source: FIB },
   {
     id: 'data-transform', label: 'Grade transform', target: 'compute',
@@ -277,6 +324,7 @@ export const EXAMPLES: readonly Example[] = [
   },
   { id: 'group-count', label: 'Word frequency', target: 'compute', blurb: 'reduce + a hand-written has() + fromEntries — a groupBy without the builtin', source: GROUP_COUNT },
   { id: 'object-shape', label: 'Object reshape', target: 'compute', blurb: 'entries / map / fromEntries + spread — immutable object rebuild', source: OBJECT_SHAPE },
+  { id: 'custom-math', label: 'Vector & buffer math', target: 'compute', blurb: 'vec/mat operators, swizzles, dot/cross/length + a typed-array buffer', source: CUSTOM_MATH },
 ];
 
 export const DEFAULT_EXAMPLE_ID = 'todo';

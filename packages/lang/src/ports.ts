@@ -2,9 +2,11 @@
 // HostValue is OPAQUE to lang (for a domain it is a domain node). Test doubles here make
 // `lang` unit-testable in isolation and prove the boundary (lang imports NOTHING from the domain).
 import type { SourceSpan } from './diagnostics.ts';
+export type { SourceSpan } from './diagnostics.ts';
 
 export type HostValue = unknown;
 export type CellRef = unknown;
+export type GenerationRef = unknown;   // opaque handle to a per-value generation change-signal
 export type EffectRegion = () => unknown;   // a re-runnable evaluation of an AST region
 
 /** A REACTIVE prop value. An arg — or an object-literal ENTRY inside an arg — whose value
@@ -93,6 +95,13 @@ export interface ReactiveHost {
   // Owner boundary (Disposable). Every cell + leaf effect allocated inside `run` is registered on the
   // scope's DisposableStack, so disposing the returned Scope tears them all down at once.
   scope<T>(run: () => T): Scope<T>;
+  // A per-VALUE generation signal (a tracked reactive number, distinct from a component `let` cell): it
+  // is NOT keyed, NOT latched, NOT exported in state. A mutable custom value (a typed array) owns one; a
+  // reactive READ of the value subscribes via readGeneration, an in-place WRITE bumps it via
+  // touchGeneration (a strictly-changing number → always fires, unlike a same-reference writeCell no-op).
+  allocateGeneration(): GenerationRef;
+  readGeneration(gen: GenerationRef): number;   // value + register a dep if a scope is active
+  touchGeneration(gen: GenerationRef): void;    // increment (coalesced to one re-run at the change() flush)
 }
 
 /** Mints identity keys for reconciliation. The runtime supplies an impl closing over the domain's
@@ -205,6 +214,24 @@ export class PlainStorageHost implements ReactiveHost {
       value,
       [Symbol.dispose](): void { stack.dispose(); }, // DisposableStack.dispose() is already idempotent
     };
+  }
+
+  // Per-value generation signals: index → {value, subscribers}. Separate from cells (not latched).
+  private generations: { value: number; subs: Set<PlainEffect> }[] = [];
+
+  allocateGeneration(): GenerationRef {
+    this.generations.push({ value: 0, subs: new Set() });
+    return this.generations.length - 1;
+  }
+  readGeneration(gen: GenerationRef): number {
+    const g = this.generations[gen as number]!;
+    if (this.currentEffect) { g.subs.add(this.currentEffect); this.currentEffect.deps.add(g.subs); }
+    return g.value;
+  }
+  touchGeneration(gen: GenerationRef): void {
+    const g = this.generations[gen as number]!;
+    g.value += 1;
+    for (const effect of [...g.subs]) effect.runOnce();
   }
 }
 

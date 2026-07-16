@@ -25,6 +25,7 @@ import {
   Runner, ReturnSignal, BudgetSignal, resolveOptions, evalExpr, bindParams, execStmt, truthy,
   type UserFn, isUserFn, arrowInfo,
 } from './evaluate.ts';
+import { descriptorOf, generationOf } from './custom-types.ts';
 
 export interface LowerOptions extends EvalOptions {
   minter: KeyMinter;
@@ -165,11 +166,21 @@ function collectStmt(stmt: Stmt, env: Environment, ctx: KeyContext, r: Runner, o
       const iterValue = evalExpr(stmt.iterable, env, r);
       // Arrays iterate elements; strings iterate Unicode code points (Array.from — matching the
       // statement-position for-of + chars()/split("")). NOTE: this differs from string indexing s[i]
-      // and .length (UTF-16 code units) for astral characters. Any other value is not iterable.
+      // and .length (UTF-16 code units) for astral characters. A tagged custom iterable (e.g. a typed
+      // array) iterates via its descriptor; any other value is not iterable.
       let iter: unknown[];
       if (Array.isArray(iterValue)) iter = iterValue;
       else if (typeof iterValue === 'string') iter = Array.from(iterValue);
-      else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return; }
+      else {
+        const desc = descriptorOf(iterValue);
+        // Subscribe this child-collection read to the iterated value's in-place mutation: a for-of over a
+        // buffer bypasses readMember, so it must register the generation dep itself, or the collected list
+        // never re-derives on an in-place write. Mirrors the statement-position for-of in the evaluator.
+        const gen = generationOf(iterValue);
+        if (gen !== undefined) r.opt.host.readGeneration(gen);
+        if (desc?.iterate) iter = Array.from(desc.iterate(iterValue));
+        else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return; }
+      }
       iter.forEach((item, ordinal) => {
         r.tick();
         const loopEnv = new Environment(env);

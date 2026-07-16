@@ -2,16 +2,17 @@
 // (Vue exposes no public synchronous flush; this glue is ours). change() drains scheduled effects;
 // a converge guard fails closed (ReactiveFlushError) on cross-effect feedback past a fixed cap.
 // Domain-neutral: no @metael/lang import here.
-import { ref, computed, effect as vueEffect, type Ref } from '@vue/reactivity';
+import { shallowRef, computed, effect as vueEffect, type Ref } from '@vue/reactivity';
 
 export interface Signal<T> { get(): T; set(v: T): void }
 export interface Memo<T> { get(): T }
 
 export function signal<T>(initial: T): Signal<T> {
-  // signal() uses ref (deep-reactive): fine for the cell-per-reactive-let use; a value-identity/shallow
-  // variant can come later if a consumer needs it. (Object values are deep-proxied — identity not
-  // preserved, and nested in-place mutation triggers effects; deliberate for now.)
-  const r: Ref<T> = ref(initial) as Ref<T>;
+  // shallowRef: whole-value-replacement reactivity (set(newRef) fires on Object.is inequality). This is
+  // metael's model — a plain value is immutable + rebuilt to update, and a custom value's in-place
+  // mutation is tracked by its OWN generation signal (not the cell). A deep `ref` would also fail on a
+  // custom value whose non-configurable descriptor Symbol violates a Proxy invariant.
+  const r: Ref<T> = shallowRef(initial) as Ref<T>;
   return { get: () => r.value, set: (v: T) => { r.value = v; } };
 }
 export function memo<T>(compute: () => T): Memo<T> {

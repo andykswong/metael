@@ -27,6 +27,10 @@ export interface BuiltinSpec {
   /** True when the builtin is DECLARED in the model but NOT YET dispatched by the evaluator (a
    *  pre-tagged future-tier entry, e.g. transcendentals awaiting a shader/compute consumer). */
   readonly future?: boolean;
+  /** For a numeric builtin that lowers to a native target function (dot/cross/sqrt/sin/…), the target
+   *  builtin name. A compile consumer maps a call to this native name; a spec with no lowerName is
+   *  CPU/interpreter-only in a shader kernel. */
+  readonly lowerName?: string;
 }
 
 /** Every intrinsic metael knows about, keyed by name. Implemented entries (future !== true) are
@@ -73,9 +77,27 @@ export const BUILTINS: Readonly<Record<string, BuiltinSpec>> = Object.freeze({
   ceil:        { name: 'ceil',        profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1] },
   round:       { name: 'round',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1] },
   clamp:       { name: 'clamp',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [3, 3] },
-  sqrt:        { name: 'sqrt',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
-  pow:         { name: 'pow',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2] },
+  sqrt:        { name: 'sqrt',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'sqrt' },
+  pow:         { name: 'pow',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'pow' },
   format:      { name: 'format',      profile: 'host', portability: 'cpu-only',     takesClosure: false, arity: [2, 2] },
+
+  // --- typed-array constructors (custom-type protocol; buffers) ---
+  f32:         { name: 'f32',         profile: 'core', portability: 'gpu-tolerant', takesClosure: true,  arity: [1, 2] },
+  f64:         { name: 'f64',         profile: 'core', portability: 'exact',        takesClosure: true,  arity: [1, 2] },
+  i32:         { name: 'i32',         profile: 'core', portability: 'exact',        takesClosure: true,  arity: [1, 2] },
+  u32:         { name: 'u32',         profile: 'core', portability: 'exact',        takesClosure: true,  arity: [1, 2] },
+
+  // --- vec/mat constructors + numeric builtins (custom-type protocol; value math) ---
+  vec2:        { name: 'vec2',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 2] },
+  vec3:        { name: 'vec3',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 3] },
+  vec4:        { name: 'vec4',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 4] },
+  mat2:        { name: 'mat2',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 4] },
+  mat3:        { name: 'mat3',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 9] },
+  mat4:        { name: 'mat4',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 16] },
+  dot:         { name: 'dot',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'dot' },
+  cross:       { name: 'cross',       profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'cross' },
+  normalize:   { name: 'normalize',   profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'normalize' },
+  length:      { name: 'length',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'length' },
 
   // --- future tier (declared, NOT dispatched — reserve the classification) ---
   sin:         { name: 'sin',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], future: true },

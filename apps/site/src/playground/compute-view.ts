@@ -7,11 +7,22 @@
 // The only non-JSON leaves a metael program can yield are functions and `undefined`; those render as a
 // readable placeholder rather than being dropped/mangled.
 
+import { descriptorOf } from '@metael/lang';
+
 const MAX_WIDTH = 72;   // soft line-width budget (chars): compact under it, wrap over it
 
 function isPrimitive(v: unknown): boolean {
   return v === null || v === undefined || typeof v === 'number' || typeof v === 'boolean'
     || typeof v === 'string' || typeof v === 'function';
+}
+
+/** A custom value (vec/mat/typed array) is an opaque leaf: it stores its data behind a hidden Symbol,
+ *  so Object.entries sees nothing and it would render as `{}`. Render its own display string instead
+ *  (e.g. `vec3(1, 2, 3)` / `f32[0, 1, 4] (len 3)`). Returns undefined for a plain value. */
+function customLeaf(v: unknown): string | undefined {
+  const d = descriptorOf(v);
+  if (!d) return undefined;
+  return d.display ? d.display(v) : `[${d.name}]`;
 }
 
 function leaf(v: unknown): string {
@@ -24,6 +35,8 @@ function leaf(v: unknown): string {
 
 /** One-line rendering of any value (no width check) — used to test whether a subtree fits. */
 function compact(v: unknown): string {
+  const custom = customLeaf(v);
+  if (custom !== undefined) return custom;
   if (isPrimitive(v)) return leaf(v);
   if (Array.isArray(v)) return '[' + v.map(compact).join(', ') + ']';
   const entries = Object.entries(v as Record<string, unknown>);
@@ -34,6 +47,9 @@ function compact(v: unknown): string {
 
 /** Render `v` at `indent` levels of nesting: compact if it fits the width budget, else broken across lines. */
 function render(v: unknown, indent: number): string {
+  // A custom value is an opaque leaf: never break its display across lines.
+  const custom = customLeaf(v);
+  if (custom !== undefined) return custom;
   const oneLine = compact(v);
   if (indent * 2 + oneLine.length <= MAX_WIDTH) return oneLine;
 

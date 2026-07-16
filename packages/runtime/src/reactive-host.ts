@@ -1,4 +1,4 @@
-import type { ReactiveHost, CellRef, EffectRegion, Scope } from '@metael/lang';
+import type { ReactiveHost, CellRef, EffectRegion, Scope, GenerationRef } from '@metael/lang';
 import { signal, effect, type Signal } from './reactive.ts';
 
 /**
@@ -47,6 +47,16 @@ export class RuntimeReactiveHost implements ReactiveHost {
 
   readCell(cell: CellRef): unknown { return (cell as Signal<unknown>).get(); }
   writeCell(cell: CellRef, value: unknown): void { (cell as Signal<unknown>).set(value); }
+
+  // A per-VALUE generation signal (a tracked reactive number) backs reactive in-place mutation of a
+  // mutable custom value (a typed array). It is NOT a component cell: not pushed to `cells`, not keyed,
+  // not latched, not exported in state. A reactive read subscribes; an in-place write bumps it. `touch`
+  // writes get()+1 — always Object.is-distinct → always fires (a same-reference writeCell would no-op).
+  allocateGeneration(): GenerationRef {
+    return signal(0);
+  }
+  readGeneration(gen: GenerationRef): number { return (gen as Signal<number>).get(); }
+  touchGeneration(gen: GenerationRef): void { const s = gen as Signal<number>; s.set(s.get() + 1); }
 
   runLeafEffect(region: EffectRegion, sink: (v: unknown) => void): Disposable {
     // vue effect() runs `fn` synchronously once (initial pipe), tracking region's cell reads, then on

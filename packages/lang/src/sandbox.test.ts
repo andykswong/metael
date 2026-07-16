@@ -120,3 +120,118 @@ describe('sandbox: injected data cannot be mutated (via any path)', () => {
     expect((data.xs[0] as { n: number }).n).toBe(1);
   });
 });
+
+describe('sandbox: the custom-value-type protocol cannot be abused (typed arrays + vec/mat)', () => {
+  // A component-scoped run — a bare top-level `let` needs insideComponent (else ML-LANG-LET-SCOPE),
+  // so the alias / mutable-buffer cases below can declare `let b = a`.
+  const runIC = (src: string) =>
+    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), insideComponent: true });
+  // A tight-budget run so an unbounded generator/loop trips the STEP budget quickly (never hangs).
+  const codesBudget = (src: string, maxSteps = 5000) =>
+    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps }).diagnostics.map((d) => d.code);
+
+  // (1) A program cannot FORGE a descriptor — a plain object shaped like a buffer is NOT a custom type.
+  //     The DESCRIPTOR/GENERATION/FROZEN symbols are module-private and there is no builtin that reads them.
+  it('a plain object shaped like a buffer is not a custom type — no bounds-check, no coercion', () => {
+    // A numeric-index read on a plain object is ORDINARY object access: `o[0]` returns the own property
+    // value verbatim (1) — NOT a coerced typed-array read — and crucially an out-of-"range" `o[5]` is a
+    // benign null with NO ML-LANG-INDEX-RANGE. A REAL f32 buffer range-checks that same read (see the
+    // OOB test below), so the ABSENCE of the bounds-check here proves isCustomType stayed false: the
+    // program's plain object never picked up the typed-array descriptor's read machinery.
+    const r = run('const o = { length: 3, "0": 1 }; o[0];');
+    expect(r.value).toBe(1);
+    expect(r.diagnostics).toEqual([]);
+    const oob = run('const o = { length: 3, "0": 1 }; o[5];');
+    expect(oob.value).toBeNull();
+    expect(oob.diagnostics.some((d) => d.code === 'ML-LANG-INDEX-RANGE')).toBe(false);
+  });
+  it('an out-of-"range" numeric key on a forged buffer is a benign null, never a bounds diagnostic', () => {
+    const r = run('const o = { length: 1 }; o[5];');
+    expect(r.value).toBeNull();
+    expect(r.diagnostics).toEqual([]);
+  });
+  it('the descriptor-introspection helpers are NOT reachable from the language surface', () => {
+    // descriptorOf / isCustomType / generationOf are host TS, never registered as builtins — a call is
+    // just an unknown head. This is the structural reason a program can neither read nor forge a tag.
+    expect(codes('descriptorOf(f32([1,2,3]));')).toContain('ML-LANG-UNKNOWN-CALL');
+    expect(codes('isCustomType(f32([1,2,3]));')).toContain('ML-LANG-UNKNOWN-CALL');
+    expect(codes('generationOf(f32([1,2,3]));')).toContain('ML-LANG-UNKNOWN-CALL');
+  });
+
+  // (2) The Symbol-hidden store + the type tags never leak through keys/values/entries/spread/display.
+  it('keys/values/entries over a typed array surface no hidden fields (empty, no leak)', () => {
+    expect(run('keys(f32([1,2,3]));').value).toEqual([]);
+    expect(run('values(f32([1,2,3]));').value).toEqual([]);
+    expect(run('entries(f32([1,2,3]));').value).toEqual([]);
+  });
+  it('spreading a typed array copies no fields (the store/descriptor/generation stay hidden)', () => {
+    expect(run('keys({ ...f32([1,2,3]) });').value).toEqual([]);
+  });
+  it('keys over a vec surfaces no hidden fields either', () => {
+    expect(run('keys(vec3(1,2,3));').value).toEqual([]);
+  });
+  it('string-coercing a typed array yields the bounded display, never the raw backing store', () => {
+    const r = run('"" + f32([1,2,3]);');
+    expect(r.value).toBe('f32[1, 2, 3]');
+    expect(r.diagnostics).toEqual([]);
+  });
+
+  // (3) A forbidden key is rejected BEFORE the descriptor — no reaching __proto__/constructor through a tag.
+  for (const [label, ctor] of [['typed array', 'f32([1,2,3])'], ['vec', 'vec3(1,2,3)']] as const) {
+    it(`${label}: reading a forbidden key is blocked (${ctor}["__proto__"] / ["constructor"])`, () => {
+      expect(codes(`${ctor}["__proto__"];`)).toContain('ML-LANG-FORBIDDEN');
+      expect(codes(`${ctor}["constructor"];`)).toContain('ML-LANG-FORBIDDEN');
+    });
+    it(`${label}: writing a forbidden key is blocked (the forbidden-key check precedes the descriptor)`, () => {
+      expect(codes(`const a = ${ctor}; a["__proto__"] = 9;`)).toContain('ML-LANG-FORBIDDEN');
+    });
+  }
+
+  // (4) A `const` typed array (and any alias sharing its frozen box) is immutable; a vec is immutable at all.
+  it('a const typed array cannot be mutated in place — ML-LANG-IMMUTABLE, value unchanged', () => {
+    const r = run('const a = f32([1,2,3]); a[0] = 9; a[0];');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toBe(1);
+  });
+  it('mutating a const buffer through a let alias is still blocked (shared frozen box)', () => {
+    const r = runIC('const a = f32([1,2,3]); let b = a; b[0] = 9; b[0];');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toBe(1);
+  });
+  it('a vec is a pure immutable value — a member write is blocked, value unchanged', () => {
+    const r = run('const v = vec3(1,2,3); v.x = 9; v.x;');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-IMMUTABLE')).toBe(true);
+    expect(r.value).toBe(1);
+  });
+
+  // (5) A custom value cannot be a vector for a budget escape: construction is capped, a recursing/looping
+  //     generator fails closed on the step budget, and an OOB read is a diagnostic (never a crash).
+  it('an over-cap construction trips ML-LANG-BUDGET (no giant allocation)', () => {
+    expect(codes('f32(999999999);')).toContain('ML-LANG-BUDGET');
+  });
+  it('a recursing generator callback fails closed with ML-LANG-BUDGET, never hangs', () => {
+    // A recursive `function` used as the (n, fn) generator — the depth/step budget bounds it.
+    expect(codesBudget('function rec(n) { rec(n) } f32(4, (i) => rec(i));')).toContain('ML-LANG-BUDGET');
+  });
+  it('an unbounded-loop generator callback fails closed with ML-LANG-BUDGET, never hangs', () => {
+    // A generator arrow whose body calls a helper that loops forever — each tick charges the step budget.
+    expect(codesBudget('function loop() { while (true) { rand() } } f32(4, (i) => loop());')).toContain('ML-LANG-BUDGET');
+  });
+  it('an out-of-bounds buffer read is a diagnostic, not a crash (value null)', () => {
+    const r = run('f32([1])[999];');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-INDEX-RANGE')).toBe(true);
+    expect(r.value).toBeNull();
+  });
+
+  // (6) A custom value cannot smuggle a non-number into a numeric slot, nor silently coerce a whole-buffer op.
+  it('writing a non-number element is ML-LANG-BUILTIN-ARG (no silent coercion), value unchanged', () => {
+    const r = runIC('let a = f32([0]); a[0] = "x"; a[0];');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(r.value).toBe(0);
+  });
+  it('a whole-buffer binary op is ML-LANG-OP-UNSUPPORTED, not a silent coercion', () => {
+    const r = run('f32([1]) + f32([2]);');
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-OP-UNSUPPORTED')).toBe(true);
+    expect(r.value).toBeNull();
+  });
+});

@@ -6,7 +6,7 @@
 // Environment.assign); unbound calls dispatch to the HostEnvironment builtin.
 import type { Diagnostic } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
-import type { Expr, Stmt, Pattern } from './ast.ts';
+import type { Expr, Stmt, Pattern, BinOp } from './ast.ts';
 import { FORBIDDEN_KEYS } from './ast.ts';
 import { parseProgram } from './parser.ts';
 import { Environment } from './environment.ts';
@@ -14,11 +14,13 @@ import { makeSeededRng, range as seededRange } from './determinism.ts';
 import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
 import { defaultCompare, stableSort } from './sort.ts';
 import type { HostEnvironment, ReactiveHost, CellRef } from './ports.ts';
+import { descriptorOf, isCustomType, generationOf, isFrozenCustom, markFrozen, NOT_HANDLED, makeTypedArray, BUFFER_KINDS, BufferError, makeVec, makeMat, identityMat } from './custom-types.ts';
 
 export const DEFAULT_MAX_STEPS = 100_000;
 export const DEFAULT_MAX_TIME_MS = 1000;
 export const DEFAULT_MAX_DEPTH = 64;
 export const MAX_STRING_LENGTH = 10_000_000;
+export const MAX_BUFFER_LENGTH = 16_777_216;   // 2^24 elements — a typed-array construction cap (ML-LANG-BUDGET over)
 const TIME_CHECK_INTERVAL = 1024;
 
 export interface EvalOptions {
@@ -182,7 +184,7 @@ function evalIdent(expr: Extract<Expr, { kind: 'ident' }>, env: Environment, r: 
 function evalUnary(expr: Extract<Expr, { kind: 'unary' }>, env: Environment, r: Runner): unknown {
   const operand = evalExpr(expr.operand, env, r);
   switch (expr.op) {
-    case '-': return -toNum(operand);
+    case '-': return isCustomType(operand) ? evalCustomNeg(operand, expr, r) : -toNum(operand);
     case '!': return !truthy(operand);
     default: r.error('ML-LANG-UNKNOWN-OP', `unknown unary operator`, expr.span); return null;
   }
@@ -196,9 +198,19 @@ function evalBinary(expr: Extract<Expr, { kind: 'binary' }>, env: Environment, r
 
   const left = evalExpr(expr.left, env, r);
   const right = evalExpr(expr.right, env, r);
+  // Custom-type dispatch fires when an operand carries a descriptor — EXCEPT string `+`, which is a
+  // primitive fast path: concatenation coerces a custom operand through its bounded `display` (strOf),
+  // matching scalar string-coercion. So `"" + custom` yields the display string, not a dispatched op.
+  const stringConcat = op === '+' && (typeof left === 'string' || typeof right === 'string');
+  if (!stringConcat && (isCustomType(left) || isCustomType(right))) return evalCustomBinary(op, left, right, expr, r);
   switch (op) {
     case '+': {
       if (typeof left === 'string' || typeof right === 'string') {
+        // Subscribe a reactive read to a custom operand's in-place mutation when it is stringified: strOf
+        // does not receive the Runner (it is also called from the `join` builtin), so we register the
+        // generation dep HERE — the only string-concat site where `r` is in scope — so `"" + buf` in a UI
+        // re-renders on an in-place write, matching how readMember subscribes on element access.
+        for (const operand of [left, right]) { const g = generationOf(operand); if (g !== undefined) r.opt.host.readGeneration(g); }
         const ls = strOf(left), rs = strOf(right);
         // Fail CLOSED before allocating: a doubling loop grows a string exponentially while ticking
         // only per node, so the step budget can't bound it. String-cap is treated as a BUDGET case.
@@ -288,6 +300,70 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
   // Intrinsic seeded builtins — resolved BEFORE the host so determinism-with-randomness is a language
   // guarantee, not a per-domain re-implementation. Only fires for the UNBOUND-head path (a user
   // `function rand`/`range` shadows via evalCall's callee-resolution step, which never reaches here).
+  if (head === 'f32' || head === 'f64' || head === 'i32' || head === 'u32') {
+    r.tick();
+    const kind = head as keyof typeof BUFFER_KINDS;
+    const spec = BUFFER_KINDS[kind];
+    const a0 = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
+    let store: { [i: number]: number; length: number };
+    if (typeof a0 === 'number') {
+      const n = Math.floor(a0);
+      if (!Number.isFinite(n) || n < 0) { r.error('ML-LANG-BUILTIN-ARG', `${head}(n) — n must be a non-negative number`, expr.span); return deepFreeze([]); }
+      if (n > MAX_BUFFER_LENGTH) { r.error('ML-LANG-BUDGET', `${head}(${n}) exceeds the ${MAX_BUFFER_LENGTH}-element cap`, expr.span); return deepFreeze([]); }
+      store = new spec.ctor(n);
+      const genFn = expr.args[1] ? evalExpr(expr.args[1], env, r) : undefined;
+      if (genFn !== undefined) {
+        const call = typeof genFn === 'function' ? (i: number) => (genFn as (...xs: unknown[]) => unknown)(i) : isUserFn(genFn) ? (i: number) => callUserFn(genFn, [i], r) : null;
+        if (!call) { r.error('ML-LANG-BUILTIN-ARG', `${head}(n, fn) — the second argument must be a function`, expr.span); return deepFreeze([]); }
+        for (let i = 0; i < n; i++) { r.tick(); const val = call(i); store[i] = spec.coerce(typeof val === 'number' ? val : NaN); }
+      }
+    } else if (Array.isArray(a0)) {
+      if (a0.length > MAX_BUFFER_LENGTH) { r.error('ML-LANG-BUDGET', `${head}([…]) exceeds the ${MAX_BUFFER_LENGTH}-element cap`, expr.span); return deepFreeze([]); }
+      store = new spec.ctor(a0.length);
+      for (let i = 0; i < a0.length; i++) { r.tick(); const val = a0[i]; store[i] = spec.coerce(typeof val === 'number' ? val : NaN); }
+    } else {
+      r.error('ML-LANG-BUILTIN-ARG', `${head}(n | […] | (n, fn)) — bad argument`, expr.span);
+      return deepFreeze([]);
+    }
+    const gen = r.opt.host.allocateGeneration();
+    return makeTypedArray(kind, store, gen);
+  }
+  if (head === 'vec2' || head === 'vec3' || head === 'vec4') {
+    r.tick();
+    const n = head === 'vec2' ? 2 : head === 'vec3' ? 3 : 4;
+    const a = expr.args.map((x) => evalExpr(x, env, r));
+    if (a.some((x) => typeof x !== 'number')) { r.error('ML-LANG-BUILTIN-ARG', `${head}(numbers) — all components must be numbers`, expr.span); return deepFreeze([]); }
+    const nums = a as number[];
+    if (nums.length === 1) return makeVec(new Array<number>(n).fill(nums[0] as number), false);   // splat
+    if (nums.length !== n) { r.error('ML-LANG-BUILTIN-ARG', `${head} needs 1 (splat) or ${n} components`, expr.span); return deepFreeze([]); }
+    return makeVec(nums, false);
+  }
+  if (head === 'mat2' || head === 'mat3' || head === 'mat4') {
+    r.tick();
+    const n = head === 'mat2' ? 2 : head === 'mat3' ? 3 : 4;
+    const a = expr.args.map((x) => evalExpr(x, env, r));
+    if (a.length === 0) return makeMat(identityMat(n), n);
+    if (a.some((x) => typeof x !== 'number') || a.length !== n * n) { r.error('ML-LANG-BUILTIN-ARG', `${head}() (identity) or ${head}(${n * n} numbers, row-major)`, expr.span); return deepFreeze([]); }
+    return makeMat(a as number[], n);
+  }
+  if (head === 'dot' || head === 'cross' || head === 'normalize' || head === 'length') {
+    r.tick();
+    const a = expr.args.map((x) => evalExpr(x, env, r));
+    const comps = (v: unknown): number[] | null => {
+      const d = descriptorOf(v);
+      if (!d || d.lower?.shape !== 'vecN') return null;
+      const n = d.lower.n ?? 0; const out: number[] = [];
+      for (let i = 0; i < n; i++) { const c = d.getMember!(v, 'xyzw'[i] as string); if (typeof c !== 'number') return null; out.push(c); }
+      return out;
+    };
+    const badVec = (): unknown => { r.error('ML-LANG-BUILTIN-ARG', `${head}(vec…) — argument must be a vector`, expr.span); return deepFreeze([]); };
+    if (head === 'dot') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== y.length) return badVec(); return x.reduce((s, xi, i) => s + xi * (y[i] as number), 0); }
+    if (head === 'cross') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== 3 || y.length !== 3) return badVec(); return makeVec([x[1]!*y[2]!-x[2]!*y[1]!, x[2]!*y[0]!-x[0]!*y[2]!, x[0]!*y[1]!-x[1]!*y[0]!], false); }
+    if (head === 'length') { const x = comps(a[0]); if (!x) return badVec(); return Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0)); }
+    // normalize
+    const x = comps(a[0]); if (!x) return badVec(); const len = Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0));
+    return makeVec(len === 0 ? x : x.map((xi) => xi / len), false);
+  }
   if (head === 'rand') { r.tick(); return r.rng(); }
   if (head === 'range') {
     r.tick();
@@ -584,7 +660,9 @@ export function execStmt(stmt: Stmt, env: Environment, r: Runner, insideComponen
     case 'expr': return evalExpr(stmt.expr, env, r);
     case 'const': {
       if (env.hasOwn(stmt.name)) { r.error('ML-LANG-REDECL', `'${stmt.name}' already declared`, stmt.span); return null; }
-      env.define(stmt.name, evalExpr(stmt.init, env, r), { kind: 'const' });
+      const cval = evalExpr(stmt.init, env, r);
+      if (isCustomType(cval)) markFrozen(cval);
+      env.define(stmt.name, cval, { kind: 'const' });
       return null;
     }
     case 'let': {
@@ -635,7 +713,16 @@ export function execStmt(stmt: Stmt, env: Environment, r: Runner, insideComponen
       let iter: unknown[];
       if (Array.isArray(iterValue)) iter = iterValue;
       else if (typeof iterValue === 'string') iter = Array.from(iterValue);
-      else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return null; }
+      else {
+        const desc = descriptorOf(iterValue);
+        // Subscribe a reactive read to the iterated value's in-place mutation: a for-of over a buffer is
+        // a whole-value read that bypasses readMember, so it must register the generation dep itself, or a
+        // UI iterating the buffer never re-renders on an in-place write.
+        const gen = generationOf(iterValue);
+        if (gen !== undefined) r.opt.host.readGeneration(gen);
+        if (desc?.iterate) iter = Array.from(desc.iterate(iterValue));
+        else { r.error('ML-LANG-FOR-ITER', 'for-of expects an array or string to iterate', stmt.span); return null; }
+      }
       for (const item of iter) {
         r.tick();
         const loopEnv = new Environment(env);
@@ -687,15 +774,38 @@ function execAssign(stmt: Extract<Stmt, { kind: 'assign' }>, env: Environment, r
     // A forbidden-key write is a prototype-pollution attempt — surface the specific security diagnostic
     // (it is blocked as immutable too, but the more-specific code is the useful one).
     if (FORBIDDEN_KEYS.has(target.property)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${target.property}'`, stmt.span); return; }
+    const base = evalExpr(target.object, env, r);
+    const desc = descriptorOf(base);
+    if (desc?.setMember) {
+      // Immutability is the interpreter's own FROZEN box (set by a `const` binding / deepFreeze), OR-ed
+      // with any extra descriptor-defined frozen condition — so a `const`-bound value (and any alias
+      // sharing the same box by reference) is immutable even if the descriptor omits a `frozen` handler.
+      if (isFrozenCustom(base) || desc.frozen?.(base)) { r.error('ML-LANG-IMMUTABLE', `cannot assign to a member of a frozen value`, stmt.span); return; }
+      try { desc.setMember(base, target.property, value); } catch (e) { if (e instanceof BufferError) { r.error(e.code, e.detail, stmt.span); return; } throw e; }
+      const gen = generationOf(base);
+      if (gen !== undefined) r.opt.host.touchGeneration(gen);
+      return;
+    }
     r.error('ML-LANG-IMMUTABLE', `cannot assign to a member of an immutable value; rebuild with spread instead (e.g. o = { ...o, ${target.property}: … })`, stmt.span);
     return;
   }
 
   if (target.kind === 'index') {
     // Resolve the key only to catch a computed forbidden key (prototype pollution); the write itself is
-    // rejected as immutable regardless of the key.
+    // rejected as immutable unless the base is a mutable custom value with a setIndex handler.
     const key = evalExpr(target.index, env, r);
     if (typeof key === 'string' && FORBIDDEN_KEYS.has(key)) { r.error('ML-LANG-FORBIDDEN', `forbidden key '${key}'`, stmt.span); return; }
+    const base = evalExpr(target.object, env, r);
+    const desc = descriptorOf(base);
+    if (desc?.setIndex) {
+      // Interpreter-owned FROZEN box OR-ed with a descriptor frozen condition — see the member branch.
+      if (isFrozenCustom(base) || desc.frozen?.(base)) { r.error('ML-LANG-IMMUTABLE', `cannot assign to an index of a frozen value`, stmt.span); return; }
+      if (typeof key !== 'number' && typeof key !== 'string') { r.error('ML-LANG-BAD-KEY', 'index key is null/undefined', stmt.span); return; }
+      try { desc.setIndex(base, key, value); } catch (e) { if (e instanceof BufferError) { r.error(e.code, e.detail, stmt.span); return; } throw e; }
+      const gen = generationOf(base);
+      if (gen !== undefined) r.opt.host.touchGeneration(gen);
+      return;
+    }
     r.error('ML-LANG-IMMUTABLE', 'cannot assign to an index of an immutable value; rebuild with spread or a builtin (map/filter/…) instead', stmt.span);
     return;
   }
@@ -708,6 +818,24 @@ function execAssign(stmt: Extract<Stmt, { kind: 'assign' }>, env: Environment, r
 function readMember(container: unknown, key: string | number, expr: Expr, r: Runner): unknown {
   if (typeof key === 'string' && FORBIDDEN_KEYS.has(key)) { r.error('ML-LANG-FORBIDDEN', `forbidden path segment '${key}'`, expr.span); return null; }
   if (container === null || container === undefined) return null;
+  const desc = descriptorOf(container);
+  if (desc) {
+    const gen = generationOf(container);
+    if (gen !== undefined) r.opt.host.readGeneration(gen);
+    try {
+      if (typeof key === 'number') {
+        if (desc.getIndex) { const res = desc.getIndex(container, key); if (res !== NOT_HANDLED) return res; }
+      } else {
+        if (desc.getMember) { const res = desc.getMember(container, key); if (res !== NOT_HANDLED) return res; }
+        else if (desc.getIndex) { const res = desc.getIndex(container, key); if (res !== NOT_HANDLED) return res; }
+      }
+    } catch (e) {
+      if (e instanceof BufferError) { r.error(e.code, e.detail, expr.span); return null; }
+      throw e;
+    }
+    r.error('ML-LANG-UNKNOWN-MEMBER', `type '${desc.name}' has no member '${String(key)}'`, expr.span);
+    return null;
+  }
   if (Array.isArray(container)) {
     if (typeof key === 'number') {
       if (!Number.isInteger(key) || key < 0 || key >= container.length) { r.error('ML-LANG-INDEX-RANGE', `index ${key} is out of range (length ${container.length})`, expr.span); return null; }
@@ -728,6 +856,8 @@ function readMember(container: unknown, key: string | number, expr: Expr, r: Run
 }
 
 export function truthy(v: unknown): boolean {
+  const d = descriptorOf(v);
+  if (d?.truthy) return d.truthy(v);
   return !(v === false || v === null || v === undefined || v === 0 || v === '' || (typeof v === 'number' && Number.isNaN(v)));
 }
 function toNum(v: unknown): number {
@@ -740,6 +870,8 @@ function strOf(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  const d = descriptorOf(v);
+  if (d) return d.display ? d.display(v) : `[${d.name}]`;
   try { return JSON.stringify(v) ?? ''; } catch { return ''; }
 }
 /** Round half-to-even ("banker's rounding") — matches the shader `round` builtins so a `core` numeric
@@ -757,6 +889,11 @@ function roundHalfEven(x: number): number {
  *  values the evaluator builds). */
 function deepFreeze<T>(v: T): T {
   if (v === null || typeof v !== 'object' || Object.isFrozen(v)) return v;
+  // A custom value is an opaque leaf: never Object.freeze it (a typed array's integer-indexed store
+  // would throw). But it IS made immutable here via its own frozen box, so a value reached through a
+  // frozen container (a const-bound object/array literal, injected data, a kind:'value' host return)
+  // cannot be mutated in place. markFrozen is a no-op for an immutable custom value (no frozen box).
+  if (isCustomType(v)) { markFrozen(v); return v; }
   if (Array.isArray(v)) { for (const x of v) deepFreeze(x); return Object.freeze(v) as T; }
   for (const val of Object.values(v as Record<string, unknown>)) deepFreeze(val);
   return Object.freeze(v) as T;
@@ -774,6 +911,45 @@ function compare(a: unknown, b: unknown): number {
   const na = toNum(a), nb = toNum(b);
   if (Number.isNaN(na) || Number.isNaN(nb)) return NaN;
   return na < nb ? -1 : na > nb ? 1 : 0;
+}
+
+/** Dispatch a binary op when at least one operand carries a descriptor. Rule: try the LEFT operand's
+ *  descriptor first, then the RIGHT's (so `2 * vec` reaches vec's binary as (op, 2, vec)). Equality
+ *  prefers a dedicated `equals?` handler on either operand, else `binary('==')`, else reference identity
+ *  (never fail-loud). An arithmetic/relational op returning NOT_HANDLED on both → ML-LANG-OP-UNSUPPORTED. */
+function evalCustomBinary(op: BinOp, left: unknown, right: unknown, expr: Extract<Expr, { kind: 'binary' }>, r: Runner): unknown {
+  const dl = descriptorOf(left);
+  const dr = descriptorOf(right);
+  if (op === '==' || op === '!=') {
+    // A custom value compared with null/undefined follows reference identity — a custom value is a
+    // non-null object, so it is never == null. Guard here so a descriptor handler is never called with a
+    // null/undefined operand it may not tolerate (the idiomatic `x == null` must never fail-loud).
+    if (left === null || left === undefined || right === null || right === undefined) {
+      const eq = left === right;
+      return op === '==' ? eq : !eq;
+    }
+    let eq: boolean;
+    if (dl?.equals) eq = dl.equals(left, right);
+    else if (dr?.equals) eq = dr.equals(left, right);
+    else {
+      // Equality FALLBACK always asks binary('==') (never binary('!=')) so `==` and `!=` stay symmetric;
+      // the outer `op === '==' ? eq : !eq` negates for `!=`. A NOT_HANDLED result → reference identity.
+      let res: unknown = dl?.binary ? dl.binary('==', left, right) : NOT_HANDLED;
+      if (res === NOT_HANDLED) res = dr?.binary ? dr.binary('==', left, right) : NOT_HANDLED;
+      eq = res === NOT_HANDLED ? left === right : Boolean(res);
+    }
+    return op === '==' ? eq : !eq;
+  }
+  let res: unknown = dl?.binary ? dl.binary(op, left, right) : NOT_HANDLED;
+  if (res === NOT_HANDLED) res = dr?.binary ? dr.binary(op, left, right) : NOT_HANDLED;
+  if (res === NOT_HANDLED) { r.error('ML-LANG-OP-UNSUPPORTED', `operator '${op}' is not defined for this type`, expr.span); return null; }
+  return res;
+}
+function evalCustomNeg(x: unknown, expr: Extract<Expr, { kind: 'unary' }>, r: Runner): unknown {
+  const d = descriptorOf(x);
+  const res = d?.neg ? d.neg(x) : NOT_HANDLED;
+  if (res === NOT_HANDLED) { r.error('ML-LANG-OP-UNSUPPORTED', `unary '-' is not defined for this type`, expr.span); return null; }
+  return res;
 }
 
 // ─────────────────────────────────────────── program entry ───────────────────────────────────────────
