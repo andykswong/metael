@@ -1,5 +1,5 @@
 import { type VNode, FRAGMENT, TEXT } from './vnode.ts';
-import { createDom, applyAttrs, planLevel, textNodeOf } from './patch.ts';
+import { createDom, applyAttrs, planLevel, textNodeOf, registerTextNode, registerElement } from './patch.ts';
 
 /** A fragment has no DOM node, so its children reconcile against their real siblings. Flatten fragments
  *  into a single child sequence before diffing (recursively). */
@@ -48,11 +48,22 @@ export function reconcile(parent: Element, prevChildren: VNode[], nextChildren: 
 
 /** Patch a matched retained vnode in place from its fresh counterpart, then recurse children. Key/tag are
  *  stable (matched by key). Text nodes patch their data; elements patch attributes. Mutates the retained
- *  vnode's props/children so it stays the source of truth for the next diff. */
+ *  vnode's props/children so it stays the source of truth for the next diff.
+ *
+ *  Crucially, it also re-registers the live DOM node onto the FRESH vnode. This pass's leaf effects (bound
+ *  during this pass's derive) close over the FRESH vnodes and patch through `textNodeOf`/`elementOf`; but
+ *  the retained tree keeps the matched (prior) vnode. Without transferring the DOM registration to the
+ *  fresh vnode, a later value-only write would sink into a fresh vnode with no DOM node (a silent no-op)
+ *  and the fine-grained leaf path would go dead after any structural re-derive that preserved the node. */
 function patchNode(target: VNode, fresh: VNode, doc: Document, index: Map<string, Element>, hooks: ReconcileHooks): void {
-  if (target.tag === TEXT) { target.text = fresh.text; const n = textNodeOf(target); if (n) n.data = fresh.text ?? ''; return; }
+  if (target.tag === TEXT) {
+    target.text = fresh.text;
+    const n = textNodeOf(target);
+    if (n) { n.data = fresh.text ?? ''; registerTextNode(fresh, n); }   // this pass's leaf effect patches `fresh`
+    return;
+  }
   const el = index.get(target.key);
-  if (el) applyAttrs(el, fresh.props);
+  if (el) { applyAttrs(el, fresh.props); registerElement(fresh, el); }  // this pass's prop leaf effects patch `fresh`
   target.props = fresh.props;
   if (el) target.children = reconcile(el, target.children, fresh.children, doc, index, hooks);
 }
