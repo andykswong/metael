@@ -26,12 +26,13 @@ describe('builtins registry', () => {
   });
   it('isBuiltin recognizes a known name and rejects an unknown one', () => {
     expect(isBuiltin('map')).toBe(true);
-    expect(isBuiltin('sin')).toBe(true);           // future-declared still counts as a builtin name
+    expect(isBuiltin('sin')).toBe(true);
     expect(isBuiltin('definitelyNotABuiltin')).toBe(false);
   });
   it('IMPLEMENTED_BUILTINS excludes future-only entries', () => {
     expect(IMPLEMENTED_BUILTINS.has('map')).toBe(true);
-    expect(IMPLEMENTED_BUILTINS.has('sin')).toBe(false);
-    expect(IMPLEMENTED_BUILTINS.has('mix')).toBe(false);
+    // The transcendentals are now dispatched, not future-only.
+    expect(IMPLEMENTED_BUILTINS.has('sin')).toBe(true);
+    expect(IMPLEMENTED_BUILTINS.has('mix')).toBe(true);
   });
 });

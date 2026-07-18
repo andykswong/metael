@@ -74,6 +74,30 @@ export function resolveOptions(options: EvalOptions): Required<Pick<EvalOptions,
   return { maxSteps: DEFAULT_MAX_STEPS, maxTimeMs: DEFAULT_MAX_TIME_MS, maxDepth: DEFAULT_MAX_DEPTH, maxStringLength: MAX_STRING_LENGTH, ...options };
 }
 
+export interface MakeCallableOpts {
+  host: ReactiveHost; env: HostEnvironment;
+  maxSteps?: number; maxTimeMs?: number; maxDepth?: number; maxStringLength?: number; seed?: number;
+}
+/** Build a plain JS callable that invokes a UserFn under a FRESH Runner (its own budget). Used to run a
+ *  kernel per sampled coordinate as a top-level call — distinct from a reentrant in-interpretation call,
+ *  which shares the ambient Runner. A raised maxSteps sizes the Runner for a large loop bound. */
+export function makeCallable(fn: UserFn, opts: MakeCallableOpts): (...args: unknown[]) => unknown {
+  const runner = new Runner(resolveOptions(opts));
+  return (...args: unknown[]) => {
+    try { return callUserFn(fn, args, runner); }
+    catch (e) { if (e instanceof BudgetSignal || e instanceof ReturnSignal) return null; throw e; }
+  };
+}
+/** Read a free identifier's resolved value from a UserFn's captured closure. A reactive `let` reads
+ *  through host.readCell (registers a dep if a scope is active). Returns undefined if unbound. */
+export function readClosureValue(fn: UserFn, name: string, host: ReactiveHost): unknown {
+  const env = fn.closure;
+  if (!env.has(name)) return undefined;
+  const meta = env.meta(name);
+  if (meta?.kind === 'let' && meta.cell !== undefined) return host.readCell(meta.cell as CellRef) ?? null;
+  return env.get(name) ?? null;
+}
+
 export class Runner {
   steps = 0;
   depth = 0;
@@ -386,21 +410,35 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
       return null;
     };
     const badArg = (msg: string): unknown => { r.error('ML-LANG-BUILTIN-ARG', msg, expr.span); return deepFreeze([]); };
+    // Accept any value the language can iterate: a plain array as-is, or a custom value whose descriptor
+    // exposes `iterate` (a typed array — the same seam for-of uses). Returns null for a non-iterable, so the
+    // caller's existing bad-argument diagnostic fires. Materializes to a plain array (results stay plain
+    // arrays). A whole-buffer read must register the value's generation dependency — like for-of, index, and
+    // concat — so a reactive context re-runs on an in-place write; iterate alone would not subscribe.
+    const asArray = (xs: unknown): unknown[] | null => {
+      if (Array.isArray(xs)) return xs;
+      const desc = descriptorOf(xs);
+      const iter = desc?.iterate?.(xs);
+      if (!iter) return null;
+      const gen = generationOf(xs);
+      if (gen !== undefined) r.opt.host.readGeneration(gen);
+      return Array.from(iter);
+    };
 
     switch (head) {
       case 'map': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`map(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`map(array, fn) — bad arguments`);
         const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); out.push(fn(x, i)); }); return deepFreeze(out);
       }
       case 'filter': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`filter(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`filter(array, fn) — bad arguments`);
         const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); if (truthy(fn(x, i))) out.push(x); }); return deepFreeze(out);
       }
       case 'reduce': {
-        const xs = a[0]; const fn = asFn(a[1]); const init = a[2];
-        if (!Array.isArray(xs) || !fn) return badArg(`reduce(array, fn, init) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]); const init = a[2];
+        if (!xs || !fn) return badArg(`reduce(array, fn, init) — bad arguments`);
         let acc = init; xs.forEach((x, i) => { r.tick(); acc = fn(acc, x, i); }); return acc;   // acc may be a scalar; a collection acc is already frozen by its own eval
       }
       case 'keys': {
@@ -426,38 +464,38 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         return deepFreeze(out);
       }
       case 'some': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`some(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`some(array, fn) — bad arguments`);
         for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return true; }
         return false;
       }
       case 'every': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`every(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`every(array, fn) — bad arguments`);
         for (let i = 0; i < xs.length; i++) { r.tick(); if (!truthy(fn(xs[i], i))) return false; }
         return true;
       }
       case 'find': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`find(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`find(array, fn) — bad arguments`);
         for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return xs[i] ?? null; }
         return null;
       }
       case 'findIndex': {
-        const xs = a[0]; const fn = asFn(a[1]);
-        if (!Array.isArray(xs) || !fn) return badArg(`findIndex(array, fn) — bad arguments`);
+        const xs = asArray(a[0]); const fn = asFn(a[1]);
+        if (!xs || !fn) return badArg(`findIndex(array, fn) — bad arguments`);
         for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return i; }
         return -1;
       }
       case 'includes': {
-        const xs = a[0]; const v = a[1];
-        if (!Array.isArray(xs)) return badArg(`includes(array, value) — bad argument`);
+        const xs = asArray(a[0]); const v = a[1];
+        if (!xs) return badArg(`includes(array, value) — bad argument`);
         for (const x of xs) { r.tick(); if (looseEquals(x, v)) return true; }
         return false;
       }
       case 'sort': {
-        const xs = a[0]; const cmpArg = a[1];
-        if (!Array.isArray(xs)) return badArg(`sort(array, comparator?) — bad argument`);
+        const xs = asArray(a[0]); const cmpArg = a[1];
+        if (!xs) return badArg(`sort(array, comparator?) — bad argument`);
         // Tick PER COMPARISON on the default path too — an O(n log n) sort of a large array must be
         // budget-charged or it bypasses the step + time guards (tick() is the only deadline check point).
         if (cmpArg === undefined) return deepFreeze(stableSort(xs, (x, y) => { r.tick(); return defaultCompare(x, y); }));
@@ -476,8 +514,8 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         return deepFreeze(stableSort(xs, cmp));
       }
       case 'slice': {
-        const xs = a[0];
-        if (!Array.isArray(xs)) return badArg(`slice(array, start, end?) — bad argument`);
+        const xs = asArray(a[0]);
+        if (!xs) return badArg(`slice(array, start, end?) — bad argument`);
         const len = xs.length;
         const norm = (v: unknown, dflt: number): number => {
           if (v === undefined) return dflt;
@@ -492,8 +530,8 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         return deepFreeze(out);
       }
       case 'reverse': {
-        const xs = a[0];
-        if (!Array.isArray(xs)) return badArg(`reverse(array) — bad argument`);
+        const xs = asArray(a[0]);
+        if (!xs) return badArg(`reverse(array) — bad argument`);
         const out: unknown[] = [];
         for (let i = xs.length - 1; i >= 0; i--) { r.tick(); out.push(xs[i]); }
         return deepFreeze(out);
@@ -506,8 +544,8 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         return deepFreeze(parts);
       }
       case 'join': {
-        const xs = a[0]; const sep = a[1];
-        if (!Array.isArray(xs) || typeof sep !== 'string') return badArg(`join(array, separator) — bad arguments`);
+        const xs = asArray(a[0]); const sep = a[1];
+        if (!xs || typeof sep !== 'string') return badArg(`join(array, separator) — bad arguments`);
         const parts: string[] = [];
         // Fail CLOSED before the result crosses the string cap (mirrors the `+` operator): a large
         // collection of large strings could otherwise build a string past the engine limit and throw
@@ -548,7 +586,9 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
         return s.trim();
       }
       case 'min': case 'max': case 'abs': case 'sign': case 'floor':
-      case 'ceil': case 'round': case 'clamp': case 'sqrt': case 'pow': {
+      case 'ceil': case 'round': case 'clamp': case 'sqrt': case 'pow':
+      case 'sin': case 'cos': case 'exp': case 'log': case 'fract':
+      case 'step': case 'mix': case 'smoothstep': {
         // Coerce a numeric arg or fail: returns null when the value is not a finite/coercible number.
         const num = (v: unknown): number | null => {
           if (typeof v === 'number') return Number.isNaN(v) ? null : v;
@@ -567,6 +607,19 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
           case 'clamp': { const x = num(a[0]); const lo = num(a[1]); const hi = num(a[2]); return (x === null || lo === null || hi === null) ? bad() : Math.min(Math.max(x, lo), hi); }
           case 'sqrt': { const x = num(a[0]); if (x === null) return bad(); if (x < 0) return badArg(`sqrt(x) — x must be >= 0`); return Math.sqrt(x); }
           case 'pow': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.pow(x, y); }
+          case 'sin': { const x = num(a[0]); return x === null ? bad() : Math.sin(x); }
+          case 'cos': { const x = num(a[0]); return x === null ? bad() : Math.cos(x); }
+          case 'exp': { const x = num(a[0]); return x === null ? bad() : Math.exp(x); }
+          case 'log': { const x = num(a[0]); if (x === null) return bad(); if (x <= 0) return badArg(`log(x) — x must be > 0`); return Math.log(x); }
+          case 'fract': { const x = num(a[0]); return x === null ? bad() : x - Math.floor(x); }
+          case 'step': { const edge = num(a[0]); const x = num(a[1]); return (edge === null || x === null) ? bad() : (x < edge ? 0 : 1); }
+          case 'mix': { const p = num(a[0]); const q = num(a[1]); const t = num(a[2]); return (p === null || q === null || t === null) ? bad() : p + (q - p) * t; }
+          case 'smoothstep': {
+            const e0 = num(a[0]); const e1 = num(a[1]); const x = num(a[2]);
+            if (e0 === null || e1 === null || x === null) return bad();
+            const t = e1 === e0 ? 0 : Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
+            return t * t * (3 - 2 * t);
+          }
         }
         return null;   // unreachable (inner switch is exhaustive) but satisfies the block's return type
       }
@@ -608,7 +661,7 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
   return null;
 }
 
-function callUserFn(fn: UserFn, args: unknown[], r: Runner): unknown {
+export function callUserFn(fn: UserFn, args: unknown[], r: Runner): unknown {
   if (++r.depth > r.opt.maxDepth) { r.depth--; throw new BudgetSignal('depth'); }
   const frame = new Environment(fn.closure);
   bindParams(fn.params, args, frame);

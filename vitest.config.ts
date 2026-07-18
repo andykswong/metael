@@ -8,6 +8,7 @@ const alias = {
   '@metael/lang': fileURLToPath(new URL('./packages/lang/src/index.ts', import.meta.url)),
   '@metael/runtime': fileURLToPath(new URL('./packages/runtime/src/index.ts', import.meta.url)),
   '@metael/vdom': fileURLToPath(new URL('./packages/vdom/src/index.ts', import.meta.url)),
+  '@metael/gpu': fileURLToPath(new URL('./packages/gpu/src/index.ts', import.meta.url)),
 };
 
 export default defineConfig({

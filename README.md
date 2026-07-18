@@ -23,6 +23,7 @@ metael owns the *domain-agnostic* core and nothing else: a legible JS/ES-syntax 
 | **`@metael/lang`** | The eval-free interpreter kernel: lexer → parser → discriminated-union AST → tree-walking evaluator (fuel/time/depth budgets + prototype guards), the host-injection port **interfaces** + test doubles, the generic child-collection walk, the builtin set + a capability-profile registry & classifier. | nothing (zero runtime deps) |
 | **`@metael/runtime`** | The fine-grained reactive core (`signal`/`memo`/`effect` + a synchronous `change()` batch/flush + a converge guard), the generic **keyed-list diff** (add/remove/move + teardown), the real `ReactiveHost`, and the one-shot `derive()` composition root. | `@metael/lang` + `@vue/reactivity` |
 | **`@metael/vdom`** | A Preact-signals-style virtual DOM built entirely on the kernel — write a `component` in the metael DSL and it renders to real, live DOM. A worked example of a full domain on top of metael. | `@metael/{lang,runtime}` |
+| **`@metael/gpu`** | An eval-free, verifiable GPU-compute engine: write a compute kernel as a metael `component`, it gates lowerability, emits WGSL/GLSL/CPU, runs on a real WebGPU→WebGL2→CPU adapter ladder, and returns a reactive resource verified against the interpreter oracle. | `@metael/{lang,runtime}` |
 
 ## Install
 
@@ -30,11 +31,12 @@ metael owns the *domain-agnostic* core and nothing else: a legible JS/ES-syntax 
 npm install @metael/lang                 # the kernel alone (zero runtime deps)
 npm install @metael/runtime               # + the reactive runtime (pulls @metael/lang)
 npm install @metael/vdom                  # + the VDOM domain (pulls @metael/{lang,runtime})
+npm install @metael/gpu                   # + the verifiable GPU-compute engine (pulls @metael/{lang,runtime})
 ```
 
 The layering is `@metael/lang` (the kernel alone) → `@metael/runtime` (+ reactivity) → `@metael/vdom` (+ the VDOM domain); install the layer you need and its dependencies come with it. To develop against the sources instead, clone this monorepo (see [Develop](#develop)) and `npm run build:packages`.
 
-Requires Node 24+ / a 2024+ browser (uses native `Symbol.dispose`). ESM-only.
+Requires Node 24+ / a 2024+ browser (uses native `Symbol.dispose`). ESM-only. `@metael/*` types that own resources (the gpu engine façade, its pipeline cache, the reactive host scopes) implement native `Disposable` — use them with `using` or call `[Symbol.dispose]()`. Runtimes without native `Symbol.dispose`/`DisposableStack` (e.g. Safari) need the `disposablestack/auto` polyfill (imported by the showcase app's entry points).
 
 ## Usage
 
@@ -71,6 +73,27 @@ const { program, diagnostics } = parseProgram('const x = 1; x + 2');
 program.stmts;                        // → the AST (discriminated-union nodes, each span-tagged)
 ```
 
+### Provide your own vocabulary (a custom host)
+
+The injection seam is the heart of metael: a domain implements a small `HostEnvironment` (plus, for stateful output, a `ReactiveHost` + `KeyMinter`) and gets the whole language/AST/reactivity/determinism substrate for free. `resolveCall` turns a head into a value — return `{ handled: true, value }` for a node, `{ handled: true, value, kind: 'value' }` for a pure scalar/record value usable in expression position, or `{ handled: false }` to let metael emit a wrapper.
+
+```ts
+import type { HostEnvironment, Arg } from '@metael/lang';
+
+const env: HostEnvironment = {
+  resolveCall(head, key, args: Arg[]) {
+    if (head === 'rgb') {
+      const [r, g, b] = args.map((a) => a.value as number);
+      return { handled: true, kind: 'value', value: { r, g, b } };   // a pure value builtin
+    }
+    return { handled: false };
+  },
+};
+// evaluateProgram('rgb(255, 0, 0).r', { host, env, … }) → 255
+```
+
+See [GUIDE.md](./GUIDE.md) §8–§10 for the composition model and the port shapes, and the generated API docs (`npm run docs:api`). The two sections below — a reactive UI and GPU compute — are full domains built on exactly this seam.
+
 ### Render a reactive UI (`@metael/vdom`)
 
 Write a `component` in the metael DSL; `mount` renders it to real DOM and keeps it live — a reactive `let` read by one attribute patches only that node; a change to the tree's shape reconciles by key.
@@ -95,28 +118,29 @@ const handle = mount(source, container, {});   // third arg = MountOptions (all 
 handle.unmount();
 ```
 
-*(`div`/`button`/`span` are `@metael/vdom`'s vocabulary — a lowercase head becomes an element. A different host defines different words. `count` is read only by `span`, so a click patches just that text node — no re-render.)*
+*(`div`/`button`/`span` are `@metael/vdom`'s vocabulary — a lowercase head becomes an element; a different host (like the `rgb` one above) defines different words. `count` is read only by `span`, so a click patches just that text node — no re-render.)*
 
-### Provide your own vocabulary (a custom host)
+### Compute on the GPU (`@metael/gpu`)
 
-A domain implements a small `HostEnvironment` (plus, for stateful output, a `ReactiveHost` + `KeyMinter`) and gets the whole language/AST/reactivity/determinism substrate for free. `resolveCall` turns a head into a value — return `{ handled: true, value }` for a node, `{ handled: true, value, kind: 'value' }` for a pure scalar/record value usable in expression position, or `{ handled: false }` to let metael emit a wrapper.
+Write a compute kernel as a metael `component`; the engine gates lowerability, emits WGSL/GLSL/CPU, dispatches on a real WebGPU→WebGL2→CPU ladder, and (with `verify`) checks the GPU output against the interpreter oracle.
 
 ```ts
-import type { HostEnvironment, Arg } from '@metael/lang';
+import { createGpuEngine } from '@metael/gpu';
 
-const env: HostEnvironment = {
-  resolveCall(head, key, args: Arg[]) {
-    if (head === 'rgb') {
-      const [r, g, b] = args.map((a) => a.value as number);
-      return { handled: true, kind: 'value', value: { r, g, b } };   // a pure value builtin
-    }
-    return { handled: false };
-  },
-};
-// evaluateProgram('rgb(255, 0, 0).r', { host, env, … }) → 255
+const gpu = createGpuEngine();                       // real WebGPU→WebGL2→CPU ladder ({ cpuOnly: true } for tests)
+const kernel = gpu.compile(`
+  const a = f32(1024, (i) => i)
+  component double(i) { return a[i] * 2 }
+  double
+`);
+const r = await gpu.settle(kernel, { output: [1024], verify: true });
+r.backend;    // 'webgpu' | 'webgl2' | 'cpu'
+r.value;      // the settled Float32 output as number[]
+r.match?.ok;  // true — the GPU output matched the interpreter oracle (verify:true)
+gpu[Symbol.dispose]();
 ```
 
-See [GUIDE.md](./GUIDE.md) §8–§10 for the composition model and the port shapes, and the generated API docs (`npm run docs:api`).
+See [`packages/gpu/README.md`](packages/gpu/README.md) for the full host API + the in-DSL `gpu`/`gpuReduce`/`gpuHistogram` heads.
 
 ## Develop
 

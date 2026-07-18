@@ -5,7 +5,7 @@
 // Collections capability in use: spread ([...a]/{...o}) for immutable rebuilds, map/filter/reduce/entries.
 // Immutable-update idiom: reassign a `let` with a rebuilt collection — never a member write.
 
-export type Target = 'ui' | 'compute';
+export type Target = 'ui' | 'compute' | 'gpu';
 
 export interface Example {
   readonly id: string;
@@ -309,6 +309,280 @@ const squares = f32(6, (i) => i * i)
   first_four: [squares[0], squares[1], squares[2], squares[3]]
 }`;
 
+// ITERABLE_BUILTINS — the collection builtins accept a typed array directly:
+// map/filter/slice/reduce/sort iterate an f32 buffer the same as a plain
+// array, each returning a plain array. No copy-to-array step needed.
+const ITERABLE_BUILTINS = `const buf = f32([3, 1, 4, 1, 5, 9, 2, 6])
+{
+  doubled: join(map(slice(buf, 0, 4), (x) => x * 2), ", "),
+  evens: filter(buf, (x) => x % 2 == 0),
+  total: reduce(buf, (a, x) => a + x, 0),
+  sorted: sort(buf)
+}`;
+
+// GPU_COMPUTE_MAP — a gpu kernel on the pure COMPUTE path: the program's value is the resource's fields,
+//  pretty-printed like any compute story (no div.gpu-demo, no vdom). Runs headless via runComputeSettled.
+const GPU_COMPUTE_MAP = `
+const x = f32(4, (i) => i)
+component k(i) { return x[i] * 2 }
+const r = gpu(k, { output: [4], backend: "cpu" })
+{ result: r }`;
+
+// ─── GPU examples ─── (entry component `Story`; the kernel is itself a
+// `component` so its `let` accumulator works end-to-end. `gpu(kernel, {output})`
+// returns a reactive resource; its fields render via vdom display heads. The
+// resource settles asynchronously — the panel shows "computing…" first, then
+// the backend, the first computed cells, and the generated WGSL. `verify` +
+// `benchmark` are OPT-IN — a dispatch is GPU-only by default; these demos turn
+// them on to show the correctness proof + the CPU race.)
+
+// GPU_MATMUL — the race: an N×N matrix product. The kernel(row, col) reads two
+// buffers with a `let sum` accumulator over range(N). We opt into verify +
+// benchmark so the panel can show the first computed cells, the CPU-baseline
+// timing, and the interpreter match — plus the emitted compute shader.
+const GPU_MATMUL = `component Story() {
+  const N = 32
+  const a = f32(N * N, (i) => rand())
+  const b = f32(N * N, (i) => rand())
+  component product(row, col) {
+    let sum = 0
+    for (const k of range(N)) {
+      sum = sum + a[row * N + k] * b[k * N + col]
+    }
+    return sum
+  }
+  const r = gpu(product, {
+    output: [N, N], verify: true, benchmark: true
+  })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const cells = join(map(head, (x) => round(x * 100) / 100), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, N + "x" + N + " matmul")
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "first cells: [" + cells + ", ...]")
+      const gms = r.gpuMs == null ? "GPU n/a (CPU floor)"
+        : "GPU " + round(r.gpuMs * 100) / 100 + "ms"
+      const cms = "CPU " + round(r.cpuMs * 100) / 100 + "ms"
+      const spd = r.speedup == null ? ""
+        : " (" + round(r.speedup * 10) / 10 + "x)"
+      const line = r.backend + " " + gms + " " + cms + spd
+      p({ class: "status" }, line + " match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_VECMATH — the correctness proof: a per-lane length(vec3(...)) map. vec3
+// intermediates + a transcendental (sqrt via length) lower to the shader. We
+// opt into verify so the oracle re-checks every sampled lane against the
+// interpreter (r.match.ok) — and show the first computed lengths.
+const GPU_VECMATH = `component Story() {
+  const n = 64
+  const xs = f32(n * 3, (i) => i)
+  component lane(i) {
+    const v = vec3(xs[i * 3], xs[i * 3 + 1], xs[i * 3 + 2])
+    return length(v)
+  }
+  const r = gpu(lane, { output: [n], verify: true })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const lens = join(map(head, (x) => round(x * 100) / 100), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "length(vec3) x " + n)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "lengths: [" + lens + ", ...]")
+      p({ class: "status" },
+        r.backend + " - matches interpreter=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_BUFFER — buffer output: the kernel's result settles as a reusable f32
+// buffer (a typed array), not a plain array. That handle is itself iterable,
+// so the same slice/map/join display idiom reads its first cells — proving
+// the collection builtins accept a typed array. verify re-checks the cells
+// against the interpreter oracle (r.match.ok).
+const GPU_BUFFER = `component Story() {
+  const N = 48
+  const x = f32(N, (i) => i)
+  component k(i) { return x[i] * 3 }
+  const r = gpu(k, {
+    output: [N], outputType: "buffer", verify: true
+  })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const cells = join(map(head, (v) => round(v)), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "buffer output x " + N)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "first cells: [" + cells + ", ...]")
+      p({ class: "status" },
+        r.backend + " - reusable f32 buffer, match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_PIPELINE — pipelining: kernel A produces a resident "gpu-buffer" (the
+// output stays on-device), and kernel B closes over A's handle (r.value) as
+// an INPUT — a two-stage GPU pipeline. B re-dispatches whenever A settles a
+// fresh handle (the resource memo keys off the handle, not a plain array). On
+// the first synchronous frame A is still pending (rA.value == null), so we
+// only build + dispatch B once A has a handle; until then the panel shows A's
+// pending state. Reading B's handle back (slice/map) yields (i+1)*2.
+const GPU_PIPELINE = `component Story() {
+  const N = 48
+  const seed = f32(N, (i) => i)
+  component a(i) { return seed[i] + 1 }
+  const rA = gpu(a, { output: [N], outputType: "gpu-buffer" })
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "2-stage pipeline x " + N)
+    if (rA.value == null) {
+      p({ class: "status" }, "stage A on " + rA.backend + "...")
+    } else {
+      const bufA = rA.value
+      component b(i) { return bufA[i] * 2 }
+      const rB = gpu(b, { output: [N] })
+      const head = rB.value == null ? [] : slice(rB.value, 0, 6)
+      const cells = join(map(head, (x) => round(x)), ", ")
+      if (rB.pending) {
+        p({ class: "status" }, "stage B on " + rB.backend + "...")
+      } else {
+        p({ class: "result" }, "B = A*2: [" + cells + ", ...]")
+        p({ class: "status" }, "A -> B on " + rB.backend)
+      }
+      pre({ class: "shader" }, rB.wgsl)
+    }
+  }
+}`;
+
+// GPU_VECOUT — single vecN output: the kernel RETURNS a vec3 per cell, so the
+// result is an N-wide interleaved buffer (cell c, component k at c*3 + k), not
+// one value per cell. All three backends produce the SAME flat layout. We show
+// the first two output vectors as (x, y, z) triples + the interpreter match.
+const GPU_VECOUT = `component Story() {
+  const n = 64
+  const src = f32(n * 3, (i) => i)
+  component k(i) {
+    const v = vec3(src[i*3], src[i*3+1], src[i*3+2])
+    return v + vec3(1, 2, 3)
+  }
+  const r = gpu(k, {
+    output: [n], outputElement: "vec3", verify: true
+  })
+  const flat = r.value == null ? [] : slice(r.value, 0, 6)
+  const v0 = join(map(slice(flat, 0, 3), (x) => round(x)), ", ")
+  const v1 = join(map(slice(flat, 3, 6), (x) => round(x)), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "vec3 output x " + n)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" },
+        "cell0=(" + v0 + ") cell1=(" + v1 + ")")
+      p({ class: "status" },
+        r.backend + " - N-wide buffer, match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_MULTIOUT — multi-output: the kernel returns a NAMED OBJECT { sum, diff },
+// so the run writes two output buffers instead of one. `outputs: { sum, diff }`
+// declares them; `r.value` is null (no single primary value) and each named
+// buffer settles into `r.outputs`. Under the hood each output is one dispatch
+// over the proven single-output path, so verify re-checks every output against
+// the interpreter (r.match.ok covers all of them). We show each buffer's first
+// cells, guarding r.outputs == null while the dispatch is pending.
+const GPU_MULTIOUT = `component Story() {
+  const N = 32
+  const a = f32(N, (i) => i + 1)
+  const b = f32(N, (i) => i)
+  component k(i) {
+    return { sum: a[i] + b[i], diff: a[i] - b[i] }
+  }
+  const r = gpu(k, {
+    output: [N], outputs: { sum: {}, diff: {} }, verify: true
+  })
+  const outs = r.outputs
+  const sumH = outs == null ? [] : slice(outs.sum, 0, 6)
+  const diffH = outs == null ? [] : slice(outs.diff, 0, 6)
+  const sums = join(map(sumH, (x) => round(x)), ", ")
+  const diffs = join(map(diffH, (x) => round(x)), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "multi-output x " + N)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "sum:  [" + sums + ", ...]")
+      p({ class: "result" }, "diff: [" + diffs + ", ...]")
+      p({ class: "status" },
+        r.backend + " - 2 named buffers, match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_REDUCE — the reduction kernel kind: a 2-arg associative reducer folds a
+// generated buffer to ONE scalar via `gpuReduce`. On WebGL2 this runs as a
+// multi-pass ping-pong tree reduction (the generated shader folds a tile of
+// elements per texel, over ping-pong textures); on the CPU floor it is the
+// exact linear fold (the oracle). We opt into verify so the panel shows the
+// GPU tree fold matches the linear oracle (a tree reorders the fold → a
+// float-associativity tolerance) + the emitted reduction shader.
+const GPU_REDUCE = `component Story() {
+  const N = 1024
+  const xs = f32(N, (i) => i + 1)
+  component add(acc, x) { return acc + x }
+  const r = gpuReduce(add, {
+    input: xs, identity: 0, verify: true
+  })
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "sum of 1.." + N)
+    if (r.pending) {
+      p({ class: "status" }, "reducing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "sum = " + r.value)
+      p({ class: "status" },
+        r.backend + " tree fold, match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.glsl)
+  }
+}`;
+
+// GPU_HISTOGRAM — the histogram kernel kind: a 1-arg bin-mapper scatters each
+// input element into a per-bin count via `gpuHistogram`. On WebGPU this runs
+// as a single-pass atomic scatter (atomicAdd into a read_write bins buffer);
+// WebGL2 has NO fragment-shader atomics, so a histogram FALLS TO the CPU
+// oracle there (settled backend 'cpu' + a note). An out-of-range bin index is
+// dropped (both backends agree). We opt into verify so the panel shows the
+// counts match the exact CPU oracle + the emitted atomic-scatter shader.
+const GPU_HISTOGRAM = `component Story() {
+  const N = 256
+  const xs = f32(N, (i) => i)
+  component binOf(x) { return x % 4 }
+  const r = gpuHistogram(binOf, {
+    input: xs, bins: 4, verify: true
+  })
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, N + " values into 4 bins (x % 4)")
+    if (r.pending) {
+      p({ class: "status" }, "scattering on " + r.backend + "...")
+    } else {
+      p({ class: "result" },
+        "counts = [" + join(r.value, ", ") + "]")
+      p({ class: "status" },
+        r.backend + " scatter, match=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
 export const EXAMPLES: readonly Example[] = [
   { id: 'counter', label: 'Counter', target: 'ui', blurb: 'fine-grained updates — a click patches one text node, no re-render', source: COUNTER },
   { id: 'todo', label: 'Todo (full-featured)', target: 'ui', blurb: 'multi-component, per-row edit, callback props, keyed reconcile, filters', source: TODO },
@@ -325,13 +599,23 @@ export const EXAMPLES: readonly Example[] = [
   { id: 'group-count', label: 'Word frequency', target: 'compute', blurb: 'reduce + a hand-written has() + fromEntries — a groupBy without the builtin', source: GROUP_COUNT },
   { id: 'object-shape', label: 'Object reshape', target: 'compute', blurb: 'entries / map / fromEntries + spread — immutable object rebuild', source: OBJECT_SHAPE },
   { id: 'custom-math', label: 'Vector & buffer math', target: 'compute', blurb: 'vec/mat operators, swizzles, dot/cross/length + a typed-array buffer', source: CUSTOM_MATH },
+  { id: 'iterable-builtins', label: 'Builtins over a buffer', target: 'compute', blurb: 'map/filter/slice/reduce/sort accept a typed array directly', source: ITERABLE_BUILTINS },
+  { id: 'gpu-compute-map', label: 'GPU map (compute)', target: 'compute', blurb: 'a gpu map kernel on the pure compute path — the settled resource, pretty-printed (no DOM)', source: GPU_COMPUTE_MAP },
+  { id: 'gpu-matmul', label: 'GPU matmul (race)', target: 'gpu', blurb: 'N×N matmul on the GPU vs CPU — the generated WGSL + the backend + timing', source: GPU_MATMUL },
+  { id: 'gpu-vecmath', label: 'GPU vec-math', target: 'gpu', blurb: 'a length(vec3(...)) map kernel with the correctness-vs-interpreter proof', source: GPU_VECMATH },
+  { id: 'gpu-buffer', label: 'GPU buffer output', target: 'gpu', blurb: 'a kernel returns a reusable f32 buffer; slice/map/join over it', source: GPU_BUFFER },
+  { id: 'gpu-vecout', label: 'GPU vec3 output', target: 'gpu', blurb: 'a vec3-returning kernel writes an N-wide interleaved buffer (cell*3 + k)', source: GPU_VECOUT },
+  { id: 'gpu-multiout', label: 'GPU multi-output', target: 'gpu', blurb: 'a named-object return { sum, diff } writes two output buffers', source: GPU_MULTIOUT },
+  { id: 'gpu-pipeline', label: 'GPU pipeline (A → B)', target: 'gpu', blurb: 'kernel A produces a resident gpu-buffer; kernel B consumes it as input', source: GPU_PIPELINE },
+  { id: 'gpu-reduce', label: 'GPU reduction (sum)', target: 'gpu', blurb: 'a 2-arg associative reducer folds a buffer to one scalar (a multi-pass WebGL2 tree reduction)', source: GPU_REDUCE },
+  { id: 'gpu-histogram', label: 'GPU histogram (scatter)', target: 'gpu', blurb: 'a 1-arg bin-mapper scatters values into per-bin counts (WebGPU atomicAdd; WebGL2 falls to the CPU oracle)', source: GPU_HISTOGRAM },
 ];
 
 export const DEFAULT_EXAMPLE_ID = 'todo';
 
 // The representative example to load when the user switches the run target — a target switch is treated as
 // an example switch (a UI component run through the compute backend would just yield null, and vice versa).
-const DEFAULT_BY_TARGET: Record<Target, string> = { ui: 'todo', compute: 'fib' };
+const DEFAULT_BY_TARGET: Record<Target, string> = { ui: 'todo', compute: 'fib', gpu: 'gpu-matmul' };
 
 export function exampleById(id: string): Example | undefined {
   return EXAMPLES.find((e) => e.id === id);

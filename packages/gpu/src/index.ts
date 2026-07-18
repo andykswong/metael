@@ -1,0 +1,30 @@
+// @metael/gpu public barrel — the gpu head factory + the reactive-resource types + the diagnostics.
+// Populated as the engine lands (gate → emitters → device backends → resource → head).
+export { gateKernel } from './gate.ts';
+export type { GateVerdict } from './gate.ts';
+export { checkStaticBounds, intervalOf } from './bounds.ts';
+export type { Interval } from './bounds.ts';
+export { buildBindingTable, collectFreeNames } from './binding.ts';
+export type { Binding, BindingTable } from './binding.ts';
+export { checkCost, MAX_GPU_ALLOC, CPU_LIMITS } from './cost.ts';
+export type { DeviceLimits } from './cost.ts';
+export { emitCpu } from './emit-cpu.ts';
+export { checkMatch } from './oracle.ts';
+export type { MatchVerdict, OracleInput } from './oracle.ts';
+export { GpuHostEnv } from './host-env.ts';
+export { GpuEngine } from './resource.ts';
+export type { GpuConfig, ReduceConfig, HistogramConfig, GpuResource, GpuEngineDeps } from './resource.ts';
+export { gateReducer, cpuReduce } from './reduce.ts';
+export { gateBinMapper, cpuHistogram } from './histogram.ts';
+export type { Backend, BackendKind, DispatchInput, DispatchResult } from './device/index.ts';
+export { selectBackend } from './device/index.ts';
+export { makeCpuBackend } from './device/cpu.ts';
+export { tryWebGpuBackend } from './device/webgpu.ts';
+export { tryWebGl2Backend } from './device/webgl2.ts';
+export { emitWgsl, emitReduceWgsl, emitHistogramWgsl } from './emit-wgsl.ts';
+export { emitGlsl } from './emit-glsl.ts';
+export { compsOf } from './output.ts';
+export type { OutputElement } from './output.ts';
+export { kernelHash } from './hash.ts';
+export { createGpuEngine, compileKernel } from './api.ts';
+export type { CreateGpuEngineOptions, GpuEngineFacade } from './api.ts';

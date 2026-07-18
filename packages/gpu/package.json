@@ -1,0 +1,31 @@
+{
+  "name": "@metael/gpu",
+  "version": "0.1.0",
+  "description": "metael GPU compute — an eval-free, verifiable GPU.js-style compute engine built on the metael reactive kernel.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["/dist"],
+  "engines": { "node": ">=24.0" },
+  "scripts": {
+    "clean": "rimraf dist *.tsbuildinfo",
+    "prebuild": "npm run lint",
+    "build": "vite build",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/gpu"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/andykswong/metael.git", "directory": "packages/gpu" },
+  "keywords": ["metael", "gpu", "compute", "webgpu", "wgsl", "glsl", "eval-free", "typescript"],
+  "author": "Andy K.S. Wong <andykswong@outlook.com>",
+  "license": "MIT",
+  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "homepage": "https://github.com/andykswong/metael#readme",
+  "publishConfig": { "access": "public", "provenance": true },
+  "dependencies": {
+    "@metael/lang": "^0.1.0",
+    "@metael/runtime": "^0.1.0"
+  }
+}

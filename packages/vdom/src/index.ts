@@ -3,6 +3,7 @@
 // examples from source, not the published surface).
 export { mount } from './mount.ts';
 export type { VDomHandle, MountOptions } from './mount.ts';
+export { VDomHostEnv } from './host-env.ts';
 export { isVNode, textVNode, FRAGMENT, TEXT } from './vnode.ts';
 export type { VNode, Handler } from './vnode.ts';
 export { escapeText, safeAttrName, safeAttrValue } from './sanitize.ts';

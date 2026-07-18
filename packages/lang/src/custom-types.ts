@@ -55,6 +55,10 @@ export interface TypeDescriptor {
   setMember?(v: unknown, prop: string, val: unknown): void;
   setIndex?(v: unknown, key: number | string, val: unknown): void;
   iterate?(v: unknown): Iterable<unknown>;
+  /** Zero-copy access to a linear-buffer value's backing store (only present on `access: 'linear-buffer'`
+   *  descriptors). Returns the raw TypedArray + its element kind so a consumer (a compute backend) can read
+   *  it WITHOUT the O(n) `iterate` → number[] copy. The returned data is the live store — treat it read-only. */
+  bufferView?(v: unknown): { readonly data: ArrayLike<number>; readonly element: LowerElement };
   truthy?(v: unknown): boolean;
   display?(v: unknown): string;
   readonly lower?: Lowering;
@@ -147,6 +151,7 @@ function makeTypedArrayDescriptor(kind: BufferKind): TypeDescriptor {
       store[key] = kind.coerce(val);
     },
     iterate: (v) => { const store = storeOf(v); const out: number[] = []; for (let i = 0; i < store.length; i++) out.push(store[i] as number); return out; },
+    bufferView: (v) => ({ data: storeOf(v), element: kind.element }),
     display: (v) => { const store = storeOf(v); const head: string[] = []; for (let i = 0; i < Math.min(store.length, 8); i++) head.push(String(store[i])); const abbreviated = store.length > 8; return `${kind.element}[${head.join(', ')}${abbreviated ? `, … (len ${store.length})` : ''}]`; },
     lower,
   };

@@ -1,7 +1,7 @@
 import {
   derive, change, effect, ReactiveFlushError, PathKeyMinter, type RuntimeReactiveHost, type Diagnostic,
 } from '@metael/runtime';
-import { makeDiagnostic } from '@metael/lang';   // makeDiagnostic lives in lang, not runtime
+import { makeDiagnostic, type HostEnvironment, type ReactiveHost } from '@metael/lang';   // makeDiagnostic lives in lang, not runtime
 import { VDomHostEnv } from './host-env.ts';
 import { materialize } from './materialize.ts';
 import { createDom } from './patch.ts';
@@ -18,6 +18,12 @@ export interface MountOptions {
   maxTimeMs?: number;
   maxDepth?: number;
   maxStringLength?: number;
+  /** Supply a custom host-bindable environment instead of the default VDomHostEnv. A caller that needs
+   *  ADDITIONAL heads beyond the display vocabulary (e.g. a composite that resolves an extra head, else
+   *  delegates to a VDomHostEnv) provides a factory here. It is called per pass (each pass runs on a fresh
+   *  host, then bindHost hands that host to the env before the walk); the returned env must expose
+   *  bindHost. Default (omitted) → a new VDomHostEnv per pass, exactly as before (backward-compatible). */
+  envFactory?: () => HostEnvironment & { bindHost(host: ReactiveHost): void };
 }
 
 export interface VDomHandle {
@@ -52,6 +58,7 @@ export function mount(source: string, container: Element | undefined, opts: Moun
   let stopWalkEffect: (() => void) | null = null;
   let detach: (() => void) | null = null;
   let liveData = opts.data;
+  let lastEnv: unknown = null;   // the most recent pass's env — disposed on unmount if it exposes [Symbol.dispose]()
 
   const hooks: ReconcileHooks = { onRemove: () => {} };   // fresh-host-per-pass drops prior effects via GC
 
@@ -59,7 +66,8 @@ export function mount(source: string, container: Element | undefined, opts: Moun
    *  host is dropped, its leaf effects GC'd — node identity is preserved by the keyed DOM reconcile, not
    *  host reuse). State latches via priorState so a surviving component instance keeps its mutated state. */
   const runPass = (data: unknown, collectDiag: boolean, priorState?: ReadonlyMap<string, unknown>): { root: VNode | null; host: RuntimeReactiveHost } => {
-    const env = new VDomHostEnv();
+    const env = opts.envFactory ? opts.envFactory() : new VDomHostEnv();
+    lastEnv = env;   // retained so unmount() can call [Symbol.dispose]() on a disposable env (e.g. a gpu engine → WebGPU device)
     const handlers = new Map<string, (arg: unknown) => void>();
     const res = derive(source, {
       env, minter, data, seed: opts.seed, entry: opts.entry, reactiveData: opts.reactiveData, priorState,
@@ -129,7 +137,7 @@ export function mount(source: string, container: Element | undefined, opts: Moun
     diagnostics,
     invokeHandler: (nodeKey, event, arg) => { const fn = liveRegistry.get(`${nodeKey}:${event}`); if (fn) runInChange(() => fn(arg)); },
     updateData: (next) => { liveData = next; if (opts.reactiveData && currentHost) runInChange(onStructuralPass); },
-    unmount: () => { stopWalkEffect?.(); detach?.(); if (container) container.textContent = ''; index.clear(); liveRegistry.clear(); },
+    unmount: () => { stopWalkEffect?.(); detach?.(); (lastEnv as Partial<Disposable> | null)?.[Symbol.dispose]?.(); if (container) container.textContent = ''; index.clear(); liveRegistry.clear(); },
     hasHandler: (nodeKey, event) => liveRegistry.has(`${nodeKey}:${event}`),
     passCount: () => passes,
   };

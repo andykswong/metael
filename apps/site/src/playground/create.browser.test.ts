@@ -19,7 +19,7 @@ describe('createPlayground (real DOM)', () => {
     const preview = container.querySelector('.pg-preview-host')!;
     expect(preview.querySelector('.counter')).not.toBeNull();
     expect(preview.querySelector('.count')!.textContent).toBe('0');
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 
   it('a click inside the UI preview mutates it (real @metael/vdom delegation)', () => {
@@ -30,7 +30,7 @@ describe('createPlayground (real DOM)', () => {
     const plus = Array.from(preview.querySelectorAll('button')).find((b) => b.textContent === '+') as HTMLButtonElement;
     plus.click();
     expect(preview.querySelector('.count')!.textContent).toBe('1');
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 
   it('switching to compute renders a JSON value', () => {
@@ -39,7 +39,7 @@ describe('createPlayground (real DOM)', () => {
     const compute = container.querySelector('.pg-compute')!;
     expect(compute.textContent).toContain('[');
     expect((compute as HTMLElement).hidden).toBe(false);
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 
   it('a bad edit keeps the last-good preview + shows a banner', () => {
@@ -52,7 +52,7 @@ describe('createPlayground (real DOM)', () => {
     expect(preview.querySelector('.counter')).not.toBeNull();       // last-good retained
     expect((container.querySelector('.pg-banner') as HTMLElement).hidden).toBe(false);
     expect(container.querySelector('.pg-diags')!.textContent).toContain('ML-LANG');
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 
   it('getState reflects the current editor + target', () => {
@@ -60,7 +60,7 @@ describe('createPlayground (real DOM)', () => {
     const state = pg.getState();
     expect(state.target).toBe('compute');
     expect(state.source).toContain('fib');
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 
   it('switching the target loads that target\'s default example (never a stale null)', () => {
@@ -87,7 +87,45 @@ describe('createPlayground (real DOM)', () => {
     expect(pg.getState().target).toBe('ui');
     expect(pg.getState().source).toContain('counter');   // restored, not todo
     expect(container.querySelector('.pg-preview-host .counter')).not.toBeNull();
-    pg.destroy();
+    pg[Symbol.dispose]();
+  });
+
+  it('surfaces a late (async-guarded) non-lowerable gpu kernel in the diagnostics panel', async () => {
+    // The reported bug: a two-stage pipeline where stage B is GUARDED behind stage A's async settle
+    // (`if (rA.value == null) … else gpu(b, …)`), and B's body indexes a resource member (`rA.value[i]`)
+    // → B is NOT GPU-lowerable. B is only DERIVED on a re-derive AFTER A settles (async), so a mount-time
+    // diagnostics snapshot misses it: the preview shows an empty shader + "B on cpu" and NOTHING surfaces.
+    // The panel must show the gate reason once the late re-derive produces the non-core resource.
+    const pg = createPlayground(container, { defaultExampleId: 'gpu-matmul' });
+    const badPipeline = `component Story() {
+  const N = 8
+  const seed = f32(N, (i) => i)
+  component a(i) { return seed[i] + 1 }
+  const rA = gpu(a, { output: [N], outputType: "gpu-buffer" })
+  div({ class: "gpu-demo" }) {
+    if (rA.value == null) {
+      p({ class: "status" }, "stage A...")
+    } else {
+      component b(i) { return rA.value[i] * 2 }
+      const rB = gpu(b, { output: [N] })
+      pre({ class: "shader" }, rB.wgsl)
+    }
+  }
+}`;
+    // Ensure the gpu target is active, then load the bad source + run.
+    const sel = container.querySelector('.pg-target') as HTMLSelectElement;
+    sel.value = 'gpu'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    type(container.querySelector('.pg-root') as HTMLElement, badPipeline);
+    pg.runNow();
+    // Stage A settles on a later microtask/timeout → stage B re-derives non-core → the late gpu callback
+    // repaints the panel. Poll (not a fixed sleep) so the assertion isn't flaky under full-suite load.
+    const diags = container.querySelector('.pg-diags')!;
+    const deadline = Date.now() + 3000;
+    while (!(diags.textContent ?? '').includes('MLGPU-') && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(diags.textContent ?? '').toContain('MLGPU-');   // the gate reason reached the panel (was silent)
+    pg[Symbol.dispose]();
   });
 
   it('exposes accessible names + live regions for screen readers', () => {
@@ -101,6 +139,6 @@ describe('createPlayground (real DOM)', () => {
     expect(container.querySelector('.pg-diags')!.getAttribute('aria-live')).toBe('polite');
     // the transient "Copied!" label change is announced
     expect(container.querySelector('.pg-share')!.getAttribute('aria-live')).toBe('polite');
-    pg.destroy();
+    pg[Symbol.dispose]();
   });
 });

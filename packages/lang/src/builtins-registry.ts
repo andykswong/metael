@@ -99,15 +99,15 @@ export const BUILTINS: Readonly<Record<string, BuiltinSpec>> = Object.freeze({
   normalize:   { name: 'normalize',   profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'normalize' },
   length:      { name: 'length',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'length' },
 
-  // --- future tier (declared, NOT dispatched — reserve the classification) ---
-  sin:         { name: 'sin',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], future: true },
-  cos:         { name: 'cos',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], future: true },
-  exp:         { name: 'exp',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], future: true },
-  log:         { name: 'log',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], future: true },
-  fract:       { name: 'fract',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], future: true },
-  step:        { name: 'step',        profile: 'core', portability: 'exact',        takesClosure: false, arity: [2, 2], future: true },
-  mix:         { name: 'mix',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], future: true },
-  smoothstep:  { name: 'smoothstep',  profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], future: true },
+  // --- transcendentals (implemented; native-lowerable to a shader builtin) ---
+  sin:         { name: 'sin',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'sin' },
+  cos:         { name: 'cos',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'cos' },
+  exp:         { name: 'exp',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'exp' },
+  log:         { name: 'log',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'log' },
+  fract:       { name: 'fract',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], lowerName: 'fract' },
+  step:        { name: 'step',        profile: 'core', portability: 'exact',        takesClosure: false, arity: [2, 2], lowerName: 'step' },
+  mix:         { name: 'mix',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], lowerName: 'mix' },
+  smoothstep:  { name: 'smoothstep',  profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], lowerName: 'smoothstep' },
 });
 
 /** True iff `name` is a metael intrinsic (implemented OR future-declared). Callers that need only

@@ -60,6 +60,7 @@
     "./packages/lang",
     "./packages/runtime",
     "./packages/vdom",
+    "./packages/gpu",
     "./apps/site"
   ]
 }

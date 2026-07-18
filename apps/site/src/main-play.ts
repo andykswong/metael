@@ -1,3 +1,4 @@
+import 'disposablestack/auto';   // Symbol.dispose + DisposableStack polyfill for Safari (no-op where native)
 import './styles.css';
 import { mount } from '@metael/vdom';
 import { createPlayground } from './playground/create.ts';

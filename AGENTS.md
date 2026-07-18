@@ -20,7 +20,7 @@ The same eval-free reactive-DSL kernel — lexer → parser → tree-walking int
 
 ## Repo Structure
 
-This is an npm **workspaces monorepo**. All three packages are built + green.
+This is an npm **workspaces monorepo**. All four packages are built + green.
 
 ```
 packages/
@@ -38,66 +38,46 @@ packages/
 │                               runLeafEffect + DisposableStack scope() + cellKey latch + cell-freeing) + the
 │                               one-shot derive() composition root (ML-RT-CONVERGE). Imports ONLY @metael/lang
 │                               + @vue/reactivity (enforced by an automated boundary test).
-└── vdom/     @metael/vdom    — [BUILT + GREEN] a Preact-signals-style virtual DOM built ENTIRELY on the
-                               kernel — the generality showcase AND the vehicle that hardens the runtime's
-                               keyed-list diff under full add/remove/reorder. A thin domain layer: a vnode
-                               HostEnvironment (lowercase head → element vnode; Capitalized → decline →
-                               transparent fragment) + materialize/reconcile/DOM-patcher + an output
-                               sanitizer. Two update paths, automatic: a reactive `let` read by ONE
-                               attribute/text position patches only that DOM node in place (a leaf effect,
-                               no re-render); a change to the tree's SHAPE re-derives + reconciles by key
-                               (DOM identity + focus + selection survive). On reconcile, a matched node's
-                               live DOM node is re-registered onto the fresh pass's vnode, so a preserved
-                               node's reactive leaf effect keeps patching after a structural re-derive
-                               (the fine-grained path never goes dead). Imports ONLY @metael/lang +
-                               @metael/runtime (enforced by an automated import-boundary test).
+├── vdom/     @metael/vdom    — [BUILT + GREEN] a Preact-signals-style virtual DOM built ENTIRELY on the
+│                               kernel — the generality showcase AND the vehicle that hardens the runtime's
+│                               keyed-list diff under full add/remove/reorder. A thin domain layer: a vnode
+│                               HostEnvironment (lowercase head → element vnode; Capitalized → decline →
+│                               transparent fragment) + materialize/reconcile/DOM-patcher + an output
+│                               sanitizer. Two update paths, automatic: a reactive `let` read by ONE
+│                               attribute/text position patches only that DOM node in place (a leaf effect,
+│                               no re-render); a change to the tree's SHAPE re-derives + reconciles by key
+│                               (DOM identity + focus + selection survive). On reconcile, a matched node's
+│                               live DOM node is re-registered onto the fresh pass's vnode, so a preserved
+│                               node's reactive leaf effect keeps patching after a structural re-derive
+│                               (the fine-grained path never goes dead). Imports ONLY @metael/lang +
+│                               @metael/runtime (enforced by an automated import-boundary test).
+└── gpu/      @metael/gpu     — [BUILT + GREEN] an eval-free, verifiable GPU-COMPUTE engine — a domain
+                               consumer like @metael/vdom. A map kernel is authored as a metael `component`
+                               (a `let` accumulator works vs the interpreter); the `gpu(kernel, cfg)` head
+                               → an OWN compute-lowerability gate (over BUILTINS + descriptorOf(v).lower, NOT
+                               classifyProfile) → a resource-cost gate → THREE emitters that lower the same
+                               AST (WGSL / GLSL-ES-3.0 / an eval-free CPU closure) with type codegen derived
+                               from each value's Lowering → a device layer (WebGPU → WebGL2 compute-via-
+                               fragment → CPU, each verifying a REAL adapter) → a reactive resource settled
+                               by the host-driven async loop (drain after change(), write in a new change();
+                               a dispatch-memo keyed by kernel/output/precision/backend/flags/buffer-
+                               generation breaks the loop + triggers re-dispatch on in-place mutation). The
+                               shipped interpreter is the correctness ORACLE (opt-in `verify` samples cells +
+                               ULP-checks; opt-in `benchmark` times a CPU baseline). Emits MLGPU-* diagnostics.
+                               Imports ONLY @metael/lang + @metael/runtime (enforced by a boundary test);
+                               NEVER @metael/vdom — the app composes gpu + vdom in apps/site. A host-API façade
+                               (createGpuEngine → compile/dispatch/settle/subscribe, all exported from the barrel)
+                               drives the change()/drain/re-read settle dance for host TS, backed by a per-backend
+                               shader-source pipeline cache.
 ```
 
-The **showcase apps** (`apps/site/` — a landing + a multi-target playground, dogfooded on `@metael/vdom`) are also built + green; they add no package source.
-
-`@metael/lang` source layout (`packages/lang/src/`), bottom-up dependency order:
-
-```
-diagnostics.ts        SourceSpan, Diagnostic, makeDiagnostic (dependency-graph root; zero imports)
-ast.ts                Expr/Stmt/Program/Pattern/BinOp discriminated unions + ArrayElement/ObjectEntry (spread-carrying) + FORBIDDEN_KEYS
-determinism.ts        makeSeededRng (mulberry32) + range + MAX_RANGE (pure seeded-PRNG primitive)
-environment.ts        Environment — Map-based chained lexical scope + BindingMeta
-ports.ts              the 3 host-injection port INTERFACES + Region/LangWrapper/Arg/Scope + GenerationRef + 3 test doubles + didYouMean
-custom-types.ts       the custom-value-type dispatch protocol: TypeDescriptor/Lowering/LowerOp + NOT_HANDLED + non-forgeable Symbol tag helpers (tagCustom/descriptorOf/isCustomType/generationOf/isTypedArray/markFrozen/isFrozenCustom) + the typed-array (f32/f64/i32/u32) + vec/mat descriptor factories
-builtins-registry.ts  BUILTINS catalog (name → {profile, portability, takesClosure, arity, future?, lowerName?}) + isBuiltin + IMPLEMENTED_BUILTINS
-classify.ts           classifyProfile(fn) → {core, reasons}: a pure static core-compliance check over the registry
-sort.ts               defaultCompare (total type-ranked order, NaN pinned) + stableSort (non-mutating merge sort) — the `sort` builtin's engine
-lexer.ts              lex() → tokens (ML-LANG-LEX diagnostics); the `ellipsis` (...) token for spread
-parser.ts             recursive-descent Parser: parseExpr/parseProgram (MAX_PARSE_DEPTH guard; ML-LANG-PARSE); spread in literals + the head{} wrap shorthand
-evaluate.ts           evaluateProgram() — the eval-free tree-walker + fuel/time/depth budgets + never-throw contract + intrinsic seeded rand/range + the pure builtin set (collection/query/ordering/string/numeric) + deep-freeze immutability + string for-of + custom-value-type descriptor dispatch at the 8 sites (after a scalar fast path) + the f32/f64/i32/u32 + vec/mat + dot/cross/normalize/length constructors (MAX_BUFFER_LENGTH cap)
-lower.ts              the generic child-collection walk (lowerEntry): entry-component instantiation → child collection → resolveCall/key-minting/Region+Wrapper emission
-index.ts              the public barrel (exports the generic lowerEntry + the registry/classifier; excludes any domain-specific lowering)
-sandbox.test.ts       the standing sandbox-escape adversarial gate (P0)
-```
-
-`@metael/runtime` source layout (`packages/runtime/src/`), bottom-up dependency order:
-
-```
-reactive.ts      signal/memo/effect over @vue/reactivity + the synchronous change()/drain boundary + ReactiveFlushError converge guard
-keyed-diff.ts    diffKeyed (pure add/remove/move ops) + applyKeyedDiff (reconcile + dispose-by-identity teardown); zero imports
-reactive-host.ts RuntimeReactiveHost — the real ReactiveHost: native-Disposable runLeafEffect + DisposableStack scope() + cellKey latch + exportState + cell-freeing on scope disposal + the per-value generation signal (allocate/read/touchGeneration) for reactive in-place mutation
-derive.ts        derive() — the one-shot composition root: one change()-wrapped lowerEntry pass; ML-RT-CONVERGE on a non-converging flush; the onHost seam
-index.ts         the public barrel (runtime API + convenience re-exports of the @metael/lang seam)
-```
+The **showcase apps** (`apps/site/` — a landing + a multi-target playground, dogfooded on `@metael/vdom`, with a GPU playground target composing `@metael/gpu` + `@metael/vdom`) are also built + green; they add no package source.
 
 ## The extraction boundary
 
-**The load-bearing invariant: `@metael/lang` imports NOTHING domain-specific.** Its `src/` has zero `@`-scoped imports and zero `../` parent-relative imports — verified by the gate. A `call` node is identical whether the head is a user component or a domain vocabulary word; *which* heads exist is a host/registry concern resolved through `HostEnvironment.resolveCall`. Keep it that way: never import a domain View, vocabulary, or renderer into `lang`. The generic child-collection walk (`lowerEntry` — instantiate the entry component, child-collect bodies, resolve heads through the ports, mint keys, emit Region/Wrapper) lives HERE in `@metael/lang` (it is view-free lang machinery). What stays out of this package is any *domain-specific* lowering (a domain's own View/scene-graph construction) and the reactive *re-derive* + keyed-diff, which belong to `@metael/runtime`.
+**The load-bearing invariant: `@metael/lang` imports NOTHING domain-specific.** Its `src/` has zero `@`-scoped imports and zero `../` parent-relative imports — verified by the gate. A `call` node is identical whether the head is a user component or a domain vocabulary word; *which* heads exist is a host/registry concern resolved through `HostEnvironment.resolveCall` (which takes an ordered `Arg[]` carrying `{ value; name?; reactive? }` — the parser's name/position info is preserved, not interpreted here). A domain that supplies `knownHeads` gets fail-loud-on-unknown-head with a `didYouMean` suggestion; absent it, metael stays permissive. Keep it that way: never import a domain View, vocabulary, or renderer into `lang`. The generic child-collection walk (`lowerEntry` — instantiate the entry component, child-collect bodies, resolve heads through the ports, mint keys, emit Region/Wrapper) lives HERE in `@metael/lang` (it is view-free lang machinery). What stays out of this package is any *domain-specific* lowering (a domain's own View/scene-graph construction) and the reactive *re-derive* + keyed-diff, which belong to `@metael/runtime`.
 
 Diagnostics are `ML-*`; the wrapper/effect brands are `__ml*`. If you touch this kernel, preserve that domain-neutrality — no domain codes, no domain brands, no domain imports leak in.
-
-## The three interface-review fixes (in `ports.ts`)
-
-These were added on top of the faithful port (reviewed against reka.js / SolidJS / Vue / preact-signals / CEL / Starlark):
-
-1. **Native TC39 `Disposable` disposal.** `ReactiveHost.runLeafEffect` returns a native `Disposable` (`{ [Symbol.dispose]() }`), not `void` — so a keyed-diff `remove` can tear down a subtree's leaf effects instead of leaking. Added `scope<T>(run): Scope<T>` (`Scope extends Disposable`, backed by a `DisposableStack`) as an owner boundary. `runLeafEffect` pipes the region's **initial** value to the sink synchronously at subscription, then on each dependent write.
-2. **`resolveCall` takes an ordered `Arg[]`.** Each arg carries `{ value; name?; reactive? }` — the parser's name-vs-position info is *preserved*, not discarded (no precedent with named args throws it away). metael still doesn't *interpret* roles (the domain does); it just doesn't drop what it parsed.
-3. **Optional `knownHeads` + `didYouMean`.** A domain that supplies `knownHeads: ReadonlySet<string>` gets CEL/Starlark-style fail-loud on an unknown head (with a pure Levenshtein-≤2 `didYouMean` suggestion). Absent `knownHeads`, metael stays permissive.
 
 ## Build & Test
 
@@ -158,10 +138,6 @@ Test runner is **Vitest** across two projects: a **`node`** project (pure-logic 
 - **Disposal uses the native TC39 protocol.** `runLeafEffect` → `Disposable`; `scope()` → `Scope<T> extends Disposable`; no bespoke `() => void` disposer. Tear-down on throw must not leak a subscription (regression-tested).
 - **Build + verify before claiming.** From the repo root: `npm run typecheck && npm run lint && npm run build:packages && npm test` (all green). Add/adjust a test with any logic change.
 
-## Status
+## Docs
 
-**`@metael/{lang,runtime,vdom}` + the showcase apps (`apps/site/`) — BUILT & GREEN.** Full gate: **652 tests (607 node + 45 Playwright/Chromium browser)**, typecheck · lint (0 warnings) · build:packages · site production build all clean; each package self-contained behind its dependency seam (automated boundary tests).
-
-The language kernel carries the full builtin set (collection/query/ordering/string/numeric) + the capability-profile registry & classifier + string `for-of` + the additive `kind:'value'` extension seam + a standing sandbox-escape suite + the **custom-value-type operator/accessor dispatch protocol** (a non-forgeable descriptor seam validated by two consumers: typed arrays `f32`/`f64`/`i32`/`u32` and `vec`/`mat`); `@metael/runtime` the reactive core + keyed diff + `RuntimeReactiveHost` (incl. the per-value generation signal for reactive in-place mutation) + `derive()`; `@metael/vdom` a Preact-signals-style VDOM that auto-splits value-only (leaf-effect patch, no re-render) from structural (fresh-host re-derive + keyed reconcile) updates. Built TDD (subagent-driven, a two-lens adversarial review per task) + a final comprehensive adversarial review (findings folded at root). A recorded budget-lifetime limitation (a reactive re-run sharing the derive-time budget) stays deferred — moot for `@metael/vdom`, reserved for a hypothetical persistent-leaf-effect fast path.
-
-**Docs:** [README.md](./README.md) (install + usage) · [GUIDE.md](./GUIDE.md) (the language, example-driven) · this file (architecture + guardrails).
+[README.md](./README.md) (install + usage) · [GUIDE.md](./GUIDE.md) (the language, example-driven) · this file (architecture + guardrails).

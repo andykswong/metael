@@ -359,6 +359,17 @@ button.pg-share:hover { filter: brightness(1.06); border-color: var(--amber); }
 .pg-preview-host .namecard { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
 .pg-preview-host .namecard .greeting { font-family: var(--display); font-size: 22px; font-weight: 600; }
 
+/* gpu-demo (the GPU compute examples: title, computed cells, backend/timing status, generated shader) */
+.pg-preview-host .gpu-demo { display: flex; flex-direction: column; gap: 8px; }
+.pg-preview-host .gpu-demo .title { font-family: var(--display); font-size: 20px; font-weight: 600; }
+.pg-preview-host .gpu-demo .result { font-family: var(--mono); font-size: 14px; }
+.pg-preview-host .gpu-demo .status { font-family: var(--mono); font-size: 12px; color: #655c4b; }
+.pg-preview-host .gpu-demo .shader {
+  font-family: var(--mono); font-size: 11px; line-height: 1.45;
+  background: #1c1a17; color: #e7dcc7; border-radius: 8px; padding: 12px 14px;
+  max-height: 320px; overflow: auto; white-space: pre; margin: 0;
+}
+
 /* ── Landing ──────────────────────────────────────────────────────────────── */
 
 /* slim top header nav */

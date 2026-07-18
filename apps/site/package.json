@@ -12,9 +12,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@metael/gpu": "*",
     "@metael/lang": "*",
     "@metael/runtime": "*",
-    "@metael/vdom": "*"
+    "@metael/vdom": "*",
+    "disposablestack": "^1.1.8"
   },
   "devDependencies": {
     "vite": "^8.1"

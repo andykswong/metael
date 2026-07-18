@@ -15,7 +15,8 @@
     "paths": {
       "@metael/lang": ["./packages/lang/src/index.ts"],
       "@metael/runtime": ["./packages/runtime/src/index.ts"],
-      "@metael/vdom": ["./packages/vdom/src/index.ts"]
+      "@metael/vdom": ["./packages/vdom/src/index.ts"],
+      "@metael/gpu": ["./packages/gpu/src/index.ts"]
     }
   }
 }
