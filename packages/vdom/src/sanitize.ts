@@ -14,7 +14,9 @@ export function escapeText(v: unknown): string {
   return s.replace(/[&<>"']/g, (c) => ESCAPE[c]!);
 }
 
-const FORBIDDEN_ATTR = new Set(['innerhtml', 'outerhtml', 'dangerouslysetinnerhtml']);
+// Raw-HTML sinks that must never be set as attributes. `srcdoc` parses its value as a full HTML document
+// (iframe), so like innerHTML it is a script-execution sink with no scheme-check remedy — forbid the name.
+const FORBIDDEN_ATTR = new Set(['innerhtml', 'outerhtml', 'dangerouslysetinnerhtml', 'srcdoc']);
 /** True if `name` is safe to set as a DOM attribute. Rejects on* handler names + raw-HTML sinks. */
 export function safeAttrName(name: string): boolean {
   const n = name.toLowerCase();
@@ -24,10 +26,29 @@ export function safeAttrName(name: string): boolean {
 }
 
 const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster']);
-const BLOCKED_SCHEME = /^\s*(javascript|data|vbscript):/i;
+const BLOCKED_SCHEME = /^(javascript|data|vbscript):/i;
 /** For a URL attribute, return null (drop) if the value uses a blocked scheme; else return it unchanged.
- *  Non-URL attributes pass through. */
+ *  Non-URL attributes pass through.
+ *
+ *  The scheme test runs against a NORMALIZED copy of the value, mirroring how a browser resolves a URL:
+ *  ASCII tab/LF/CR are stripped from ANYWHERE (a browser removes them before scheme resolution, so
+ *  `java\tscript:` becomes `javascript:`), and leading C0 control chars + spaces are trimmed. Without this,
+ *  those characters slip a blocked scheme past a naive `^\s*` guard. The ORIGINAL (unmodified) value is
+ *  returned when allowed — normalization only gates the decision, it never mutates a legitimate value. */
 export function safeAttrValue(name: string, value: string): string | null {
-  if (URL_ATTRS.has(name.toLowerCase()) && BLOCKED_SCHEME.test(value)) return null;
+  if (URL_ATTRS.has(name.toLowerCase())) {
+    if (BLOCKED_SCHEME.test(normalizeUrlForSchemeTest(value))) return null;
+  }
   return value;
+}
+
+/** Normalize a URL the way a browser does before resolving its scheme: strip ASCII tab/LF/CR from anywhere
+ *  (a browser removes them everywhere in a URL, so `java\tscript:` reads as `javascript:`), then trim any
+ *  leading C0 control chars + space. Used ONLY to decide whether to block — never to mutate a kept value.
+ *  Leading controls are trimmed by code point (not a control-char regex literal, which lint forbids). */
+function normalizeUrlForSchemeTest(value: string): string {
+  const stripped = value.replace(/[\t\n\r]/g, '');
+  let i = 0;
+  while (i < stripped.length && stripped.charCodeAt(i) <= 0x20) i++;
+  return stripped.slice(i);
 }

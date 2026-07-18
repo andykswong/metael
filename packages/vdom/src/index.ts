@@ -6,3 +6,7 @@ export type { VDomHandle, MountOptions } from './mount.ts';
 export { isVNode, textVNode, FRAGMENT, TEXT } from './vnode.ts';
 export type { VNode, Handler } from './vnode.ts';
 export { escapeText, safeAttrName, safeAttrValue } from './sanitize.ts';
+export { h, Fragment } from './h.ts';
+export type { Child, Props, Thunk } from './h.ts';
+export { render } from './render.ts';
+export type { RenderHandle, RenderOptions, RenderNode, RenderProducer } from './render.ts';

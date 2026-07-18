@@ -68,12 +68,14 @@ function patchNode(target: VNode, fresh: VNode, doc: Document, index: Map<string
   if (el) target.children = reconcile(el, target.children, fresh.children, doc, index, hooks);
 }
 
-/** Dispose + detach a removed subtree (depth-first): fire the teardown hook, drop the index, detach the DOM. */
+/** Dispose + detach a removed subtree (depth-first): fire the teardown hook, drop the index, detach the DOM.
+ *  Resolves the live node via domOf so a removed TEXT sibling (never indexed as an element — its Text node
+ *  lives only in the textNodes WeakMap) is actually detached, not orphaned in the parent. */
 function tearDown(vnode: VNode, index: Map<string, Element>, hooks: ReconcileHooks): void {
   hooks.onRemove(vnode);
   for (const c of vnode.children) tearDown(c, index, hooks);
-  const el = index.get(vnode.key);
-  if (el && el.parentNode) el.parentNode.removeChild(el);
+  const node = domOf(vnode, index);
+  if (node && node.parentNode) node.parentNode.removeChild(node);
   index.delete(vnode.key);
 }
 
