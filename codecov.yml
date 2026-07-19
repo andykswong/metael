@@ -1,7 +1,5 @@
 # Codecov config for the metael monorepo. Coverage is produced by `vitest --coverage` (v8 → lcov) over
-# the publishable package sources; see vitest.config.ts. The three @metael/* packages are broken out as
-# components. NOTE: parts of @metael/vdom (DOM reconcile/mount/patch) are exercised by browser tests that
-# the node-only coverage run does not instrument, so the project target is set conservatively.
+# the publishable package sources; see vitest.config.ts. The @metael/* packages are broken out as components.
 comment:
   layout: "header, diff, flags, components"
 component_management:
@@ -15,11 +13,14 @@ component_management:
     - component_id: "@metael/vdom"
       paths:
         - "packages/vdom/src/**"
+    - component_id: "@metael/gpu"
+      paths:
+        - "packages/gpu/src/**"
 coverage:
   status:
     project:
       default:
-        target: 75%
+        target: 80%
         threshold: 2%
     patch:
       default:
@@ -30,6 +31,4 @@ ignore:
   - "apps/**"
   - "**/*.test.ts"
   - "**/*.browser.test.ts"
-  - "packages/*/src/index.ts"
-  - "packages/vdom/src/demo.ts"
-  - "packages/vdom/src/examples.ts"
+  - "packages/*/src/test/**"

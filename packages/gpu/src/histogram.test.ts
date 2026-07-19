@@ -169,4 +169,117 @@ describe('cpuHistogram (the oracle) — exact counts + out-of-range drop', () =>
     const ovfBin = mapperOf(`component b(x) { return x * 1e308 * 10 }\nb`, host);
     expect(cpuHistogram(ovfBin, [0, 1, 2], 3, host)).toEqual([1, 0, 0]);
   });
+
+  it('DROPS (does not clamp) the exact boundary bin === bins and every out-of-range input', () => {
+    const host = new RuntimeReactiveHost();
+    const idBin = mapperOf(`component b(x) { return x }\nb`, host);
+    // The upper boundary is EXCLUSIVE: bin === bins (3) is out of range and dropped, NOT clamped to bin 2.
+    // A clamp would have counted 3 and 4 into bin 2 → [0,0,3]; the drop yields exactly one count in bin 2.
+    expect(cpuHistogram(idBin, [3, 4, 2], 3, host)).toEqual([0, 0, 1]);
+    // ALL inputs out of range (all negative, all >= bins) → all-zero counts, no clamp to the end bins.
+    expect(cpuHistogram(idBin, [-1, -2, 3, 4, 100], 3, host)).toEqual([0, 0, 0]);
+    // A truncating map: 2.9 → trunc → bin 2 (in range, counted); -0.5 → trunc → 0 (bin 0, counted);
+    // 3.0 → bin 3 (dropped). Confirms Math.trunc-toward-zero + the exclusive upper bound together.
+    const idTrunc = mapperOf(`component b(x) { return x }\nb`, host);
+    expect(cpuHistogram(idTrunc, [2.9, -0.5, 3.0], 3, host)).toEqual([1, 0, 1]);
+  });
+});
+
+// The bin-mapper GATE is strictly NARROWER than the shared map-kernel gate: it ADDS a purity rule (no
+// closed-over buffer/vec-mat/helper) and a scalar-index rule (the one param `x` is a scalar → `x[...]` is
+// meaningless). These drive the mapper-specific reject paths (the shared gateKernel machinery is covered by
+// gate.test.ts). Assertions pin the exact MLGPU code + message + core === false so a regression that drops a
+// reason (or the whole check) fails loudly.
+describe('gateBinMapper — purity: a closed-over buffer / vec-mat / helper is rejected (strictly narrower than the map gate)', () => {
+  it('rejects a bin-mapper that closes over an input BUFFER (buf[x]) — MLGPU-NOT-LOWERABLE, not pure over x', () => {
+    const host = new RuntimeReactiveHost();
+    // `buf` is a closed-over f32 buffer; a map kernel could index it, but a bin-mapper's only input is x.
+    const binOf = mapperOf(`const buf = f32(4, (i) => i)\ncomponent binOf(x) { return buf[x] }\nbinOf`, host);
+    const v = gateBinMapper(binOf, host);
+    expect(v.core).toBe(false);
+    const r = v.reasons.find((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /may not reference a buffer/.test(d.message));
+    expect(r, JSON.stringify(v.reasons)).toBeTruthy();
+    expect(r!.message).toContain(`buffer ('buf')`);
+  });
+  it("rejects a bin-mapper that closes over a VEC/MAT uniform (v.x) — MLGPU-NOT-LOWERABLE 'vec/mat'", () => {
+    const host = new RuntimeReactiveHost();
+    const binOf = mapperOf(`const v = vec3(1, 2, 3)\ncomponent binOf(x) { return x + v.x }\nbinOf`, host);
+    const v = gateBinMapper(binOf, host);
+    expect(v.core).toBe(false);
+    const r = v.reasons.find((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /may not reference a vec\/mat/.test(d.message));
+    expect(r, JSON.stringify(v.reasons)).toBeTruthy();
+    expect(r!.message).toContain(`vec/mat ('v')`);
+  });
+  it("rejects a bin-mapper that calls a HELPER function — MLGPU-NOT-LOWERABLE 'helper function'", () => {
+    const host = new RuntimeReactiveHost();
+    const binOf = mapperOf(`component helper(y) { return y * 2 }\ncomponent binOf(x) { return helper(x) }\nbinOf`, host);
+    const v = gateBinMapper(binOf, host);
+    expect(v.core).toBe(false);
+    const r = v.reasons.find((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /may not reference a helper function/.test(d.message));
+    expect(r, JSON.stringify(v.reasons)).toBeTruthy();
+    expect(r!.message).toContain(`helper function ('helper')`);
+  });
+});
+
+// The scalar-index rule: the bin-mapper's one param `x` is a SCALAR, so any `x[...]` in the body is
+// meaningless (harmless on the CPU — the interpreter returns null → 0 — but a GPU compile error). The
+// detection is a FILE-LOCAL structural walk (indexesAnyParam) reached ONLY through gateBinMapper; each case
+// below embeds `x[...]` inside a distinct AST construct so every branch of that walk is visited and the
+// 'a bin-mapper parameter is a scalar and cannot be indexed' reason fires.
+describe('gateBinMapper — the scalar param x cannot be indexed (drives the indexesAnyParam walk)', () => {
+  const indexScalar = (src: string, host: RuntimeReactiveHost) => {
+    const binOf = mapperOf(src, host);
+    const v = gateBinMapper(binOf, host);
+    const r = v.reasons.find((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /scalar and cannot be indexed/.test(d.message));
+    return { v, r };
+  };
+  // One body per construct — the `x[...]` sits inside the named AST node so the walk MUST descend through it.
+  const cases: [string, string][] = [
+    // ── expr-walk branches ──
+    ['index (bare x[...] in a return)', `component binOf(x) { return x[0] }\nbinOf`],
+    ['member (x[0].y)', `component binOf(x) { return x[0].y }\nbinOf`],
+    ['unary (-x[0])', `component binOf(x) { return -x[0] }\nbinOf`],
+    ['cond/ternary (t ? x[0] : e)', `component binOf(x) { return 1 > 0 ? x[0] : 2 }\nbinOf`],
+    ['call (abs(x[0]))', `component binOf(x) { return abs(x[0]) }\nbinOf`],
+    ['object literal ({ a: x[0] })', `component binOf(x) { const o = { a: x[0] }\nreturn 0 }\nbinOf`],
+    ['array literal ([x[0]])', `component binOf(x) { const o = [x[0]]\nreturn 0 }\nbinOf`],
+    // ── stmt-walk branches ──
+    ['const/let init (const o = x[0])', `component binOf(x) { const o = x[0]\nreturn o }\nbinOf`],
+    ['assign VALUE (y = x[0])', `component binOf(x) { let y = 0\ny = x[0]\nreturn y }\nbinOf`],
+    // assign TARGET arm: `x[0]` on the LHS of an assignment (the `inExpr(s.target)` arm of the walk).
+    ['assign TARGET (x[0] = 5)', `component binOf(x) { x[0] = 5\nreturn 0 }\nbinOf`],
+    ['expr statement (bare x[0])', `component binOf(x) { x[0]\nreturn 0 }\nbinOf`],
+    ['if test (if (x[0] > 0) ...)', `component binOf(x) { if (x[0] > 0) { return 1 }\nreturn 0 }\nbinOf`],
+    ['for body (for (i of range(2)) return x[0])', `component binOf(x) { for (i of range(2)) { return x[0] }\nreturn 0 }\nbinOf`],
+    ['while test (while (x[0] > 0) ...)', `component binOf(x) { while (x[0] > 0) { return 0 }\nreturn 0 }\nbinOf`],
+    // while BODY arm (test has no index): `x[0]` only in the loop body (the `s.body.some(inStmt)` arm).
+    ['while body (while (0 > 1) return x[0])', `component binOf(x) { while (0 > 1) { return x[0] }\nreturn 0 }\nbinOf`],
+    // value-less `return` first (the `: false` arm of the return case), then a later `return x[0]` trips it.
+    ['bare return then return x[0]', `component binOf(x) { if (x > 9) { return }\nreturn x[0] }\nbinOf`],
+    // call: INDIRECT callee carrying the index (`(x[0])()` — the `e.callee.kind !== 'ident'` arm).
+    ['call indirect callee (foo[x[0]]())', `component binOf(x) { return foo[x[0]]() }\nbinOf`],
+    // call: WRAPPING-block carrying the index (the `e.block?.some(inStmt)` arm of the call case).
+    ['call wrapping block (foo() { return x[0] })', `component binOf(x) { foo() { return x[0] }\nreturn 0 }\nbinOf`],
+    // stmt-walk DEFAULT branch: a nested function statement (unhandled kind → falls through) is visited FIRST,
+    // returns false, and the walk continues to the later `return x[0]` that trips the scalar-index reason.
+    ['stmt default (nested function then return x[0])', `component binOf(x) { function h() { return 0 }\nreturn x[0] }\nbinOf`],
+  ];
+  for (const [tag, src] of cases) {
+    it(`rejects: ${tag}`, () => {
+      const { v, r } = indexScalar(src, new RuntimeReactiveHost());
+      expect(v.core, `expected core=false for ${tag}: ${JSON.stringify(v.reasons)}`).toBe(false);
+      expect(r, `expected the scalar-index reason for ${tag}: ${JSON.stringify(v.reasons)}`).toBeTruthy();
+      expect(r!.message).toBe('a bin-mapper parameter is a scalar and cannot be indexed');
+    });
+  }
+
+  it('a scalar-only body (no x[...]) does NOT trip the scalar-index reason (the walk returns false)', () => {
+    // Negative control: the walk descends member/binary/cond/call/object/array/const/if without an `x[...]`
+    // anywhere → indexesAnyParam is false → no scalar-index reason, and this pure arithmetic mapper is core.
+    const host = new RuntimeReactiveHost();
+    const binOf = mapperOf(`component binOf(x) { const k = 1 > 0 ? abs(x) : x % 2\nif (k > 0) { return k }\nreturn 0 }\nbinOf`, host);
+    const v = gateBinMapper(binOf, host);
+    expect(v.reasons.some((d) => /scalar and cannot be indexed/.test(d.message))).toBe(false);
+    expect(v.core).toBe(true);
+  });
 });

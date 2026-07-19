@@ -1,14 +1,25 @@
 import { describe, it, expect } from 'vitest';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
-import type { UserFn } from '@metael/lang';
+import type { UserFn, Diagnostic, Expr } from '@metael/lang';
 import { GpuEngine } from './resource.ts';
+import { intervalOf, checkStaticBounds } from './bounds.ts';
+import { buildBindingTable, collectFreeNames, type BindingTable } from './binding.ts';
 
 function kernelOf(src: string, host: RuntimeReactiveHost): UserFn {
   const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
   if (!isUserFn(res.value)) throw new Error('kernel: ' + JSON.stringify(res.diagnostics)); return res.value;
 }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
+
+/** Resolve a parsed kernel's binding table against its closure — the same table `gpu()` feeds to
+ *  `checkStaticBounds`, built here so a unit test can drive the prover DIRECTLY (bypassing the gate) for
+ *  constructs the gate would reject for an unrelated reason (a non-range `for`, a `while`, a nested
+ *  `function`, an object/array literal) — isolating the bounds-prover's own reject-or-pass decision. */
+function bindingsOf(kernel: UserFn, host: RuntimeReactiveHost): BindingTable {
+  return buildBindingTable(kernel, collectFreeNames(kernel), host);
+}
+const hasIndexStatic = (reasons: readonly Diagnostic[]): boolean => reasons.some((r) => r.code === 'MLGPU-INDEX-STATIC');
 
 describe('static out-of-bounds bounds-prover', () => {
   it('rejects a provably-OOB index a[i + N] (interval entirely >= length)', async () => {
@@ -202,5 +213,183 @@ k`, host);
     change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
     expect(s.core).toBe(false);
     expect(s.reasons.some((r) => r.code === 'MLGPU-INDEX-STATIC')).toBe(true);
+  });
+
+  // ─── `intervalOf` directly: a buffer/uniform/callee ident (not a scalar, not in env) is ⊤ (null) ───
+  it('intervalOf: a buffer ident is ⊤ (null) — a buffer is not a numeric quantity', () => {
+    const host = new RuntimeReactiveHost();
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return x[i] }\nk`, host);
+    const bindings = bindingsOf(kernel, host);
+    expect(bindings.byName.get('x')?.role).toBe('buffer');
+    const ret = kernel.body.find((s) => s.kind === 'return') as Extract<UserFn['body'][number], { kind: 'return' }>;
+    const idx = ret.value as Extract<Expr, { kind: 'index' }>;
+    const bufIdent = idx.object;   // the bare buffer ident `x`
+    // A buffer ident is not in `env` and its binding role is 'buffer' (not 'scalar') → null (⊤). This is the
+    // guard that keeps `a[b[i]]` unprovable: the inner buffer read never yields a bogus finite interval.
+    expect(intervalOf(bufIdent, new Map(), bindings)).toBeNull();
+    // An ident absent from BOTH env and the binding table is likewise ⊤ (same return-null path).
+    expect(intervalOf({ kind: 'ident', name: 'notbound', span: bufIdent.span }, new Map(), bindings)).toBeNull();
+  });
+
+  // ─── `guardProvablyTrue` `<=` case: a provably-true `<=` guard makes the fall-through dead (via a returning if) ───
+  it('does NOT reject an all-OOB index after a provably-true `<=` guard-clause return', async () => {
+    const host = new RuntimeReactiveHost();
+    // i ∈ [0,3]; `i <= 100` is provably true for EVERY coord (l.hi=3 <= r.lo=100) AND the then-block returns,
+    // so the trailing `x[i + 100]` is unreachable dead code → NOT rejected (proving the `<=` always-true leg).
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { if (i <= 100) { return 0 } return x[i + 100] }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(true);
+    expect(hasIndexStatic(s.reasons)).toBe(false);
+  });
+
+  // ─── `guardProvablyTrue` default case (`==`): an equality guard is NOT range-decidable → the trailing OOB is reachable ───
+  it('STILL rejects a reachable trailing OOB after an `==` guard (== is not a provable-always-true range guard)', async () => {
+    const host = new RuntimeReactiveHost();
+    // `if (i == 2) { return 0 }` — `==` is not decidable from a range interval, so guardProvablyTrue returns
+    // false → the if does NOT definitely return → the trailing `x[i + 100]` stays on the guaranteed path.
+    // i ∈ [0,3] → i+100 ∈ [100,103] entirely >= 4 → provably OOB → MUST reject (never suppressed by an == guard).
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { if (i == 2) { return 0 } return x[i + 100] }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(false);
+    expect(hasIndexStatic(s.reasons)).toBe(true);
+  });
+
+  // ─── `walkExpr` `object`/`array` cases: the walk descends into object-entry / array-element expressions ───
+  // The single-output gate rejects object/array literals, so these drive `checkStaticBounds` DIRECTLY on the
+  // parsed kernel + its bindings — proving the prover still walks INTO a literal and rejects a provable OOB there.
+  it('walkExpr descends into an object-literal entry and rejects a provable OOB inside it (direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return {v: x[i + 100]} }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    // i ∈ [0,3] → i+100 ∈ [100,103] >= 4, and the object literal is a guaranteed (top-level return) expr → reject.
+    expect(hasIndexStatic(reasons)).toBe(true);
+  });
+  it('walkExpr descends into an array-literal element and rejects a provable OOB inside it (direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return [x[i + 100]] }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(true);
+  });
+  it('walkExpr does NOT reject a partially-in-range object-literal entry (unprovable → oracle covers it)', () => {
+    const host = new RuntimeReactiveHost();
+    // x[i*2] → [0,6] overlaps [0,4) → not all-OOB → the descent finds nothing to reject (the safe direction).
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return {v: x[i * 2]} }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(false);
+  });
+
+  // ─── `walkStmt` `expr` case: a bare expression statement is on the guaranteed path ───
+  it('rejects a provable OOB in a bare expression statement (walkStmt `expr` case)', async () => {
+    const host = new RuntimeReactiveHost();
+    // `x[i + 100]` as a top-level expression statement (its value discarded) is still a guaranteed access →
+    // i+100 ∈ [100,103] >= 4 → provably OOB → reject. Exercises walkStmt's `expr` arm.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { x[i + 100] return 0 }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(false);
+    expect(hasIndexStatic(s.reasons)).toBe(true);
+  });
+
+  // ─── `for … of range(C)` with a constant C <= 0: the body is DEAD, never analyzed (dead=true) ───
+  it('does NOT reject a blatantly-OOB index inside a `for … of range(0)` loop (dead body)', async () => {
+    const host = new RuntimeReactiveHost();
+    // range(0) provably iterates ZERO times → the body never runs → `x[9999]` is dead code → NOT rejected,
+    // even though [9999,9999] is trivially all-OOB on a length-4 buffer. Proves the C<=0 dead-body suppression.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { for (const j of range(0)) { x[9999] } return 0 }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(true);
+    expect(hasIndexStatic(s.reasons)).toBe(false);
+  });
+
+  // ─── `for … of <non-range>`: the else branch walks the iterable expr; the body is not-guaranteed ───
+  it('does NOT reject a blatantly-OOB index inside a non-range `for … of buffer` loop (direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    // A `for (const j of x)` over a BUFFER (not range()) is not a lowerable loop (the gate rejects it), so the
+    // prover is driven directly. The `for` else-branch walks the iterable and the body with guaranteed=false
+    // (a non-range iterable's trip count is unknown) → the all-OOB `x[9999]` in the body is NOT rejected.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { for (const j of x) { x[9999] } return 0 }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(false);
+  });
+
+  // ─── `while` statement: walks test + body with guaranteed=false ───
+  it('does NOT reject a blatantly-OOB index inside a `while` loop body (direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    // A `while` is data-dependent (the gate rejects it), so drive the prover directly. walkStmt's `while` arm
+    // walks the body with guaranteed=false (it may iterate zero times) → the all-OOB `x[9999]` is NOT rejected.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { while (i < 2) { x[9999] } return 0 }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(false);
+  });
+
+  // ─── `walkExpr` `cond` case: a ternary's test always runs (guaranteed); its branches are conditional ───
+  it('rejects a provable OOB in a ternary TEST (the test always runs → guaranteed path)', async () => {
+    const host = new RuntimeReactiveHost();
+    // The test subexpression of `x[i+100] > 0 ? 1 : 0` is evaluated for every coord → guaranteed. i+100 ∈
+    // [100,103] >= 4 → provably OOB → reject. Exercises walkExpr's `cond` arm on the (guaranteed) test.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return x[i + 100] > 0 ? 1 : 0 }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(false);
+    expect(hasIndexStatic(s.reasons)).toBe(true);
+  });
+  it('does NOT reject a provable OOB in a ternary BRANCH (a branch is conditional → not guaranteed)', async () => {
+    const host = new RuntimeReactiveHost();
+    // The `then`/`else` of `i > 0 ? x[i+100] : 0` run only for some coords → walkExpr descends with
+    // guaranteed=false → the all-OOB `x[i+100]` is NOT rejected (the mirror of the guaranteed-test case).
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return i > 0 ? x[i + 100] : 0 }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(true);
+    expect(hasIndexStatic(s.reasons)).toBe(false);
+  });
+
+  // ─── `walkExpr` `call` case: a builtin-call argument is on the guaranteed path ───
+  it('rejects a provable OOB inside a builtin-call argument (walkExpr `call` arm)', async () => {
+    const host = new RuntimeReactiveHost();
+    // `abs(x[i + 100])` — the argument is evaluated for every coord → guaranteed. i+100 ∈ [100,103] >= 4 →
+    // provably OOB → reject. Exercises walkExpr descending into `e.args`.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return abs(x[i + 100]) }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(false);
+    expect(hasIndexStatic(s.reasons)).toBe(true);
+  });
+
+  // ─── `walkExpr` `index` else-branch: an index whose object is NOT a buffer ident is walked normally ───
+  it('walks a nested index whose object is not a buffer ident without a false rejection (direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    // `x[i][0]`: the OUTER index's object is `x[i]` (an index expr, not a bare buffer ident) → the else-branch
+    // walks both object and index. The inner `x[i]` is in range; no all-OOB access exists → no rejection.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { return x[i][0] }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(false);
+  });
+
+  // ─── `walkStmt` default case: a nested function/component statement is inert (nothing to prove) ───
+  it('is inert on a nested `function` declaration statement (walkStmt default case, direct checkStaticBounds)', () => {
+    const host = new RuntimeReactiveHost();
+    // A nested `function` is not lowerable (the gate rejects it), so drive the prover directly. walkStmt's
+    // default arm ignores it (it introduces no index to prove); the guaranteed top-level `x[i]` is in range → pass.
+    const kernel = kernelOf(`const x = f32(4, (i) => i)\ncomponent k(i) { function helper() { return 0 } return x[i] }\nk`, host);
+    const reasons: Diagnostic[] = [];
+    checkStaticBounds(kernel, bindingsOf(kernel, host), [4], reasons);
+    expect(hasIndexStatic(reasons)).toBe(false);
   });
 });

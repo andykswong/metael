@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mount } from './mount.ts';
-import { COUNTER, TODO, FORM } from './examples.ts';
+import { COUNTER, TODO, FORM } from './test/examples.ts';
 
 let container: HTMLElement;
 beforeEach(() => { container = document.createElement('div'); document.body.appendChild(container); });

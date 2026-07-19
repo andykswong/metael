@@ -278,6 +278,125 @@ describe('WGSL reduce emitter (workgroup-shared tree reduction)', () => {
 // isn't statically decidable (a property of the reducer relative to the seed), so no gate can flag it — it is
 // a documented contract that verify:true catches. These tests LOCK that the linear oracle is correct for a
 // neutral identity and DEMONSTRATE that a non-neutral identity is a NON-silent divergence under the oracle.
+// gateReducer adds two reducer-specific rules ON TOP of the shared map-kernel gate: PURITY (a reducer's only
+// inputs are its two scalar params — a closed-over buffer / vec-mat uniform / helper callee has no place in a
+// binary fold) and NO SCALAR INDEX (indexing a scalar param `acc[x]` is meaningless). These lock the exact
+// MLGPU-NOT-LOWERABLE reason (code + the noun / phrase) each rule pushes — the narrowing the reducer gate does
+// that the map-kernel gate does not.
+describe('gateReducer — purity over the two scalar params (no closed-over buffer / vec-mat / helper)', () => {
+  const pure = (r: ReturnType<typeof gateReducer>) =>
+    r.reasons.find((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /must be pure over its two parameters/.test(d.message));
+  it('rejects a reducer that reads a closed-over BUFFER (acc + buf[x]) — the noun is "buffer"', () => {
+    const host = new RuntimeReactiveHost();
+    const reducer = reducerOf(`const buf = f32([1, 2, 3])\ncomponent r(acc, x) { return acc + buf[x] }\nr`, host);
+    const v = gateReducer(reducer, host);
+    expect(v.core).toBe(false);
+    const reason = pure(v);
+    expect(reason).toBeDefined();
+    expect(reason!.message).toContain("a buffer");
+    expect(reason!.message).toContain("'buf'");
+  });
+  it('rejects a reducer that reads a closed-over VEC/MAT uniform (acc + u.x) — the noun is "vec/mat"', () => {
+    const host = new RuntimeReactiveHost();
+    const reducer = reducerOf(`const u = vec3(1, 2, 3)\ncomponent r(acc, x) { return acc + u.x }\nr`, host);
+    const v = gateReducer(reducer, host);
+    expect(v.core).toBe(false);
+    const reason = pure(v);
+    expect(reason).toBeDefined();
+    expect(reason!.message).toContain("a vec/mat");
+    expect(reason!.message).toContain("'u'");
+  });
+  it('rejects a reducer that CALLS a helper (acc + h(...)) — the noun is "helper function"', () => {
+    const host = new RuntimeReactiveHost();
+    const reducer = reducerOf(`component h(y) { return y + 1 }\ncomponent r(acc, x) { return h(acc) + x }\nr`, host);
+    const v = gateReducer(reducer, host);
+    expect(v.core).toBe(false);
+    const reason = pure(v);
+    expect(reason).toBeDefined();
+    expect(reason!.message).toContain("a helper function");
+    expect(reason!.message).toContain("'h'");
+  });
+});
+
+// A reducer's two params are SCALARS, so indexing EITHER of them (`acc[x]` / `x[i]`) is meaningless. The shared
+// map-kernel gate accepts a scalar-param index (it only refuses to descend into a BUFFER ident), so gateReducer
+// adds `indexesAnyParam`, a structural walk that flags the scalar index REGARDLESS of which expr/stmt construct
+// wraps it. These embed `acc[x]` inside every reachable construct of that walk and assert the SAME reason fires
+// each time — the point being that the wrapper never hides the scalar index.
+describe('gateReducer — a scalar param cannot be indexed, wherever the index is embedded', () => {
+  const SCALAR_INDEX = 'a reducer parameter is a scalar and cannot be indexed';
+  const flagsScalarIndex = (host: RuntimeReactiveHost, src: string) => {
+    const v = gateReducer(reducerOf(src, host), host);
+    expect(v.core).toBe(false);
+    expect(v.reasons.some((d) => d.code === 'MLGPU-NOT-LOWERABLE' && d.message === SCALAR_INDEX)).toBe(true);
+  };
+  it('inside a MEMBER chain (acc[x].y)', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return acc[x].y }\nr`); });
+  it('inside a UNARY negation (-acc[x])', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return -acc[x] }\nr`); });
+  it('inside a BINARY (acc[x] + 1)', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return acc[x] + 1 }\nr`); });
+  it('inside a TERNARY test (acc[x] > 0 ? 1 : 2)', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return acc[x] > 0 ? 1 : 2 }\nr`); });
+  it('inside a CALL arg (sin(acc[x]))', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return sin(acc[x]) }\nr`); });
+  it('inside an OBJECT-literal value ({ a: acc[x] })', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return { a: acc[x] } }\nr`); });
+  it('inside an ARRAY-literal element ([acc[x]])', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return [acc[x]] }\nr`); });
+  it('inside a CONST init (const y = acc[x])', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { const y = acc[x]\n return y }\nr`); });
+  it('inside an ASSIGN RHS (y = acc[x])', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { let y = 0\n y = acc[x]\n return y }\nr`); });
+  it('inside an EXPR statement (acc[x])', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { acc[x]\n return acc }\nr`); });
+  it('inside an IF test (if (acc[x] > 0))', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { if (acc[x] > 0) { return 1 }\n return acc }\nr`); });
+  it('inside a FOR body (for (…) { acc[x] })', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { for (const i of range(2)) { acc[x] }\n return acc }\nr`); });
+  it('inside a WHILE test (while (acc[x] > 0))', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { while (acc[x] > 0) { return 1 }\n return acc }\nr`); });
+  it('with a nested-decl statement present (the walk skips the decl but still finds the index in the return)', () => {
+    // The `function h() {}` statement hits `indexesAnyParam`'s default (non-index) stmt branch and returns
+    // false; the subsequent `return acc[x]` still flags the scalar index — the walk does not short-circuit.
+    flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { function h() { return 1 }\n return acc[x] }\nr`);
+  });
+  // The `indexesAnyParam` walk short-circuits on the FIRST truthy sub-branch, so the following reach the
+  // OTHER side of each `||`: the index lives in a sub-position the earlier cases don't exercise.
+  it('as an INDIRECT callee (acc[x]()) — the non-ident-callee side of the call branch', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return acc[x]() }\nr`); });
+  it('inside a wrapping-block CALL (foo() { acc[x] }) — the call node\'s block side', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { return foo() { acc[x] } }\nr`); });
+  it('as an ASSIGN TARGET (acc[x] = 1) — the target side of the assign branch (value has no index)', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { acc[x] = 1\n return acc }\nr`); });
+  it('inside an IF THEN body (if (x>0) { return acc[x] }) — the then-branch stmt walk', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { if (x > 0) { return acc[x] }\n return acc }\nr`); });
+  it('inside an IF ELSE body (… else { return acc[x] }) — the else-branch stmt walk', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { if (x > 0) { return 1 } else { return acc[x] }\n return acc }\nr`); });
+  it('inside a WHILE body (while (x>0) { acc[x] }) — the body-stmt walk (test has no index)', () => { flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { while (x > 0) { acc[x] }\n return acc }\nr`); });
+  it('coexists with a value-less RETURN (the return branch\'s false arm) elsewhere in the body', () => {
+    // The `return` with no value takes `indexesAnyParam`'s `s.value ? … : false` false arm; the trailing
+    // `return acc[x]` still flags the scalar index.
+    flagsScalarIndex(new RuntimeReactiveHost(), `component r(acc, x) { if (x > 0) { return }\n return acc[x] }\nr`);
+  });
+});
+
+// cpuReduce is the correctness ORACLE floor — an exact linear left-fold through the shipped interpreter. The
+// neutral-identity block below exercises the sum/max shapes; these add product/min (distinct ops) and the
+// Number(null) coercion path: a reducer whose step evaluates to null (a divide-by-zero → the interpreter emits
+// a diagnostic and yields null) is coerced by `Number(...)` to 0, mirroring the buffer-write coercion.
+describe('cpuReduce — the linear left-fold oracle (product / min / null-coercion)', () => {
+  it('folds a PRODUCT seeded by the neutral identity 1', () => {
+    const host = new RuntimeReactiveHost();
+    const mul = reducerOf(`component mul(a, b) { return a * b }\nmul`, host);
+    expect(cpuReduce(mul, [1, 2, 3, 4], 1, host)).toBe(24);
+    expect(cpuReduce(mul, [], 1, host)).toBe(1);   // empty fold → the seed itself
+  });
+  it('folds a MIN seeded by a very-large neutral identity', () => {
+    const host = new RuntimeReactiveHost();
+    const mn = reducerOf(`component mn(a, b) { return a < b ? a : b }\nmn`, host);
+    expect(cpuReduce(mn, [3, 9, 2, 7, 5], 1e30, host)).toBe(2);
+    expect(cpuReduce(mn, [-5, -9, -2], Infinity, host)).toBe(-9);
+  });
+  it('coerces a null fold step to 0 (a /0 → the interpreter yields null → Number(null) === 0)', () => {
+    const host = new RuntimeReactiveHost();
+    // acc / (x - x) divides by zero → the interpreter records ML-LANG-DIV-ZERO and returns null; cpuReduce's
+    // Number(...) then coerces that null to 0 (the buffer-write coercion), so the fold settles at 0.
+    const bad = reducerOf(`component bad(acc, x) { return acc / (x - x) }\nbad`, host);
+    expect(cpuReduce(bad, [5], 10, host)).toBe(0);
+  });
+  it('DECLINES a host-dispatched call — cpuReduce runs with a resolveCall-declining env, so an unknown head yields null → 0', () => {
+    const host = new RuntimeReactiveHost();
+    // `widget(...)` is neither a param nor a lang builtin → the interpreter dispatches it to the environment's
+    // resolveCall. cpuReduce supplies a declineEnv whose resolveCall answers { handled: false }, so the call
+    // yields null and Number(null) coerces the fold to 0 — the fold never escapes to a host head.
+    const r = reducerOf(`component r(acc, x) { return widget(acc, x) }\nr`, host);
+    expect(cpuReduce(r, [1, 2, 3], 5, host)).toBe(0);
+  });
+});
+
 describe('reduction — the neutral-identity contract', () => {
   it('cpuReduce (the oracle) applies a NEUTRAL identity exactly once', () => {
     const host = new RuntimeReactiveHost();

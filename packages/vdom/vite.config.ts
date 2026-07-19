@@ -2,9 +2,9 @@ import { defineConfig } from 'vite';
 import dts from 'vite-plugin-dts';
 
 export default defineConfig({
-  // Exclude tests + the dev-only demo/example fixtures (not part of the public API; not reachable from
+  // Exclude tests + the example fixtures under src/test/ (not part of the public API; not reachable from
   // index.ts, so no .js is emitted for them — this drops their stray .d.ts from the published tarball).
-  plugins: [dts({ tsconfigPath: './tsconfig.build.json', exclude: ['**/*.test.ts', '**/*.browser.test.ts', 'src/demo.ts', 'src/examples.ts'] })],
+  plugins: [dts({ tsconfigPath: './tsconfig.build.json', exclude: ['**/*.test.ts', '**/*.browser.test.ts', 'src/test/**'] })],
   build: {
     lib: { entry: 'src/index.ts', formats: ['es'], fileName: 'index' },
     target: 'esnext',

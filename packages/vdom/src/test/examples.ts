@@ -1,7 +1,7 @@
-// Demo components as DSL source, used by the browser tests + the dev demo page. NOT public API. Uses the
-// collections capability this package depends on: spread ([...a], {...o}) + filter() for immutable list
-// rebuilds, and the `head { }` wrap shorthand. Arrays/objects are immutable — a list "update" REASSIGNS a
-// new array (items = [...items, x]); it never mutates in place.
+// Example components as DSL source — a shared test fixture for the browser tests. NOT public API (not
+// exported from the barrel). Uses the collections capability this package depends on: spread ([...a],
+// {...o}) + filter() for immutable list rebuilds, and the `head { }` wrap shorthand. Arrays/objects are
+// immutable — a list "update" REASSIGNS a new array (items = [...items, x]); it never mutates in place.
 
 /** COUNTER — a reactive `let n` read only by `span(n)` → the FINE-GRAINED leaf path (no re-render;
  *  the walk-effect is not subscribed to `n`, so a click patches only the text node). */

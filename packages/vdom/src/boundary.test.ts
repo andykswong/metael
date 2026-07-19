@@ -10,9 +10,8 @@ describe('@metael/vdom public surface', () => {
       expect(vdom[name as keyof typeof vdom]).toBeDefined();
     }
   });
-  it('does NOT export examples or the demo harness (a library stays app-free)', () => {
+  it('does NOT export the example fixtures (a library stays app-free)', () => {
     expect((vdom as Record<string, unknown>).COUNTER).toBeUndefined();
-    expect((vdom as Record<string, unknown>).mountDemos).toBeUndefined();
   });
 });
 

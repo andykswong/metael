@@ -14,20 +14,18 @@ const alias = {
 export default defineConfig({
   resolve: { alias },
   test: {
-    // Coverage (v8) is produced only for the publishable package SOURCES — the kernel + runtime + the
-    // vdom domain. Tests, build output, type-only barrels, dev-only demo/example fixtures, and the
-    // showcase app are excluded. Emitted as lcov (for Codecov) + text (local). Run via
-    // `npm run test:coverage` / `vitest --coverage`. NOTE: this is the NODE project only — parts of
-    // @metael/vdom (DOM reconcile/mount/patch) are exercised by *.browser.test.ts in real Chromium,
-    // which this run does not instrument, so their node-only lcov reads low; the Codecov gate accounts
-    // for that (informational, non-blocking) rather than forcing browser-coverage collection.
+    // Coverage (v8) over the publishable package SOURCES only — tests, build output, test fixtures, and the
+    // showcase app are excluded. Emitted as lcov (Codecov) + text (local). This is top-level, so
+    // `vitest --coverage` instruments BOTH projects (v8 collects browser coverage over the Chrome DevTools
+    // Protocol) and merges them — so vdom's Chromium-only DOM paths are counted. WGSL shader bodies run on
+    // the GPU, not in JS, so they stay uncoverable; their JS emitters are covered.
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
       include: ['packages/*/src/**/*.ts'],
       exclude: [
-        '**/*.test.ts', '**/*.browser.test.ts', '**/index.ts', '**/dist/**', 'apps/**',
-        'packages/vdom/src/demo.ts', 'packages/vdom/src/examples.ts',   // dev-only fixtures, not public API
+        '**/*.test.ts', '**/*.browser.test.ts', '**/dist/**', 'apps/**',
+        'packages/*/src/test/**',   // shared test fixtures, not shipped code
       ],
     },
     projects: [

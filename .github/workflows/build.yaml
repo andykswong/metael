@@ -18,10 +18,10 @@ jobs:
     - run: npm run typecheck
     - run: npm run lint
     - run: npx playwright install --with-deps chromium
-    # If SwiftShader brings up a WebGPU adapter (see vitest.config.ts), the @metael/gpu WGSL browser tests
-    # run for real; if not, they ctx.skip. Watch the test summary's skip count: 1 skipped (the f16 test —
-    # SwiftShader has no shader-f16) means the WGSL legs ran; more means the adapter didn't come up.
-    - run: npm test
+    # `test:coverage` (vitest run --coverage) runs every project once under v8 — the full gate AND the
+    # merged-lcov producer, so there's no separate `npm test`. If SwiftShader brings up a WebGPU adapter
+    # (see vitest.config.ts) the @metael/gpu WGSL browser tests run for real, else they ctx.skip: a skip
+    # count of 1 (the f16 test — SwiftShader has no shader-f16) means the WGSL legs ran.
     - run: npm run test:coverage
     - uses: codecov/codecov-action@v6
       with:

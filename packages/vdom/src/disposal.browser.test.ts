@@ -3,7 +3,7 @@ import { mount } from './mount.ts';
 import { reconcile, type ReconcileHooks } from './reconcile.ts';
 import { createDom } from './patch.ts';
 import { type VNode } from './vnode.ts';
-import { TODO } from './examples.ts';
+import { TODO } from './test/examples.ts';
 
 let container: HTMLElement;
 beforeEach(() => { container = document.createElement('div'); document.body.appendChild(container); });
