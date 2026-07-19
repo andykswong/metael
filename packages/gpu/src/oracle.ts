@@ -60,7 +60,16 @@ export function checkMatch(input: OracleInput): MatchVerdict {
   // emit-cpu's per-cell makeCallable.
   const perCellSteps = Math.max(DEFAULT_MAX_STEPS, MAX_RANGE * 4096);
   const declineEnv: HostEnvironment = { resolveCall: () => ({ handled: false }) };
-  const coordsOf = (flat: number): number[] => dims.length === 1 ? [flat] : [Math.floor(flat / dims[1]!), flat % dims[1]!];
+  // Reconstruct a cell's coords from its flat index under the shared row-major flatten (the LAST dim varies
+  // fastest): flat = (…(c0*d1 + c1)*d2 + c2)… For [W,H] this is x=flat/H, y=flat%H; for [W,H,D],
+  // z=flat%D, y=(flat/D)%H, x=flat/(H*D) — matching the CPU emitter's coords + every shader's decomposition.
+  // Decompose from the innermost dim outward so a rank-3 (or rank-1) dispatch verifies against the right cell.
+  const coordsOf = (flat: number): number[] => {
+    const c = new Array<number>(dims.length);
+    let rem = flat;
+    for (let i = dims.length - 1; i >= 0; i--) { c[i] = rem % dims[i]!; rem = Math.floor(rem / dims[i]!); }
+    return c;
+  };
   const tol = precision === 'f16' ? 64 : 4;
   let exact = true; let maxUlp = 0; let sampled = 0;
   const step = Math.max(1, Math.floor(total / Math.max(1, sampleCount)));

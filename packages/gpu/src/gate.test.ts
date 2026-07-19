@@ -225,3 +225,140 @@ describe('gate — robustness + wrapping block', () => {
     expect(v.core).toBe(false);
   });
 });
+
+describe('gate — a matrix return has no output-cell form', () => {
+  it('a matrix returned to a scalar output is rejected', () => {
+    const { fn, host } = kernelOf('component k(i) { return mat2(1,2,3,4) } k');
+    const v = gateKernel(fn, host, 1);
+    expect(v.core).toBe(false);
+    expect(v.reasons.some((r) => r.code === 'MLGPU-OUTPUT-SHAPE')).toBe(true);
+  });
+});
+
+describe('gate — vec ± mat and mismatched matmul are rejected (inconsistent shape)', () => {
+  it('vec + mat is a gate reject (inconsistent shape)', () => {
+    const { fn, host } = kernelOf('component k(i) { return (vec2(i,i) + mat2(1,2,3,4)).x } k');
+    const v = gateKernel(fn, host, 1);
+    expect(v.core).toBe(false);
+  });
+  it('mat * mat with a mismatched inner dimension is a gate reject', () => {
+    // mat2 (cols=2) * mat3 (rows=3): inner dims 2 ≠ 3 → undefined product. The reject must come from the
+    // inner-mismatch -1 path (the binary signals -1, the `.x` swizzle propagates it) → an MLGPU-OUTPUT-SHAPE
+    // reason — NOT from the matrix-output guard (a `member` node is not a matShapeOf-recognized ctor call).
+    const { fn, host } = kernelOf('component k(i) { return (mat2(1,2,3,4) * mat3(1,2,3,4,5,6,7,8,9)).x } k');
+    const v = gateKernel(fn, host, 1);
+    expect(v.core).toBe(false);
+    expect(v.reasons.some((r) => r.code === 'MLGPU-OUTPUT-SHAPE')).toBe(true);
+  });
+});
+
+describe('gate — accepts EXACTLY the vec/mat op·shapes the interpreter accepts (gate ⇒ parity)', () => {
+  // The interpreter's vec/mat descriptor `binary` handler (the correctness oracle) evaluates only a fixed
+  // set of (op, left-shape, right-shape) triples; everything else returns NOT_HANDLED → ML-LANG-OP-
+  // UNSUPPORTED → the cell is 0. A shader emits the native op and computes a real value, so a gate that
+  // accepts a NOT_HANDLED combo silently diverges (verify is off by default; GLSL runs on WebGL2 in CI).
+  // The gate must accept a combo iff the interpreter does.
+  const core = (src: string): boolean => { const { fn, host } = kernelOf(`component k(i) { return ${src} } k`); return gateKernel(fn, host, 1).core; };
+  it('rejects the op·shapes the interpreter NOT_HANDLEs (were silently GPU-divergent)', () => {
+    expect(core('(vec2(i,i) * mat2(1,2,3,4)).x')).toBe(false);   // vec*mat (vec on the LEFT of a matrix) — not matmul
+    expect(core('(2 / vec2(i,i)).x')).toBe(false);               // scalar / vec — the interpreter scale rule is `*` only
+    expect(core('(vec2(i,i) + 5).x')).toBe(false);               // vec + scalar — scale is `*`|`/` only
+    expect(core('(vec2(i,i) - 5).x')).toBe(false);               // vec - scalar
+    expect(core('(5 + vec2(i,i)).x')).toBe(false);               // scalar + vec
+    expect(core('(5 - vec2(i,i)).x')).toBe(false);               // scalar - vec
+    expect(core('(mat2(1,2,3,4) + mat2(5,6,7,8)).x')).toBe(false); // mat + mat (both matrices, same shape)
+    expect(core('(mat2(1,2,3,4) - mat2(5,6,7,8)).x')).toBe(false); // mat - mat
+    expect(core('(2 / mat2(1,2,3,4)).x')).toBe(false);           // scalar / mat — scale is `*` only for a scalar-left
+    expect(core('(vec3(1,2,3) + vec2(i,i)).x')).toBe(false);     // vec + vec, differing width
+  });
+  it('still accepts the op·shapes the interpreter evaluates', () => {
+    expect(core('(mat2(1,2,3,4) * vec2(1,1)).x')).toBe(true);    // mat * vec — matmul (mat on the left)
+    expect(core('(vec2(1,2) * 3).x')).toBe(true);                // vec * scalar
+    expect(core('(3 * vec2(1,2)).x')).toBe(true);                // scalar * vec
+    expect(core('(vec2(1,2) / 2).x')).toBe(true);                // vec / scalar
+    expect(core('(vec2(1,2) + vec2(3,4)).x')).toBe(true);        // vec + vec, equal width
+    expect(core('(vec2(1,2) - vec2(3,4)).x')).toBe(true);        // vec - vec, equal width
+    expect(core('(vec2(1,2) * vec2(3,4)).x')).toBe(true);        // vec * vec, equal width
+    expect(core('(vec2(1,2) / vec2(3,4)).x')).toBe(true);        // vec / vec, equal width
+    expect(core('((mat2(1,2,3,4) * 2) * vec2(1,1)).x')).toBe(true); // mat*scalar (a mat) then mat*vec — matmul
+    expect(core('i * 2 + 1')).toBe(true);                        // plain scalar arithmetic (the carve-out)
+    expect(core('i + i')).toBe(true);                            // plain scalar
+  });
+});
+
+describe('gate — rand() cannot be lowered (no deterministic shader match)', () => {
+  it('a kernel using rand() is non-core with MLGPU-NOT-LOWERABLE', () => {
+    const { fn, host } = kernelOf('component k(i) { return rand() } k');
+    const v = gateKernel(fn, host, 1);
+    expect(v.core).toBe(false);
+    expect(v.reasons.some((r) => r.code === 'MLGPU-NOT-LOWERABLE' && /rand/.test(r.message))).toBe(true);
+  });
+});
+
+describe('gate — inverse requires a statically-sized square matrix argument (no silent bare-arg WGSL)', () => {
+  const ok = (src: string): boolean => { const { fn, host } = kernelOf(src); return gateKernel(fn, host, 1).core; };
+  const reasons = (src: string) => { const { fn, host } = kernelOf(src); return gateKernel(fn, host, 1).reasons; };
+
+  it('inverse of a matrix constructor is lowerable', () => {
+    // A direct `matN(...)` ctor arg → matSizeOf resolves the size → the emitter can hand-emit `_invN`.
+    expect(ok('component k(i) { return (inverse(mat2(4,2,7,6)) * vec2(1,0)).x } k')).toBe(true);
+  });
+  it('inverse of a ctor-typed local is lowerable (const M = mat3(...); inverse(M))', () => {
+    // The locals-aware rule: a `const M = mat3(...)` records M as a 3×3 local, so `inverse(M)` resolves.
+    expect(ok('component k(i) { const M = mat3(2,0,1, 1,3,0, 0,2,1) return (inverse(M) * vec3(1,0,0)).x } k')).toBe(true);
+  });
+  it('inverse of transpose of a local is lowerable (the normal-matrix idiom)', () => {
+    // matSizeOf recurses through transpose over a square local → resolvable. This is the canonical idiom the
+    // old (pre-fix) emitter silently mis-lowered (dropping the inverse, emitting the bare transpose(M)).
+    expect(ok('component k(i) { const M = mat3(2,0,1, 1,3,0, 0,2,1) return (inverse(transpose(M)) * vec3(1,0,0)).x } k')).toBe(true);
+  });
+  it('inverse of a matrix PRODUCT (a computed matrix) is gate-rejected — not silently mis-lowered', () => {
+    const r = reasons('component k(i) { return (inverse(mat2(1,2,3,4) * mat2(5,6,7,8)) * vec2(1,0)).x } k');
+    expect(r.some((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /inverse/.test(d.message))).toBe(true);
+  });
+  it('inverse of a computed-matrix LOCAL (const P = A * B; inverse(P)) is gate-rejected', () => {
+    // P's init is a mat*mat product → matSizeOf null → P is NOT recorded as a matrix local → inverse(P) rejects.
+    const r = reasons('component k(i) { const A = mat2(1,2,3,4) const B = mat2(5,6,7,8) const P = A * B return (inverse(P) * vec2(1,0)).x } k');
+    expect(r.some((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /inverse/.test(d.message))).toBe(true);
+  });
+  it('inverse of a mat*scalar and of a ternary are gate-rejected (computed matrices)', () => {
+    const rScale = reasons('component k(i) { const A = mat2(1,2,3,4) return (inverse(A * 2.0) * vec2(1,0)).x } k');
+    expect(rScale.some((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /inverse/.test(d.message))).toBe(true);
+    const rCond = reasons('component k(i) { const A = mat2(1,2,3,4) const B = mat2(5,6,7,8) return (inverse(i > 0 ? A : B) * vec2(1,0)).x } k');
+    expect(rCond.some((d) => d.code === 'MLGPU-NOT-LOWERABLE' && /inverse/.test(d.message))).toBe(true);
+  });
+});
+
+describe('gate — output-shape inference for the P4 vec/mat ops', () => {
+  it('reflect returns arg0 width; distance returns scalar', () => {
+    const { fn, host } = kernelOf('component k(i) { return reflect(vec2(1,-1), vec2(0,1)) } k');
+    expect(gateKernel(fn, host, 2).core).toBe(true); // vec2 output OK (was WRONGLY rejected before)
+    const { fn: fn2, host: h2 } = kernelOf('component k(i) { return distance(vec2(0,0), vec2(3,4)) } k');
+    expect(gateKernel(fn2, h2, 1).core).toBe(true); // scalar output OK
+  });
+  it('refract/faceforward take arg0 width; determinant folds to a scalar', () => {
+    const rr = kernelOf('component k(i) { return refract(vec3(1,0,0), vec3(0,1,0), 0.5) } k');
+    expect(gateKernel(rr.fn, rr.host, 3).core).toBe(true); // vec3 output OK
+    const ff = kernelOf('component k(i) { return faceforward(vec2(1,0), vec2(0,1), vec2(0,-1)) } k');
+    expect(gateKernel(ff.fn, ff.host, 2).core).toBe(true); // vec2 output OK
+    const det = kernelOf('component k(i) { return determinant(mat2(1,2,3,4)) } k');
+    expect(gateKernel(det.fn, det.host, 1).core).toBe(true); // scalar output OK
+  });
+  it('determinant of a non-square matrix is a gate reject', () => {
+    const { fn, host } = kernelOf('component k(i) { return determinant(mat2x3(1,2,3,4,5,6)) } k');
+    expect(gateKernel(fn, host, 1).core).toBe(false);
+    expect(gateKernel(fn, host, 1).reasons.some((r) => r.code === 'MLGPU-NOT-LOWERABLE')).toBe(true);
+  });
+  it('determinant of a non-square LOCAL is a gate reject (locals-aware)', () => {
+    // The locals-aware shape resolver catches `const m = mat2x3(...); determinant(m)` — the non-square shape
+    // is recorded for the local, so the determinant square check rejects it (it did NOT before this fix).
+    const { fn, host } = kernelOf('component k(i) { const m = mat2x3(1,2,3,4,5,6) return determinant(m) } k');
+    const v = gateKernel(fn, host, 1);
+    expect(v.core).toBe(false);
+    expect(v.reasons.some((r) => r.code === 'MLGPU-NOT-LOWERABLE')).toBe(true);
+  });
+  it('determinant of a square LOCAL stays lowerable', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat2(1,2,3,4) return determinant(m) } k');
+    expect(gateKernel(fn, host, 1).core).toBe(true);
+  });
+});

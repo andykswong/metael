@@ -11,17 +11,51 @@
 import type { UserFn, Expr, Stmt } from '@metael/lang';
 import { BUILTINS } from '@metael/lang';
 import type { Binding, BindingTable } from './binding.ts';
+import { bodyReferencesAny } from './binding.ts';
 
 // Core-exact builtins the gate accepts but that carry no registry `lowerName` — they map to a native GLSL
 // function of the same name (round → roundEven so ties-to-even matches the interpreter/CPU + WGSL).
 const GLSL_CORE_FN: Readonly<Record<string, string>> = { min: 'min', max: 'max', abs: 'abs', sign: 'sign', floor: 'floor', ceil: 'ceil', clamp: 'clamp', round: 'roundEven' };
-const VEC_CTORS = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4']);
+const VEC_CTORS = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4', 'mat2x3', 'mat2x4', 'mat3x2', 'mat3x4', 'mat4x2', 'mat4x3']);
 const COMPARE_OPS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 
 function isBoolExpr(e: Expr): boolean {
   if (e.kind === 'binary') return COMPARE_OPS.has(e.op) || e.op === '&&' || e.op === '||';
   if (e.kind === 'unary') return e.op === '!';
   return false;
+}
+
+const QSLERP_NAME: ReadonlySet<string> = new Set(['qslerp']);
+const QMAT_NAME: ReadonlySet<string> = new Set(['qmat']);
+// ─── Quaternion GLSL prelude helpers (`_qslerp`, `_qmat`) — mirror the WGSL versions; injected ONCE before `main` ───
+// _qslerp: antipodal fix (dot<0 → negate b + flip dot) + small-angle NORMALIZED-lerp fallback (dot>0.9995) + the
+//   sin-weighted great-circle blend — the SAME three cases the interpreter oracle computes. GLSL-ES-3.0 allows an
+//   `if`/early-`return` inside a function, so it reads straightforwardly.
+// _qmat: the column-major rotation matrix. GLSL `mat3(...)` takes columns, so the nine entries are given in
+//   (col outer, row inner) order — exactly the interpreter's column-major `out[c*3+r]`, so the two agree.
+function glslQuatPrelude(kernel: UserFn): string[] {
+  const out: string[] = [];
+  if (bodyReferencesAny(kernel, QSLERP_NAME)) out.push([
+    'vec4 _qslerp(vec4 a, vec4 b_in, float t) {',
+    '  float d = dot(a, b_in);',
+    '  vec4 b = b_in;',
+    '  if (d < 0.0) { b = -b_in; d = -d; }',
+    '  if (d > 0.9995) { return normalize(a + (b - a) * t); }',
+    '  float th = acos(clamp(d, -1.0, 1.0));',
+    '  float s = sin(th);',
+    '  return a * (sin((1.0 - t) * th) / s) + b * (sin(t * th) / s);',
+    '}',
+  ].join('\n'));
+  if (bodyReferencesAny(kernel, QMAT_NAME)) out.push([
+    'mat3 _qmat(vec4 q) {',
+    '  float x = q.x; float y = q.y; float z = q.z; float w = q.w;',
+    '  return mat3(',
+    '    1.0 - 2.0*(y*y + z*z), 2.0*(x*y + w*z),       2.0*(x*z - w*y),',
+    '    2.0*(x*y - w*z),       1.0 - 2.0*(x*x + z*z), 2.0*(y*z + w*x),',
+    '    2.0*(x*z + w*y),       2.0*(y*z - w*x),       1.0 - 2.0*(x*x + y*y));',
+    '}',
+  ].join('\n'));
+  return out;
 }
 
 // A local-name → GLSL-type environment threaded through emission so a `const`/`let` can be declared with the
@@ -44,7 +78,7 @@ export function emitGlsl(kernel: UserFn, bindings: BindingTable, precision: 'f16
   L.push('precision highp int;');
   L.push('precision highp sampler2D;');
   // Output dims + the output texture width (the flat-index → fragment map). Set by the backend as uniforms.
-  L.push('uniform int _rows; uniform int _cols; uniform int _texW;');
+  L.push('uniform int _rows; uniform int _cols; uniform int _texW; uniform int _deps;');
   // Each input buffer: a float texture + its texture width (for the texel map) + its element count (.length).
   for (const b of buffers) L.push(`uniform sampler2D ${b.name}; uniform int ${b.name}_texW; uniform int ${b.name}_len;`);
   // Scalar uniforms are namespaced `_u_<name>` (mirroring the WGSL emitter's `_p._u_<name>`): a user scalar
@@ -53,16 +87,25 @@ export function emitGlsl(kernel: UserFn, bindings: BindingTable, precision: 'f16
   for (const s of scalars) L.push(`uniform float _u_${s.name};`);
   L.push('out vec4 _frag;');
   L.push('float _fetch(sampler2D t, int idx, int w) { return texelFetch(t, ivec2(idx % w, idx / w), 0).r; }');
+  L.push(...glslQuatPrelude(kernel));
   L.push('void main() {');
   L.push('  int _fx = int(gl_FragCoord.x); int _fy = int(gl_FragCoord.y);');
-  if (rank === 2) {
+  if (rank === 3) {
+    // No 3-D render target in WebGL2: the output texture is FLAT (one texel per cell, like the 1-D case), so
+    // `_flat` is the texel index `_fy * _texW + _fx`. Decompose it back into (x,y,z) via the shared row-major
+    // flatten `_flat = (x*H + y)*D + z` for output[W,H,D] (W=_rows, H=_cols, D=_deps): z = _flat % D,
+    // y = (_flat / D) % H, x = _flat / (H*D). Inlined into the float casts (parity with the WGSL/CPU coords).
+    L.push('  int _flat = _fy * _texW + _fx;');
+    L.push(`  float ${params[0]} = float(_flat / (_cols * _deps)); float ${params[1]} = float((_flat / _deps) % _cols); float ${params[2]} = float(_flat % _deps);`);
+  } else if (rank === 2) {
     L.push('  int _flat = _fy * _cols + _fx;');
     L.push(`  float ${params[0]} = float(_fy); float ${params[1]} = float(_fx);`);
   } else {
     L.push('  int _flat = _fy * _texW + _fx;');
     L.push(`  float ${params[0]} = float(_flat);`);
   }
-  L.push('  if (_flat >= _rows * _cols) { discard; }');
+  // The full cell count is _rows*_cols for rank 1/2 (cols=1 for 1-D) and _rows*_cols*_deps for rank 3.
+  L.push(`  if (_flat >= ${rank === 3 ? '_rows * _cols * _deps' : '_rows * _cols'}) { discard; }`);
   L.push(emitBody(kernel.body, tenv, bindings, 1, comps, { n: 0 }));
   L.push('}');
   return L.join('\n');
@@ -166,7 +209,16 @@ function emitExpr(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       // raw shader division yields). Guard both so a gate-accepted divide matches the oracle. (`%` is JS
       // remainder — sign of the DIVIDEND — lowered to the truncated remainder `a - b*trunc(a/b)`; GLSL `%`
       // is integer-only and its mod() takes the sign of the divisor.)
-      if (e.op === '/') return `(${r} == 0.0 ? 0.0 : ${l} / ${r})`;
+      // The `/0` guard is width-aware: the scalar `(r == 0.0 ? 0.0 : l/r)` is only type-correct when BOTH
+      // operands are `float`. When either is a vec/mat, the scalar 0.0 false-branch + the `vec == 0.0` test
+      // are a type mismatch (a real-adapter compile error). A vec/mat divide is emitted as the NATIVE
+      // componentwise divide (no guard) — `inf`/`NaN` on a zero component, matching the interpreter's
+      // unguarded componentwise divide, so the oracle still agrees.
+      if (e.op === '/') {
+        const lt = glslType(e.left, tenv, bindings); const rt = glslType(e.right, tenv, bindings);
+        if (lt === 'float' && rt === 'float') return `(${r} == 0.0 ? 0.0 : ${l} / ${r})`;
+        return `(${l} / ${r})`;
+      }
       if (e.op === '%') return `(${r} == 0.0 ? 0.0 : ${l} - ${r} * trunc(${l} / ${r}))`;
       return `(${l} ${e.op} ${r})`;
     }
@@ -185,6 +237,32 @@ function emitExpr(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       // so a gate-accepted kernel matches the oracle instead of the native NaN. sqrt(x<0)→0; log(x<=0)→0.
       if (name === 'sqrt') return `((${args}) < 0.0 ? 0.0 : sqrt(${args}))`;
       if (name === 'log') return `((${args}) <= 0.0 ? 0.0 : log(${args}))`;
+      // asin/acos: |x|>1 is out of domain; the interpreter maps it to 0 (a cell). Guard so a gate-accepted
+      // kernel matches the oracle instead of the native NaN.
+      if (name === 'asin' || name === 'acos') return `(abs(${args}) > 1.0 ? 0.0 : ${name}(${args}))`;
+      // atan2(y, x) has a per-target native name (no registry lowerName): GLSL spells it as 2-arg atan.
+      if (name === 'atan2') return `atan(${args})`;
+      // faceforward has no registry lowerName (its WGSL name differs); GLSL spells it faceforward.
+      if (name === 'faceforward') return `faceforward(${args})`;
+      // ─── quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w; hand-emitted — GLSL has no quat type) ───
+      // qconj negates the imaginary part; qinvert = conj / dot(q,q); qmul is the Hamilton product (see WGSL emitter).
+      if (name === 'qconj') { const q = emitExpr(e.args[0]!, tenv, bindings); return `(${q} * vec4(-1.0, -1.0, -1.0, 1.0))`; }
+      if (name === 'qinvert') { const q = emitExpr(e.args[0]!, tenv, bindings); return `((${q} * vec4(-1.0, -1.0, -1.0, 1.0)) / dot(${q}, ${q}))`; }
+      if (name === 'qmul') { const a = emitExpr(e.args[0]!, tenv, bindings); const b = emitExpr(e.args[1]!, tenv, bindings); return `vec4(${a}.w*${b}.x + ${a}.x*${b}.w + ${a}.y*${b}.z - ${a}.z*${b}.y, ${a}.w*${b}.y - ${a}.x*${b}.z + ${a}.y*${b}.w + ${a}.z*${b}.x, ${a}.w*${b}.z + ${a}.x*${b}.y - ${a}.y*${b}.x + ${a}.z*${b}.w, ${a}.w*${b}.w - ${a}.x*${b}.x - ${a}.y*${b}.y - ${a}.z*${b}.z)`; }
+      // qaxisangle(axis:vec3, angle) → (axis·sin(θ/2), cos(θ/2)); qrotate(q:vec4, v:vec3) → the rotated vec3 (see WGSL emitter).
+      if (name === 'qaxisangle') { const ax = emitExpr(e.args[0]!, tenv, bindings); const an = emitExpr(e.args[1]!, tenv, bindings); return `vec4((${ax}) * sin((${an}) * 0.5), cos((${an}) * 0.5))`; }
+      if (name === 'qrotate') { const q = emitExpr(e.args[0]!, tenv, bindings); const v = emitExpr(e.args[1]!, tenv, bindings); return `((${v}) + 2.0 * cross((${q}).xyz, cross((${q}).xyz, (${v})) + (${q}).w * (${v})))`; }
+      // qslerp — the branch lives in the `_qslerp` prelude helper (injected once before main).
+      if (name === 'qslerp') { const a = emitExpr(e.args[0]!, tenv, bindings); const b = emitExpr(e.args[1]!, tenv, bindings); const t = emitExpr(e.args[2]!, tenv, bindings); return `_qslerp(${a}, ${b}, ${t})`; }
+      // qmat — the 3×3 column-major rotation matrix lives in the `_qmat` prelude helper (injected once before main).
+      if (name === 'qmat') { const q = emitExpr(e.args[0]!, tenv, bindings); return `_qmat(${q})`; }
+      // inverse has no registry lowerName (WGSL has NO inverse() — hand-emitted there per size); GLSL ES 3.0
+      // has a native inverse() for mat2/mat3/mat4, so it lowers to the same-named native call here.
+      if (name === 'inverse') return `inverse(${args})`;
+      // log2 / inverseSqrt: x<=0 is out of domain; the interpreter maps it to 0 (a cell). Guard so a
+      // gate-accepted kernel matches the oracle instead of the native NaN. GLSL spells it inversesqrt.
+      if (name === 'log2') return `((${args}) <= 0.0 ? 0.0 : log2(${args}))`;
+      if (name === 'inverseSqrt') return `((${args}) <= 0.0 ? 0.0 : inversesqrt(${args}))`;
       if (spec?.lowerName) return `${spec.lowerName}(${args})`;
       if (GLSL_CORE_FN[name]) return `${GLSL_CORE_FN[name]}(${args})`;
       // Unreachable for a gate-accepted kernel (every emittable head is handled above); a defensive placeholder.
@@ -260,6 +338,7 @@ export function emitReduceGlsl(reducer: UserFn, bindings: BindingTable): string 
   L.push('out vec4 _frag;');
   L.push(`const int TILE = ${REDUCE_TILE};`);   // a COMPILE-TIME constant loop bound (GLSL-ES-3.00 requires it)
   L.push('float _fetch(sampler2D t, int idx, int w) { return texelFetch(t, ivec2(idx % w, idx / w), 0).r; }');
+  L.push(...glslQuatPrelude(reducer));
   L.push(`float _reduce(float ${acc}, float ${x}) {`);
   L.push(body);
   L.push('}');
@@ -312,10 +391,22 @@ function glslType(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       if (VEC_CTORS.has(name)) return name;
       if (name === 'cross') return 'vec3';
       if (name === 'normalize' || name === 'mix') return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';
-      if (name === 'dot' || name === 'length') return 'float';
+      if (name === 'atan2' || name === 'inverseSqrt') return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';   // no lowerName; componentwise
+      // faceforward(N, I, Nref) has no registry lowerName; it returns a vector of N's (first arg's) type.
+      if (name === 'faceforward') return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';
+      // Quaternion ops that produce a quat (a vec4): qmul/qconj/qinvert/qaxisangle/qslerp; qrotate → vec3; qmat → mat3.
+      if (name === 'qmul' || name === 'qconj' || name === 'qinvert' || name === 'qaxisangle' || name === 'qslerp') return 'vec4';
+      if (name === 'qrotate') return 'vec3';
+      if (name === 'qmat') return 'mat3';
+      // inverse returns the same square-matrix type as its argument (mat2→mat2, mat3→mat3, mat4→mat4).
+      if (name === 'inverse') return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';
+      // dot/length/distance fold a vector down to a scalar; determinant folds a matrix down to a scalar.
+      // determinant carries a registry lowerName, so it must be caught BEFORE the componentwise lowerName
+      // fallback below (which would wrongly declare `mat2 d = determinant(...)`).
+      if (name === 'dot' || name === 'length' || name === 'distance' || name === 'determinant') return 'float';
       if (GLSL_CORE_FN[name]) return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';
       const spec = BUILTINS[name];
-      if (spec?.lowerName && e.args[0]) return glslType(e.args[0], tenv, bindings);   // transcendentals: componentwise
+      if (spec?.lowerName && e.args[0]) return glslType(e.args[0], tenv, bindings);   // transcendentals + reflect/refract: componentwise vec
       return 'float';
     }
     default: return 'float';

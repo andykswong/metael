@@ -14,7 +14,7 @@ import { makeSeededRng, range as seededRange } from './determinism.ts';
 import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
 import { defaultCompare, stableSort } from './sort.ts';
 import type { HostEnvironment, ReactiveHost, CellRef } from './ports.ts';
-import { descriptorOf, isCustomType, generationOf, isFrozenCustom, markFrozen, NOT_HANDLED, makeTypedArray, BUFFER_KINDS, BufferError, makeVec, makeMat, identityMat } from './custom-types.ts';
+import { descriptorOf, isCustomType, generationOf, isFrozenCustom, markFrozen, NOT_HANDLED, makeTypedArray, BUFFER_KINDS, BufferError, makeVec, makeMat, identityMat, vecStoreOf } from './custom-types.ts';
 
 export const DEFAULT_MAX_STEPS = 100_000;
 export const DEFAULT_MAX_TIME_MS = 1000;
@@ -320,6 +320,80 @@ function invokeClosure(fn: (...a: unknown[]) => unknown, expr: Extract<Expr, { k
   return fn(...expr.args.map((a) => evalExpr(a, env, r)));
 }
 
+// The six non-square matrix constructors, name → [rows, cols]. A matCxR builds C columns of R rows, so
+// its stored shape is R rows × C cols. Column-major: the flat args fill column 0 top-to-bottom, then
+// column 1, and so on.
+const NON_SQUARE_MAT: Readonly<Record<string, readonly [number, number]>> = {
+  mat2x3: [3, 2], mat2x4: [4, 2], mat3x2: [2, 3], mat3x4: [4, 3], mat4x2: [2, 4], mat4x3: [3, 4],
+};
+
+// The determinant of an n×n column-major matrix (n = 2, 3, or 4). Flat element (row, col) lives at
+// index col*n + row. Hardcoded cofactor expansions keep the result stable and match the shader targets'
+// native determinant().
+function matDeterminant(c: number[], n: number): number {
+  const e = (row: number, col: number): number => c[col * n + row] as number;
+  if (n === 2) return e(0, 0) * e(1, 1) - e(0, 1) * e(1, 0);
+  if (n === 3) {
+    return e(0, 0) * (e(1, 1) * e(2, 2) - e(1, 2) * e(2, 1))
+         - e(0, 1) * (e(1, 0) * e(2, 2) - e(1, 2) * e(2, 0))
+         + e(0, 2) * (e(1, 0) * e(2, 1) - e(1, 1) * e(2, 0));
+  }
+  // n === 4 — cofactor expansion along the first row, each 3×3 minor expanded inline.
+  const m3 = (r0: number, r1: number, r2: number, c0: number, c1: number, c2: number): number =>
+      e(r0, c0) * (e(r1, c1) * e(r2, c2) - e(r1, c2) * e(r2, c1))
+    - e(r0, c1) * (e(r1, c0) * e(r2, c2) - e(r1, c2) * e(r2, c0))
+    + e(r0, c2) * (e(r1, c0) * e(r2, c1) - e(r1, c1) * e(r2, c0));
+  return e(0, 0) * m3(1, 2, 3, 1, 2, 3)
+       - e(0, 1) * m3(1, 2, 3, 0, 2, 3)
+       + e(0, 2) * m3(1, 2, 3, 0, 1, 3)
+       - e(0, 3) * m3(1, 2, 3, 0, 1, 2);
+}
+
+// The determinant of a k×k column-major matrix (flat, element (row, col) at index col*k+row), by cofactor
+// expansion along the first column. k=1 is the scalar; k=2 is the direct 2×2 formula; larger k recurses on
+// the (k-1)×(k-1) minors. General over k so it serves BOTH the top-level inverse determinant AND the smaller
+// minors the adjugate needs (n−1 = 1/2/3 for n = 2/3/4).
+function detFlat(m: number[], k: number): number {
+  if (k === 1) return m[0] as number;
+  if (k === 2) return (m[0] as number) * (m[3] as number) - (m[2] as number) * (m[1] as number);   // col-major [a,b,c,d] → a*d − c*b
+  let sum = 0;
+  for (let row = 0; row < k; row++) {
+    const sign = row % 2 === 0 ? 1 : -1;                    // cofactor sign along column 0
+    sum += sign * (m[row] as number) * detFlat(subMat(m, k, row, 0), k - 1);   // element (row, 0) lives at flat index row
+  }
+  return sum;
+}
+// The (k−1)×(k−1) column-major submatrix of a k×k column-major matrix, formed by deleting row `dr` and column
+// `dc`. Iterating remaining columns (outer) then remaining rows (inner) pushes elements in column-major order.
+function subMat(m: number[], k: number, dr: number, dc: number): number[] {
+  const out: number[] = [];
+  for (let col = 0; col < k; col++) {
+    if (col === dc) continue;
+    for (let row = 0; row < k; row++) {
+      if (row === dr) continue;
+      out.push(m[col * k + row] as number);
+    }
+  }
+  return out;
+}
+// The inverse of an n×n column-major matrix (n = 2, 3, or 4) via the closed-form adjugate/determinant:
+// inv[i][j] = cofactor(j, i) / det = ((−1)^(i+j) · minor(j, i)) / det, where minor(j, i) is the determinant of
+// the submatrix with row j and column i deleted. The result is stored column-major (element (row=i, col=j) at
+// flat index j*n+i). If det ≈ 0 (a singular matrix) the elements are ±Inf/NaN — undefined, matching the shader
+// targets' native behavior (GLSL/WGSL neither guard nor define a singular inverse); no special guard is added.
+function matInverse(c: number[], n: number): number[] {
+  const det = detFlat(c, n);
+  const out = new Array<number>(n * n);
+  for (let i = 0; i < n; i++) {          // i = row of the inverse
+    for (let j = 0; j < n; j++) {        // j = column of the inverse
+      const sign = (i + j) % 2 === 0 ? 1 : -1;
+      const minor = detFlat(subMat(c, n, j, i), n - 1);
+      out[j * n + i] = (sign * minor) / det;
+    }
+  }
+  return out;
+}
+
 function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, env: Environment, r: Runner): unknown {
   // Intrinsic seeded builtins — resolved BEFORE the host so determinism-with-randomness is a language
   // guarantee, not a per-domain re-implementation. Only fires for the UNBOUND-head path (a user
@@ -358,35 +432,128 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
     const a = expr.args.map((x) => evalExpr(x, env, r));
     if (a.some((x) => typeof x !== 'number')) { r.error('ML-LANG-BUILTIN-ARG', `${head}(numbers) — all components must be numbers`, expr.span); return deepFreeze([]); }
     const nums = a as number[];
-    if (nums.length === 1) return makeVec(new Array<number>(n).fill(nums[0] as number), false);   // splat
+    if (nums.length === 1) return makeVec(new Array<number>(n).fill(nums[0] as number));   // splat
     if (nums.length !== n) { r.error('ML-LANG-BUILTIN-ARG', `${head} needs 1 (splat) or ${n} components`, expr.span); return deepFreeze([]); }
-    return makeVec(nums, false);
+    return makeVec(nums);
+  }
+  if (Object.hasOwn(NON_SQUARE_MAT, head)) {   // own-property check: a prototype-inherited head (constructor/toString/…) is NOT a ctor
+    r.tick();
+    const [rows, cols] = NON_SQUARE_MAT[head]!;
+    const a = expr.args.map((x) => evalExpr(x, env, r));
+    if (a.some((x) => typeof x !== 'number') || a.length !== rows * cols) { r.error('ML-LANG-BUILTIN-ARG', `${head}(${rows * cols} numbers, column-major)`, expr.span); return deepFreeze([]); }
+    return makeMat(a as number[], rows, cols);
   }
   if (head === 'mat2' || head === 'mat3' || head === 'mat4') {
     r.tick();
     const n = head === 'mat2' ? 2 : head === 'mat3' ? 3 : 4;
     const a = expr.args.map((x) => evalExpr(x, env, r));
-    if (a.length === 0) return makeMat(identityMat(n), n);
-    if (a.some((x) => typeof x !== 'number') || a.length !== n * n) { r.error('ML-LANG-BUILTIN-ARG', `${head}() (identity) or ${head}(${n * n} numbers, row-major)`, expr.span); return deepFreeze([]); }
-    return makeMat(a as number[], n);
+    if (a.length === 0) return makeMat(identityMat(n), n, n);
+    if (a.some((x) => typeof x !== 'number') || a.length !== n * n) { r.error('ML-LANG-BUILTIN-ARG', `${head}() (identity) or ${head}(${n * n} numbers, column-major)`, expr.span); return deepFreeze([]); }
+    return makeMat(a as number[], n, n);
   }
-  if (head === 'dot' || head === 'cross' || head === 'normalize' || head === 'length') {
+  if (head === 'transpose') {
+    r.tick();
+    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
+    const d = descriptorOf(m);
+    if (!d || d.lower?.shape !== 'matMxN') { r.error('ML-LANG-BUILTIN-ARG', 'transpose(mat)', expr.span); return deepFreeze([]); }
+    // Column-major transpose. Input is R rows × C cols; element (r,c) lives at flat index c*R+r. The
+    // transpose is C rows × R cols and maps (r,c) → (c,r); output element at row=c, col=r lives at flat
+    // index r*C+c. So out[r*C+c] = in[c*R+r] for r∈[0,R), c∈[0,C).
+    const s = vecStoreOf(m); const R = s.rows, C = s.cols; const out = new Array<number>(R * C);
+    for (let c = 0; c < C; c++) for (let rr = 0; rr < R; rr++) out[rr * C + c] = s.c[c * R + rr] as number;
+    return makeMat(out, C, R);
+  }
+  if (head === 'determinant') {
+    r.tick();
+    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
+    const d = descriptorOf(m);
+    const s = d?.lower?.shape === 'matMxN' ? vecStoreOf(m) : null;
+    if (!s || s.rows !== s.cols) { r.error('ML-LANG-BUILTIN-ARG', 'determinant(square mat)', expr.span); return deepFreeze([]); }
+    return matDeterminant(Array.from(s.c), s.rows);
+  }
+  if (head === 'inverse') {
+    r.tick();
+    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
+    const d = descriptorOf(m);
+    const s = d?.lower?.shape === 'matMxN' ? vecStoreOf(m) : null;
+    if (!s || s.rows !== s.cols) { r.error('ML-LANG-BUILTIN-ARG', 'inverse(square mat)', expr.span); return deepFreeze([]); }
+    return makeMat(matInverse(Array.from(s.c), s.rows), s.rows, s.rows);
+  }
+  if (head === 'qmat') {
+    r.tick();
+    // qmat(q:vec4) → the 3×3 rotation matrix of the quaternion, COLUMN-MAJOR (element (r,c) at flat index c*3+r).
+    const q = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
+    const d = descriptorOf(q);
+    if (!d || d.lower?.shape !== 'vecN' || (d.lower.rows ?? 0) !== 4) { r.error('ML-LANG-BUILTIN-ARG', 'qmat(vec4 quaternion)', expr.span); return deepFreeze([]); }
+    const s = vecStoreOf(q); const x = s.c[0] as number, y = s.c[1] as number, z = s.c[2] as number, w = s.c[3] as number;
+    const xx=x*x, yy=y*y, zz=z*z, xy=x*y, xz=x*z, yz=y*z, wx=w*x, wy=w*y, wz=w*z;
+    // Columns of the rotation matrix. col0 = R·x̂, col1 = R·ŷ, col2 = R·ẑ; laid out column-major so
+    // out[c*3+r] = column c's row r. This is the transpose-free companion to qrotate: qmat(q)·v ≡ qrotate(q,v).
+    return makeMat([
+      1-2*(yy+zz), 2*(xy+wz),   2*(xz-wy),     // col 0
+      2*(xy-wz),   1-2*(xx+zz), 2*(yz+wx),     // col 1
+      2*(xz+wy),   2*(yz-wx),   1-2*(xx+yy),   // col 2
+    ], 3, 3);
+  }
+  if (head === 'dot' || head === 'cross' || head === 'normalize' || head === 'length' ||
+      head === 'distance' || head === 'reflect' || head === 'refract' || head === 'faceforward' ||
+      head === 'qmul' || head === 'qconj' || head === 'qinvert' || head === 'qaxisangle' || head === 'qrotate' ||
+      head === 'qslerp') {
     r.tick();
     const a = expr.args.map((x) => evalExpr(x, env, r));
     const comps = (v: unknown): number[] | null => {
       const d = descriptorOf(v);
       if (!d || d.lower?.shape !== 'vecN') return null;
-      const n = d.lower.n ?? 0; const out: number[] = [];
+      const n = d.lower.rows ?? 0; const out: number[] = [];
       for (let i = 0; i < n; i++) { const c = d.getMember!(v, 'xyzw'[i] as string); if (typeof c !== 'number') return null; out.push(c); }
       return out;
     };
+    const num = (v: unknown): number | null => (typeof v === 'number' && !Number.isNaN(v)) ? v : null;
     const badVec = (): unknown => { r.error('ML-LANG-BUILTIN-ARG', `${head}(vec…) — argument must be a vector`, expr.span); return deepFreeze([]); };
     if (head === 'dot') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== y.length) return badVec(); return x.reduce((s, xi, i) => s + xi * (y[i] as number), 0); }
-    if (head === 'cross') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== 3 || y.length !== 3) return badVec(); return makeVec([x[1]!*y[2]!-x[2]!*y[1]!, x[2]!*y[0]!-x[0]!*y[2]!, x[0]!*y[1]!-x[1]!*y[0]!], false); }
+    if (head === 'cross') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== 3 || y.length !== 3) return badVec(); return makeVec([x[1]!*y[2]!-x[2]!*y[1]!, x[2]!*y[0]!-x[0]!*y[2]!, x[0]!*y[1]!-x[1]!*y[0]!]); }
     if (head === 'length') { const x = comps(a[0]); if (!x) return badVec(); return Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0)); }
+    // distance(a, b) = length(a - b) = sqrt(Σ (aᵢ - bᵢ)²).
+    if (head === 'distance') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== y.length) return badVec(); return Math.sqrt(x.reduce((s, xi, i) => s + (xi - (y[i] as number)) ** 2, 0)); }
+    // reflect(I, N) = I - 2·dot(N, I)·N (GLSL/WGSL semantics; N is assumed normalized).
+    if (head === 'reflect') { const I = comps(a[0]); const N = comps(a[1]); if (!I || !N || I.length !== N.length) return badVec(); const d = I.reduce((s, ii, i) => s + ii * (N[i] as number), 0); return makeVec(I.map((ii, i) => ii - 2 * d * (N[i] as number))); }
+    // refract(I, N, eta): k = 1 - eta²·(1 - dot(N,I)²); k < 0 → total internal reflection → zero vector;
+    // else eta·I - (eta·dot(N,I) + √k)·N.
+    if (head === 'refract') { const I = comps(a[0]); const N = comps(a[1]); const eta = num(a[2]); if (!I || !N || eta === null || I.length !== N.length) return badVec(); const d = I.reduce((s, ii, i) => s + ii * (N[i] as number), 0); const k = 1 - eta * eta * (1 - d * d); if (k < 0) return makeVec(I.map(() => 0)); const sq = Math.sqrt(k); return makeVec(I.map((ii, i) => eta * ii - (eta * d + sq) * (N[i] as number))); }
+    // faceforward(N, I, Nref): dot(Nref, I) < 0 → N, else -N (orient N to face away from I).
+    if (head === 'faceforward') { const N = comps(a[0]); const I = comps(a[1]); const Nref = comps(a[2]); if (!N || !I || !Nref || N.length !== I.length || N.length !== Nref.length) return badVec(); const d = Nref.reduce((s, ni, i) => s + ni * (I[i] as number), 0); return makeVec(N.map((ni) => d < 0 ? ni : -ni)); }
+    // ─── quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w) ───
+    // A quat IS a vec4; each op requires its argument to be exactly a vec4 (`comps` returns any width, so
+    // the length===4 guard rejects a vec2/vec3). qconj negates the imaginary part; qinvert = qconj / |q|²
+    // (the multiplicative inverse — for a unit quat this equals the conjugate); qmul is the Hamilton product.
+    if (head === 'qconj') { const q = comps(a[0]); if (!q || q.length !== 4) return badVec(); return makeVec([-q[0]!, -q[1]!, -q[2]!, q[3]!]); }
+    if (head === 'qinvert') { const q = comps(a[0]); if (!q || q.length !== 4) return badVec(); const d = q[0]!**2 + q[1]!**2 + q[2]!**2 + q[3]!**2; return makeVec([-q[0]!/d, -q[1]!/d, -q[2]!/d, q[3]!/d]); }
+    if (head === 'qmul') {
+      const A = comps(a[0]); const B = comps(a[1]); if (!A || A.length !== 4 || !B || B.length !== 4) return badVec();
+      const [ax, ay, az, aw] = A as [number, number, number, number]; const [bx, by, bz, bw] = B as [number, number, number, number];
+      return makeVec([aw*bx + ax*bw + ay*bz - az*by, aw*by - ax*bz + ay*bw + az*bx, aw*bz + ax*by - ay*bx + az*bw, aw*bw - ax*bx - ay*by - az*bz]);
+    }
+    // qaxisangle(axis:vec3, angle) → the unit quat (axis·sin(θ/2), cos(θ/2)). The axis must be a vec3.
+    if (head === 'qaxisangle') { const ax = comps(a[0]); const ang = num(a[1]); if (!ax || ax.length !== 3 || ang === null) return badVec(); const s = Math.sin(ang/2); return makeVec([ax[0]!*s, ax[1]!*s, ax[2]!*s, Math.cos(ang/2)]); }
+    // qrotate(q:vec4, v:vec3) → the rotated vec3 via the optimized `v + 2·cross(q.xyz, cross(q.xyz, v) + q.w·v)`:
+    // t = 2·cross(q.xyz, v); c2 = cross(q.xyz, t); result = v + q.w·t + c2. Cheaper than building qmat and equal to it.
+    if (head === 'qrotate') { const q = comps(a[0]); const v = comps(a[1]); if (!q || q.length !== 4 || !v || v.length !== 3) return badVec();
+      const t = [2*(q[1]!*v[2]!-q[2]!*v[1]!), 2*(q[2]!*v[0]!-q[0]!*v[2]!), 2*(q[0]!*v[1]!-q[1]!*v[0]!)];   // 2·cross(q.xyz, v)
+      const c2 = [q[1]!*t[2]!-q[2]!*t[1]!, q[2]!*t[0]!-q[0]!*t[2]!, q[0]!*t[1]!-q[1]!*t[0]!];               // cross(q.xyz, t)
+      return makeVec([v[0]!+q[3]!*t[0]!+c2[0]!, v[1]!+q[3]!*t[1]!+c2[1]!, v[2]!+q[3]!*t[2]!+c2[2]!]);
+    }
+    // qslerp(a:vec4, b:vec4, t) → spherical linear interpolation of the two quats. The antipodal fix (dot<0 →
+    // negate b, so the shorter arc is taken); a small-angle NORMALIZED-lerp fallback (dot>0.9995 → sin θ ≈ 0 would
+    // divide-by-near-zero, so lerp+normalize instead); else the sin-weighted great-circle blend.
+    if (head === 'qslerp') { const A = comps(a[0]); const B = comps(a[1]); const t = num(a[2]); if (!A || A.length !== 4 || !B || B.length !== 4 || t === null) return badVec();
+      let dot = A[0]!*B[0]! + A[1]!*B[1]! + A[2]!*B[2]! + A[3]!*B[3]!; let b = B.slice(); if (dot < 0) { b = b.map((x) => -x); dot = -dot; }
+      if (dot > 0.9995) { const out = A.map((ai, i) => ai + t * (b[i]! - ai)); const len = Math.hypot(...out); return makeVec(out.map((x) => x / len)); }
+      const th = Math.acos(dot); const s = Math.sin(th); const wa = Math.sin((1 - t) * th) / s; const wb = Math.sin(t * th) / s;
+      return makeVec(A.map((ai, i) => wa * ai + wb * b[i]!));
+    }
     // normalize
     const x = comps(a[0]); if (!x) return badVec(); const len = Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0));
-    return makeVec(len === 0 ? x : x.map((xi) => xi / len), false);
+    return makeVec(x.map((xi) => xi / len));   // len===0 → NaN components, matching native normalize
   }
   if (head === 'rand') { r.tick(); return r.rng(); }
   if (head === 'range') {
@@ -588,7 +755,11 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
       case 'min': case 'max': case 'abs': case 'sign': case 'floor':
       case 'ceil': case 'round': case 'clamp': case 'sqrt': case 'pow':
       case 'sin': case 'cos': case 'exp': case 'log': case 'fract':
-      case 'step': case 'mix': case 'smoothstep': {
+      case 'step': case 'mix': case 'smoothstep':
+      case 'tan': case 'sinh': case 'cosh': case 'tanh':
+      case 'asin': case 'acos': case 'atan': case 'atan2':
+      case 'exp2': case 'log2': case 'inverseSqrt':
+      case 'degrees': case 'radians': case 'trunc': {
         // Coerce a numeric arg or fail: returns null when the value is not a finite/coercible number.
         const num = (v: unknown): number | null => {
           if (typeof v === 'number') return Number.isNaN(v) ? null : v;
@@ -596,32 +767,47 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
           return Number.isNaN(n) ? null : n;
         };
         const bad = (): unknown => badArg(`${head}(number, …) — non-numeric argument`);
-        switch (head) {
-          case 'min': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.min(x, y); }
-          case 'max': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.max(x, y); }
-          case 'abs': { const x = num(a[0]); return x === null ? bad() : Math.abs(x); }
-          case 'sign': { const x = num(a[0]); return x === null ? bad() : Math.sign(x); }
-          case 'floor': { const x = num(a[0]); return x === null ? bad() : Math.floor(x); }
-          case 'ceil': { const x = num(a[0]); return x === null ? bad() : Math.ceil(x); }
-          case 'round': { const x = num(a[0]); return x === null ? bad() : roundHalfEven(x); }
-          case 'clamp': { const x = num(a[0]); const lo = num(a[1]); const hi = num(a[2]); return (x === null || lo === null || hi === null) ? bad() : Math.min(Math.max(x, lo), hi); }
-          case 'sqrt': { const x = num(a[0]); if (x === null) return bad(); if (x < 0) return badArg(`sqrt(x) — x must be >= 0`); return Math.sqrt(x); }
-          case 'pow': { const x = num(a[0]); const y = num(a[1]); return (x === null || y === null) ? bad() : Math.pow(x, y); }
-          case 'sin': { const x = num(a[0]); return x === null ? bad() : Math.sin(x); }
-          case 'cos': { const x = num(a[0]); return x === null ? bad() : Math.cos(x); }
-          case 'exp': { const x = num(a[0]); return x === null ? bad() : Math.exp(x); }
-          case 'log': { const x = num(a[0]); if (x === null) return bad(); if (x <= 0) return badArg(`log(x) — x must be > 0`); return Math.log(x); }
-          case 'fract': { const x = num(a[0]); return x === null ? bad() : x - Math.floor(x); }
-          case 'step': { const edge = num(a[0]); const x = num(a[1]); return (edge === null || x === null) ? bad() : (x < edge ? 0 : 1); }
-          case 'mix': { const p = num(a[0]); const q = num(a[1]); const t = num(a[2]); return (p === null || q === null || t === null) ? bad() : p + (q - p) * t; }
-          case 'smoothstep': {
-            const e0 = num(a[0]); const e1 = num(a[1]); const x = num(a[2]);
-            if (e0 === null || e1 === null || x === null) return bad();
-            const t = e1 === e0 ? 0 : Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
-            return t * t * (3 - 2 * t);
+        const arity = NUMERIC_ARITY[head] ?? a.length;
+        // Componentwise vec application (GLSL semantics): if any of the head's arity-relevant args carries
+        // a vecN descriptor, map the scalar op over its components, broadcasting a plain scalar arg to every
+        // component, and return a fresh vec of the common width. Detection + reads are scoped to the first
+        // `arity` args, so a vec in a beyond-arity slot never promotes an otherwise-scalar call. All vec
+        // args in that prefix must share ONE width — a mismatch is a fail-loud arg error (GLSL rejects
+        // `min(vec2, vec3)` at compile time, so the interpreter oracle must too; it never truncates). A NaN
+        // component (e.g. sqrt(negative), log(<=0), or a non-numeric scalar broadcast) is KEPT — native
+        // shaders compute componentwise and never abort the whole vector.
+        const vecComps = (v: unknown): number[] | null => {
+          const d = descriptorOf(v);
+          if (!d || d.lower?.shape !== 'vecN') return null;
+          const n = d.lower.rows ?? 0; const out: number[] = [];
+          for (let i = 0; i < n; i++) out.push(Number(d.getMember!(v, 'xyzw'[i] as string)));
+          return out;
+        };
+        const relevant = a.slice(0, arity);
+        const vecArgs = relevant.map(vecComps).filter((c): c is number[] => c !== null);
+        if (vecArgs.length > 0) {
+          const width = vecArgs[0]!.length;
+          if (vecArgs.some((c) => c.length !== width)) {
+            return badArg(`${head}(vec…) — vector arguments must be the same width`);
           }
+          const scalarAt = (arg: unknown, i: number): number => { const c = vecComps(arg); return c ? (c[i] ?? NaN) : (num(arg) ?? NaN); };
+          const out: number[] = [];
+          for (let i = 0; i < width; i++) {
+            const xs: number[] = [];
+            for (let k = 0; k < arity; k++) xs.push(scalarAt(relevant[k], i));
+            out.push(scalarMath(head, xs));
+          }
+          return makeVec(out);
         }
-        return null;   // unreachable (inner switch is exhaustive) but satisfies the block's return type
+        // Scalar path — byte-identical to the pre-vec dispatch: coerce each needed arg (null → fail loud),
+        // intercept sqrt/log domains for their specific diagnostics, then compute via scalarMath.
+        const xs: number[] = [];
+        for (let k = 0; k < arity; k++) { const v = num(a[k]); if (v === null) return bad(); xs.push(v); }
+        if (head === 'sqrt' && xs[0]! < 0) return badArg(`sqrt(x) — x must be >= 0`);
+        if (head === 'log' && xs[0]! <= 0) return badArg(`log(x) — x must be > 0`);
+        if ((head === 'asin' || head === 'acos') && (xs[0]! < -1 || xs[0]! > 1)) return badArg(`${head}(x) — x must be in [-1, 1]`);
+        if ((head === 'log2' || head === 'inverseSqrt') && xs[0]! <= 0) return badArg(`${head}(x) — x must be > 0`);
+        return scalarMath(head, xs);
       }
       case 'format': {
         const x = a[0]; const digits = a[1];
@@ -935,6 +1121,58 @@ function roundHalfEven(x: number): number {
   if (diff < 0.5) return f;
   if (diff > 0.5) return f + 1;
   return f % 2 === 0 ? f : f + 1;   // exactly .5 → nearest even
+}
+/** The number of leading args each scalar numeric builtin reads. The scalar caller coerces exactly
+ *  this many (fail-loud on the first non-numeric one), matching the pre-vec per-head arg-count guards. */
+const NUMERIC_ARITY: Readonly<Record<string, number>> = {
+  min: 2, max: 2, abs: 1, sign: 1, floor: 1, ceil: 1, round: 1, clamp: 3,
+  sqrt: 1, pow: 2, sin: 1, cos: 1, exp: 1, log: 1, fract: 1, step: 2, mix: 3, smoothstep: 3,
+  tan: 1, sinh: 1, cosh: 1, tanh: 1, asin: 1, acos: 1, atan: 1, atan2: 2,
+  exp2: 1, log2: 1, inverseSqrt: 1, degrees: 1, radians: 1, trunc: 1,
+};
+/** The pure scalar math for the numeric builtins, over already-coerced numbers (xs[0..2]). Returns a
+ *  raw result — which may itself be NaN (e.g. pow(-2, 0.5), or sin(Infinity)), exactly as the direct
+ *  Math.* call did before. `sqrt(x<0)` and `log(x<=0)` return NaN here; the SCALAR caller intercepts
+ *  those domains first for their specific diagnostics, so it never observes this NaN — but the vec
+ *  path uses it directly, keeping a NaN component (native shaders compute componentwise and never
+ *  abort the whole vector). `round` is half-to-even for cross-target exactness. */
+function scalarMath(head: string, xs: readonly number[]): number {
+  const x = xs[0] ?? NaN; const y = xs[1] ?? NaN; const z = xs[2] ?? NaN;
+  switch (head) {
+    case 'min': return Math.min(x, y);
+    case 'max': return Math.max(x, y);
+    case 'abs': return Math.abs(x);
+    case 'sign': return Math.sign(x);
+    case 'floor': return Math.floor(x);
+    case 'ceil': return Math.ceil(x);
+    case 'round': return roundHalfEven(x);
+    case 'clamp': return Math.min(Math.max(x, y), z);
+    case 'sqrt': return x < 0 ? NaN : Math.sqrt(x);
+    case 'pow': return Math.pow(x, y);
+    case 'sin': return Math.sin(x);
+    case 'cos': return Math.cos(x);
+    case 'tan': return Math.tan(x);
+    case 'sinh': return Math.sinh(x);
+    case 'cosh': return Math.cosh(x);
+    case 'tanh': return Math.tanh(x);
+    case 'asin': return (x < -1 || x > 1) ? NaN : Math.asin(x);
+    case 'acos': return (x < -1 || x > 1) ? NaN : Math.acos(x);
+    case 'atan': return Math.atan(x);
+    case 'atan2': return Math.atan2(x, y);   // atan2(y, x): xs[0]=y (numerator), xs[1]=x (denominator)
+    case 'exp': return Math.exp(x);
+    case 'exp2': return Math.pow(2, x);
+    case 'log': return x <= 0 ? NaN : Math.log(x);
+    case 'log2': return x <= 0 ? NaN : Math.log2(x);
+    case 'inverseSqrt': return x <= 0 ? NaN : 1 / Math.sqrt(x);
+    case 'degrees': return x * 180 / Math.PI;
+    case 'radians': return x * Math.PI / 180;
+    case 'trunc': return Math.trunc(x);
+    case 'fract': return x - Math.floor(x);
+    case 'step': return y < x ? 0 : 1;          // step(edge, x) → x < edge ? 0 : 1
+    case 'mix': return x + (y - x) * z;
+    case 'smoothstep': { const t = y === x ? 0 : Math.min(Math.max((z - x) / (y - x), 0), 1); return t * t * (3 - 2 * t); }
+    default: return NaN;
+  }
 }
 /** Deep-freeze a DSL-created collection so it is immutable by construction. Recurses into arrays +
  *  plain objects; a function short-circuits at the first guard (typeof !== 'object'), so a handler

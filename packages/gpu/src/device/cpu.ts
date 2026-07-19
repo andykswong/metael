@@ -12,7 +12,17 @@ export function makeCpuBackend(): Backend {
       const comps = input.outputComps ?? 1;
       // FLAT-INTERLEAVED output: cell i's component k at output[i*comps + k]. For comps=1 this is output[i].
       const output = new Float32Array(total * comps);
-      const coordsOf = input.dims.length === 1 ? (i: number) => [i] : (i: number) => { const cols = input.dims[1]!; return [Math.floor(i / cols), i % cols]; };
+      // Reconstruct a cell's coords from its flat index under the shared row-major flatten (the LAST dim
+      // varies fastest): flat = (…(c0*d1 + c1)*d2 + c2)…, so decompose from the innermost dim outward. Covers
+      // rank 1/2/3 uniformly (rank 2 = [flat/cols, flat%cols], rank 1 = [flat]) — parity with every shader
+      // + the verify oracle so a rank-3 dispatch that falls to the CPU floor is not silently scrambled.
+      const dims = input.dims;
+      const coordsOf = (flat: number): number[] => {
+        const c = new Array<number>(dims.length);
+        let rem = flat;
+        for (let d = dims.length - 1; d >= 0; d--) { c[d] = rem % dims[d]!; rem = Math.floor(rem / dims[d]!); }
+        return c;
+      };
       const start = performanceNow();
       for (let i = 0; i < total; i++) { const vals = input.cpuRun(coordsOf(i)); for (let k = 0; k < comps; k++) output[i * comps + k] = vals[k]!; }
       const ms = performanceNow() - start;

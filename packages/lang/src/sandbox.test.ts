@@ -64,6 +64,16 @@ describe('sandbox: globals + dynamic code are unreachable', () => {
   it('a call to Function(...) is an unknown CALL, not a constructor', () => {
     expect(codes('Function("return 1")();')).toContain('ML-LANG-UNKNOWN-CALL');
   });
+  it('a prototype-key call head is a clean UNKNOWN-CALL, not an internal error', () => {
+    // A builtin-lookup keyed by the user-controlled call head must own-property-check, or a prototype
+    // member (constructor/toString/valueOf/hasOwnProperty/__proto__) reads as truthy → a raw TypeError →
+    // ML-LANG-INTERNAL. The sandbox invariant is: an unknown head fails closed to ML-LANG-UNKNOWN-CALL.
+    for (const head of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      const c = codes(`${head}(1,2,3,4,5,6)`);
+      expect(c).toContain('ML-LANG-UNKNOWN-CALL');
+      expect(c).not.toContain('ML-LANG-INTERNAL');
+    }
+  });
 });
 
 describe('sandbox: budgets cannot be bypassed (incl. via new builtins)', () => {

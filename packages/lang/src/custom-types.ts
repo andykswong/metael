@@ -14,7 +14,7 @@ export const NOT_HANDLED: unique symbol = Symbol('ml.notHandled');
 export type NotHandled = typeof NOT_HANDLED;
 
 export type LowerElement = 'f32' | 'f64' | 'i32' | 'u32';
-export type LowerShape = 'scalar' | 'vecN' | 'matNxN';
+export type LowerShape = 'scalar' | 'vecN' | 'matMxN';
 export type LowerAccess = 'value' | 'linear-buffer';
 
 /** A neutral, target-agnostic operator lowering — NOT shader text. A compile consumer renders it to
@@ -33,7 +33,9 @@ export type LowerOp =
 export interface Lowering {
   readonly element: LowerElement;
   readonly shape: LowerShape;
-  readonly n?: number;
+  readonly n?: number;        // scalar-buffer element count (unchanged use)
+  readonly rows?: number;     // vec/mat rows (a vec is rows×1)
+  readonly cols?: number;     // vec/mat cols (a vec is 1)
   readonly gpuStorable: boolean;
   readonly access: LowerAccess;
   readonly ops?: Readonly<Partial<Record<string, LowerOp>>>;
@@ -171,87 +173,98 @@ export const TYPED_ARRAY_DESCRIPTORS: Readonly<Record<'f32' | 'f64' | 'i32' | 'u
 
 const VEC_STORE: unique symbol = Symbol('ml.vec.store');
 const SWIZZLE = 'xyzw';
-interface VecStore { c: number[]; n: number; isMat: boolean }
+interface VecStore { c: ArrayLike<number>; rows: number; cols: number }
 const storeOfVec = (v: unknown): VecStore => (v as { [VEC_STORE]: VecStore })[VEC_STORE];
+/** A vec is a single-column matrix. */
+const isVec = (s: VecStore): boolean => s.cols === 1;
+/** Test-only reader for the (Symbol-hidden) store — no language-surface access. */
+export function vecStoreOf(v: unknown): VecStore { return storeOfVec(v); }
 
-function vecLower(n: number, isMat: boolean): Lowering {
+function vecLower(rows: number, cols: number, element: LowerElement = 'f32'): Lowering {
+  const mat = cols > 1;
   return {
-    element: 'f32', shape: isMat ? 'matNxN' : 'vecN', n, gpuStorable: true, access: 'value',
-    ops: isMat
+    element, shape: mat ? 'matMxN' : 'vecN', rows, cols, gpuStorable: true, access: 'value',
+    ops: mat
       ? { '*': { kind: 'matmul' } }
       : {
           '+': { kind: 'componentwise', op: 'add' }, '-': { kind: 'componentwise', op: 'sub' },
           '/': { kind: 'componentwise', op: 'div' }, '*': { kind: 'componentwise', op: 'mul' },
           'neg': { kind: 'unary', op: 'neg' },   // negation, NOT subtraction — a compile consumer emits `-v`
         },
-    members: isMat ? undefined : { kind: 'swizzle', of: SWIZZLE },
+    members: mat ? undefined : { kind: 'swizzle', of: SWIZZLE },
   };
 }
 
 const vecDescriptors = new Map<string, TypeDescriptor>();
-function vecDescriptor(n: number, isMat: boolean): TypeDescriptor {
-  const key = `${isMat ? 'mat' : 'vec'}${n}`;
+function vecDescriptor(rows: number, cols: number): TypeDescriptor {
+  const key = cols > 1 ? `mat${cols}x${rows}` : `vec${rows}`;
   const existing = vecDescriptors.get(key);
   if (existing) return existing;
-  const componentwise = (op: 'add' | 'sub' | 'mul' | 'div', a: number[], b: number[]): number[] =>
-    a.map((x, i) => op === 'add' ? x + (b[i] as number) : op === 'sub' ? x - (b[i] as number) : op === 'mul' ? x * (b[i] as number) : x / (b[i] as number));
+  const componentwise = (op: 'add' | 'sub' | 'mul' | 'div', a: ArrayLike<number>, b: ArrayLike<number>): number[] => {
+    const out: number[] = [];
+    for (let i = 0; i < a.length; i++) { const x = a[i] as number; const y = b[i] as number; out.push(op === 'add' ? x + y : op === 'sub' ? x - y : op === 'mul' ? x * y : x / y); }
+    return out;
+  };
   const desc: TypeDescriptor = {
     name: key,
     binary: (o, l, r) => {
       const ls = descriptorOf(l) ? storeOfVec(l) : null;
       const rs = descriptorOf(r) ? storeOfVec(r) : null;
-      // Each branch asserts the operand it reads is the SHAPE it expects (vec vs mat), so a cross-type
-      // pairing whose flat lengths happen to collide (e.g. mat2 vs vec4) is NOT_HANDLED — never a
-      // silently-fabricated garbage value.
-      // vec ∘ scalar / scalar ∘ vec — scale (self must be a vec)
-      if (!isMat && ls && !ls.isMat && typeof r === 'number' && (o === '*' || o === '/')) return makeVec(ls.c.map((x) => o === '*' ? x * r : x / r), false);
-      if (!isMat && rs && !rs.isMat && typeof l === 'number' && o === '*') return makeVec(rs.c.map((x) => x * l), false);
-      // mat * vec / mat * mat (the left operand must itself be a matrix)
-      if (isMat && ls && ls.isMat && o === '*' && rs && !rs.isMat && rs.c.length === ls.n) return makeVec(matVec(ls, rs.c), false);
-      if (isMat && ls && ls.isMat && o === '*' && rs && rs.isMat && rs.n === ls.n) return makeMat(matMat(ls, rs), ls.n);
-      // vec componentwise + - * / (both operands must be vectors of equal length)
-      if (!isMat && ls && !ls.isMat && rs && !rs.isMat && ls.c.length === rs.c.length && (o === '+' || o === '-' || o === '*' || o === '/'))
-        return makeVec(componentwise(o === '+' ? 'add' : o === '-' ? 'sub' : o === '*' ? 'mul' : 'div', ls.c, rs.c), false);
+      const lMat = ls && !isVec(ls); const rMat = rs && !isVec(rs);
+      // vec ∘ scalar / scalar ∘ vec — scale
+      if (ls && isVec(ls) && typeof r === 'number' && (o === '*' || o === '/')) return makeVec(Array.from(ls.c, (x) => o === '*' ? x * r : x / r));
+      if (rs && isVec(rs) && typeof l === 'number' && o === '*') return makeVec(Array.from(rs.c, (x) => x * l));
+      // mat ∘ scalar / scalar ∘ mat — scale (componentwise, same shape)
+      if (lMat && typeof r === 'number' && (o === '*' || o === '/')) return makeMat(Array.from(ls!.c, (x) => o === '*' ? x * r : x / r), ls!.rows, ls!.cols);
+      if (rMat && typeof l === 'number' && o === '*') return makeMat(Array.from(rs!.c, (x) => x * l), rs!.rows, rs!.cols);
+      // matmul: mat * (mat|vec) — a vec is the cols===1 case
+      if (lMat && rs && o === '*') { const p = matmul(ls!, rs); return p ? (p.cols === 1 ? makeVec(p.c) : makeMat(p.c, p.rows, p.cols)) : NOT_HANDLED; }
+      // vec componentwise + - * / (equal length)
+      if (ls && rs && isVec(ls) && isVec(rs) && ls.rows === rs.rows && (o === '+' || o === '-' || o === '*' || o === '/'))
+        return makeVec(componentwise(o === '+' ? 'add' : o === '-' ? 'sub' : o === '*' ? 'mul' : 'div', Array.from(ls.c), Array.from(rs.c)));
       return NOT_HANDLED;
     },
     equals: (l, r) => {
       const ls = descriptorOf(l) ? storeOfVec(l) : null; const rs = descriptorOf(r) ? storeOfVec(r) : null;
-      if (!ls || !rs || ls.isMat !== rs.isMat || ls.c.length !== rs.c.length) return false;
-      return ls.c.every((x, i) => x === rs.c[i]);
+      if (!ls || !rs || ls.rows !== rs.rows || ls.cols !== rs.cols) return false;
+      return Array.from(ls.c).every((x, i) => x === rs.c[i]);
     },
-    neg: (v) => { const s = storeOfVec(v); return s.isMat ? makeMat(s.c.map((x) => -x), s.n) : makeVec(s.c.map((x) => -x), false); },
+    neg: (v) => { const s = storeOfVec(v); const c = Array.from(s.c, (x) => -x); return isVec(s) ? makeVec(c) : makeMat(c, s.rows, s.cols); },
     getMember: (v, prop) => {
       const s = storeOfVec(v);
-      if (s.isMat) return NOT_HANDLED;
-      if (prop.length === 1) { const i = SWIZZLE.indexOf(prop); return (i >= 0 && i < s.c.length) ? s.c[i] : NOT_HANDLED; }
+      if (!isVec(s)) return NOT_HANDLED;   // matrices have no swizzle
+      if (prop.length === 1) { const i = SWIZZLE.indexOf(prop); return (i >= 0 && i < s.rows) ? s.c[i] : NOT_HANDLED; }
       const idxs = [...prop].map((ch) => SWIZZLE.indexOf(ch));
-      if (idxs.some((i) => i < 0 || i >= s.c.length) || idxs.length < 2 || idxs.length > 4) return NOT_HANDLED;
-      return makeVec(idxs.map((i) => s.c[i] as number), false);
+      if (idxs.some((i) => i < 0 || i >= s.rows) || idxs.length < 2 || idxs.length > 4) return NOT_HANDLED;
+      return makeVec(idxs.map((i) => s.c[i] as number));
     },
-    display: (v) => { const s = storeOfVec(v); return `${key}(${s.c.join(', ')})`; },
-    lower: vecLower(n, isMat),
+    display: (v) => { const s = storeOfVec(v); return `${isVec(s) ? `vec${s.rows}` : `mat${s.cols}x${s.rows}`}(${Array.from(s.c).join(', ')})`; },
+    lower: vecLower(rows, cols),
   };
   vecDescriptors.set(key, desc);
   return desc;
 }
-function matVec(m: VecStore, v: number[]): number[] {
-  const n = m.n; const out = new Array<number>(n).fill(0);
-  for (let row = 0; row < n; row++) { let s = 0; for (let col = 0; col < n; col++) s += (m.c[row * n + col] as number) * (v[col] as number); out[row] = s; }
-  return out;
+/** Column-major matrix product A(R×K) · B(K×C) → R×C. A vec is a K×1 / R×1 column. Null on inner-dim
+ *  mismatch (A.cols !== B.rows). Column-major flat index (r,c) → c*rows + r. */
+function matmul(a: VecStore, b: VecStore): { c: number[]; rows: number; cols: number } | null {
+  if (a.cols !== b.rows) return null;
+  const R = a.rows, K = a.cols, C = b.cols;
+  const out = new Array<number>(R * C).fill(0);
+  for (let c = 0; c < C; c++) for (let r = 0; r < R; r++) {
+    let s = 0;
+    for (let k = 0; k < K; k++) s += (a.c[k * R + r] as number) * (b.c[c * K + k] as number);
+    out[c * R + r] = s;
+  }
+  return { c: out, rows: R, cols: C };
 }
-function matMat(a: VecStore, b: VecStore): number[] {
-  const n = a.n; const out = new Array<number>(n * n).fill(0);
-  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { let s = 0; for (let k = 0; k < n; k++) s += (a.c[i * n + k] as number) * (b.c[k * n + j] as number); out[i * n + j] = s; }
-  return out;
-}
-export function makeVec(components: number[], _isMat: false): object {
+export function makeVec(components: number[]): object {
   const box = {};
-  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), n: components.length, isMat: false } satisfies VecStore, enumerable: false, configurable: false, writable: false });
-  return tagCustom(box, vecDescriptor(components.length, false));
+  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), rows: components.length, cols: 1 } satisfies VecStore, enumerable: false, configurable: false, writable: false });
+  return tagCustom(box, vecDescriptor(components.length, 1));
 }
-export function makeMat(components: number[], n: number): object {
+export function makeMat(components: number[], rows: number, cols: number): object {
   const box = {};
-  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), n, isMat: true } satisfies VecStore, enumerable: false, configurable: false, writable: false });
-  return tagCustom(box, vecDescriptor(n, true));
+  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), rows, cols } satisfies VecStore, enumerable: false, configurable: false, writable: false });
+  return tagCustom(box, vecDescriptor(rows, cols));
 }
 export function identityMat(n: number): number[] { const out = new Array<number>(n * n).fill(0); for (let i = 0; i < n; i++) out[i * n + i] = 1; return out; }

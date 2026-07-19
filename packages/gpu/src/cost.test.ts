@@ -24,4 +24,14 @@ describe('resource-cost gate', () => {
   it('still accepts a valid 2-D output shape', () => {
     expect(checkCost(8 * 8 * 4, 0, [8, 8], CPU_LIMITS)).toBeNull();
   });
+  it('accepts a valid 3-D output shape and bounds every one of its three dimensions', () => {
+    // The per-dim guards iterate the whole `output` array, so a 3-D shape is covered with no extra code.
+    expect(checkCost(4 * 4 * 4 * 4, 0, [4, 4, 4], CPU_LIMITS)).toBeNull();
+    // A non-positive 3rd dimension is rejected (proves the loop reaches dims[2]).
+    expect(checkCost(4 * 4 * 4, 0, [4, 4, 0], CPU_LIMITS)?.code).toBe('MLGPU-ALLOC');
+    expect(checkCost(4 * 4 * 4, 0, [4, 4, -1], CPU_LIMITS)?.code).toBe('MLGPU-ALLOC');
+    // A 3rd dimension over the per-dimension dispatch ceiling is rejected.
+    const overDim = CPU_LIMITS.maxComputeWorkgroupsPerDimension * 256 + 1;
+    expect(checkCost(4, 0, [1, 1, overDim], CPU_LIMITS)?.code).toBe('MLGPU-ALLOC');
+  });
 });

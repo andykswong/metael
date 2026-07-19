@@ -48,7 +48,20 @@ export default defineConfig({
           exclude: ['**/dist/**'],
           browser: {
             enabled: true,
-            provider: playwright(),
+            // WebGPU: the bundled Chromium exposes `navigator.gpu`, but `requestAdapter()` returns null
+            // with no flags, so the *.browser.test.ts WGSL paths silently fall back to WebGL2. These flags
+            // bring up SwiftShader — a software adapter needing NO GPU hardware, so it works on a headless
+            // CI runner — letting those tests actually execute the WGSL-only paths (native `inverse()` in
+            // WebGL2 masked a real WGSL bug once). Tests still skip gracefully if no adapter comes up.
+            provider: playwright({
+              launchOptions: {
+                args: [
+                  '--enable-unsafe-webgpu',
+                  '--use-webgpu-adapter=swiftshader',
+                  '--enable-features=Vulkan',
+                ],
+              },
+            }),
             headless: true,
             instances: [{ browser: 'chromium' }],
           },

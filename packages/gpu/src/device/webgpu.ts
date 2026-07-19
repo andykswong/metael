@@ -68,7 +68,7 @@ export async function tryWebGpuBackend(): Promise<Backend | null> {
       const total = input.dims.reduce((a, b) => a * b, 1);
       const comps = input.outputComps ?? 1;
       const outLen = total * comps;   // `_out` is a flat array<S> of length total*comps (the interleaved layout IS the normalized layout)
-      const rows = input.dims[0]!; const cols = input.dims[1] ?? 1;
+      const rows = input.dims[0]!; const cols = input.dims[1] ?? 1; const deps = input.dims[2] ?? 1;
       // f16 storage path: each `array<f16>` element is 2 bytes, so inputs are packed as binary16 + the output
       // is read back as binary16 and unpacked. Only reached when the device HAS shader-f16 (the engine
       // downgraded an f16 request to f32 otherwise, so `input.precision` here is f16 only on a capable device).
@@ -95,11 +95,16 @@ export async function tryWebGpuBackend(): Promise<Backend | null> {
       });
       const outBuf = device.createBuffer({ size: outBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
       const scalars = input.scalars;
-      const fieldCount = 2 + scalars.length;
-      const uniBytes = Math.ceil((fieldCount * 4) / 16) * 16;
-      const uni = new ArrayBuffer(Math.max(uniBytes, 16));
-      new Uint32Array(uni, 0, 2).set([rows, cols]);
-      if (scalars.length) new Float32Array(uni, 8, scalars.length).set(scalars.map((s) => s.value));
+      // The `_Params` uniform is THREE u32 dispatch dims (rows, cols, deps @ bytes 0/4/8) then each closed-over
+      // scalar as an f32 (@ bytes 12,16,…) — the struct member order emitWgsl declares for EVERY rank. So the
+      // field count is 3 + scalars.length; rounded UP to a multiple of 16 (the WGSL uniform-address-space
+      // struct-size rule). `Math.max(…, 16)` keeps the WGSL 16-byte uniform minimum (fieldCount≥3 already
+      // satisfies it, but the clamp is explicit).
+      const fieldCount = 3 + scalars.length;
+      const uniBytes = Math.max(Math.ceil((fieldCount * 4) / 16) * 16, 16);
+      const uni = new ArrayBuffer(uniBytes);
+      new Uint32Array(uni, 0, 3).set([rows, cols, deps]);
+      if (scalars.length) new Float32Array(uni, 12, scalars.length).set(scalars.map((s) => s.value));
       const uniBuf = device.createBuffer({ size: uni.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(uniBuf, 0, uni);
       const pipeline = pipelineCache.get(input.wgsl);
@@ -113,9 +118,14 @@ export async function tryWebGpuBackend(): Promise<Backend | null> {
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
-      const wgX = input.dims.length === 2 ? Math.ceil(rows / 8) : Math.ceil(rows / 64);
-      const wgY = input.dims.length === 2 ? Math.ceil(cols / 8) : 1;
-      pass.dispatchWorkgroups(wgX, wgY); pass.end();
+      // The dispatch grid per rank MUST match emitWgsl's `@workgroup_size` so `dispatchWorkgroups × workgroup`
+      // covers every cell: rank-3 → (4,4,4) so ceil per axis / 4; rank-2 → (8,8) so ceil / 8 in x,y; rank-1 →
+      // (64) so ceil / 64 in x. A rank-3 grid that omitted the z divisor (wgZ defaulting to 1) would cover only
+      // deps 0..3 and silently drop the rest of the D axis. rows=dims[0]=W, cols=dims[1]=H, deps=dims[2]=D.
+      const wgX = input.dims.length === 3 ? Math.ceil(rows / 4) : input.dims.length === 2 ? Math.ceil(rows / 8) : Math.ceil(rows / 64);
+      const wgY = input.dims.length === 3 ? Math.ceil(cols / 4) : input.dims.length === 2 ? Math.ceil(cols / 8) : 1;
+      const wgZ = input.dims.length === 3 ? Math.ceil(deps / 4) : 1;
+      pass.dispatchWorkgroups(wgX, wgY, wgZ); pass.end();
       const readBuf = device.createBuffer({ size: outBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, outBytes);
       device.queue.submit([enc.finish()]);

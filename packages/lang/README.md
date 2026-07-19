@@ -34,6 +34,12 @@ It ships the **interpreter** + the generic **child-collection walk** (`lowerEntr
 | `region`, `isRegion`, `wrapper`, `isWrapper`, `didYouMean` | port helpers (`didYouMean` = Levenshtein-≤2 suggestion for fail-loud head resolution) |
 | `PlainStorageHost`, `RecordingHostEnv`, `PathKeyMinter` | **test doubles** — run the kernel with no domain present |
 
+## vec/mat numeric types
+
+- Matrices are **column-major** (element `(row, col)` at flat index `col*rows + row`).
+- A **vec is an `n×1` matrix** (`cols === 1`); matrices may be **non-square** (`matMxN`).
+- The backing store is an `ArrayLike<number>`; the element precision is `f32` (default) or `f64`.
+
 ## The host-injection seam
 
 `@metael/lang` never builds a domain value — `HostValue` is opaque. A domain supplies three interfaces:
@@ -63,7 +69,7 @@ Evaluation is **eval-free** (a source-scan test asserts no `eval`/`new Function`
 ```shell
 npm run -w @metael/lang typecheck
 npm run -w @metael/lang build     # → dist/ (.js + .d.ts, one per source module)
-npx vitest run packages/lang      # the suite (10 files / 127 tests)
+npx vitest run packages/lang      # the suite (26 files / 555 tests)
 ```
 
 Domain-neutral by construction: the generic child-collection walk `lowerEntry` ships in THIS package (view-free lang machinery). Only domain-specific lowering (a domain's own View/scene-graph construction) and the reactive re-derive + keyed-diff belong to `@metael/runtime`. See [../../AGENTS.md](../../AGENTS.md) for the load-bearing invariants and the editing guardrails.

@@ -81,6 +81,18 @@ describe('WGSL emitter', () => {
     const wmod = emitWgsl(mod.fn, gateKernel(mod.fn, mod.host).bindings, 'f32');
     expect(wmod).toMatch(/select\(.*trunc.*, f32\(0\), .* == f32\(0\)\)/);   // r==0 → 0, not NaN
   });
+  it('vec/scalar divide emits native componentwise divide, not a scalar-typed select', () => {
+    // A scalar-typed `select(l/r, f32(0), r==f32(0))` over a VEC left operand is a type-mismatched WGSL
+    // shader — the false-branch f32(0) + the r==f32(0) test can't apply to a vec. The width-aware guard
+    // keeps only the scalar path guarded and emits the native componentwise divide when an operand is a vec.
+    const { fn, host } = kernelOf('component k(i) { return (vec2(i, i) / 2).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).not.toContain('select(vec2'); // no scalar-guarded select over a vec
+    // a plain SCALAR divide STILL emits the scalar /0 guard (path preserved, not blanket-removed)
+    const sc = kernelOf('component k(i) { return i / 2 } k');
+    const wsc = emitWgsl(sc.fn, gateKernel(sc.fn, sc.host).bindings, 'f32');
+    expect(wsc).toMatch(/select\(.* \/ .*, f32\(0\), .* == f32\(0\)\)/);
+  });
   it('guards bad-domain transcendentals (sqrt(neg)/log(<=0) → 0, matching the interpreter, not native NaN)', () => {
     const sq = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return sqrt(a[i] - 2) }\nk`);
     const wsq = emitWgsl(sq.fn, gateKernel(sq.fn, sq.host).bindings, 'f32');
@@ -112,6 +124,77 @@ describe('WGSL emitter', () => {
     expect(temps.length).toBe(2);                       // one temp per vecN return
     expect(new Set(temps).size).toBe(temps.length);     // all distinct — no duplicate `let _r`
   });
+  it('neg(mat2) emits a componentwise WGSL scale, not unary -mat (WGSL has no unary - for matrices)', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = -mat2(1,2,3,4) return (m * vec2(1,1)).x } k');
+    const gate = gateKernel(fn, host);
+    expect(gate.core).toBe(true);   // the kernel must be gate-accepted for emit to run
+    const wgsl = emitWgsl(fn, gate.bindings, 'f32');
+    expect(wgsl).toContain('* f32(-1)');        // componentwise scale by -1 (matrix–scalar multiply)
+    expect(wgsl).not.toMatch(/\(-mat2x2/);      // NOT the illegal unary -mat form
+  });
+  it('a vec local in a divide emits native componentwise, not a scalar select over the vec', () => {
+    // `const v = vec2(...); v / 2` — the operand-shape probe must resolve the LOCAL `v` as a vec so the
+    // divide emits the native componentwise `(v / f32(2))`, not a scalar-typed `select(v / .., f32(0), ..)`
+    // (which is a WGSL type error — a scalar false-branch + `vec == f32(0)` test over a vec).
+    const { fn, host } = kernelOf('component k(i) { const v = vec2(i, i) return (v / 2).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).not.toMatch(/select\(v \//); // no scalar guard over the vec local
+  });
+  it('a mat local negation emits a componentwise scale, not unary -mat', () => {
+    // `const m = mat2(...); -m` — the operand-shape probe must resolve the LOCAL `m` as a mat so the negate
+    // emits the componentwise scale `(m * f32(-1))`, not the illegal bare unary `(-m)` (WGSL has no unary -mat).
+    const { fn, host } = kernelOf('component k(i) { const m = mat2(1,2,3,4) const w = -m return (w * vec2(i,i)).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).not.toMatch(/\(-m\)/);      // no bare unary -mat
+    expect(wgsl).toContain('* f32(-1)');     // componentwise scale
+  });
+  it('inverse(mat2) hand-emits a closed-form _inv2 prelude helper (WGSL has no builtin inverse())', () => {
+    // A kernel that inverts a mat2 then reads a component of inverse(M) * v. WGSL has NO inverse(), so the
+    // emitter must inject a `_inv2` prelude helper (built from determinant + adjugate) and CALL it — never a
+    // bare `inverse(` (which would be a WGSL compile error on a real adapter).
+    const { fn, host } = kernelOf('component k(i) { const M = mat2(4,2,7,6) const w = inverse(M) * vec2(1,1) return w.x } k');
+    const gate = gateKernel(fn, host);
+    expect(gate.core).toBe(true);   // must be gate-accepted for emit to run
+    const wgsl = emitWgsl(fn, gate.bindings, 'f32');
+    expect(wgsl).toContain('fn _inv2(m: mat2x2<f32>) -> mat2x2<f32>');   // the injected helper definition
+    expect(wgsl).toContain('mat2x2<f32>(');                              // the adjugate is built column-major
+    expect(wgsl).toContain('_inv2(');                                    // the call site uses the helper
+    expect(wgsl).not.toMatch(/[^_]inverse\(/);                           // NO bare native inverse( — WGSL has none
+  });
+  it('inverse(mat3) hand-emits a _inv3 helper; unused sizes (_inv2/_inv4) are NOT injected', () => {
+    const { fn, host } = kernelOf('component k(i) { const M = mat3(2,0,1, 1,3,0, 0,2,1) const w = inverse(M) * vec3(1,1,1) return w.x } k');
+    const gate = gateKernel(fn, host);
+    expect(gate.core).toBe(true);
+    const wgsl = emitWgsl(fn, gate.bindings, 'f32');
+    expect(wgsl).toContain('fn _inv3(m: mat3x3<f32>) -> mat3x3<f32>');
+    expect(wgsl).toContain('_inv3(');
+    expect(wgsl).not.toContain('fn _inv2');   // only the used size's helper is emitted
+    expect(wgsl).not.toContain('fn _inv4');
+    expect(wgsl).not.toMatch(/[^_]inverse\(/);
+    // WGSL has NO unary `+` operator — a cofactor expansion must not open a parenthesised term group with
+    // `(+ …` (only the SUBSEQUENT terms carry an explicit sign). A leading `+` fails module validation on a
+    // real adapter → the dispatch silently writes zeros (caught only by a real WebGPU device, not WebGL2's
+    // native inverse()). Assert no `(+ ` appears anywhere in the emitted shader.
+    expect(wgsl).not.toContain('(+ ');
+  });
+  it('inverse(transpose(M)) — the normal-matrix idiom over a local — hand-emits _inv3(transpose(M)), never a bare transpose(M)', () => {
+    // This is the exact case the pre-fix emitter silently mis-lowered: matShapeOf(transpose(M)) was null (M an
+    // ident), so it dropped the inverse and emitted the bare `transpose(M)`. The locals-aware `matSizeOf` now
+    // resolves it (gate-accepted), so the emitter calls `_inv3(transpose(...))` — the inverse is NOT dropped.
+    const { fn, host } = kernelOf('component k(i) { const M = mat3(2,0,1, 1,3,0, 0,2,1) const w = inverse(transpose(M)) * vec3(1,1,1) return w.x } k');
+    const gate = gateKernel(fn, host);
+    expect(gate.core).toBe(true);
+    const wgsl = emitWgsl(fn, gate.bindings, 'f32');
+    expect(wgsl).toContain('fn _inv3(m: mat3x3<f32>) -> mat3x3<f32>');
+    expect(wgsl).toMatch(/_inv3\(transpose\(/);   // the inverse wraps the transpose — NOT dropped
+    expect(wgsl).not.toMatch(/[^_]inverse\(/);     // NO bare native inverse( — WGSL has none
+    expect(wgsl).not.toContain('_INVERSE_SIZE_UNRESOLVED_');   // the loud unreachable marker never fires for a gate-accepted kernel
+  });
+  it('a kernel that never calls inverse injects NO _invN prelude helper', () => {
+    const { fn, host } = kernelOf('component k(i) { const M = mat2(1,2,3,4) return (M * vec2(1,1)).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).not.toContain('fn _inv');   // pay nothing when inverse is unused
+  });
   it('a single vecN return emits a valid unique temp + N flat writes (normal case still works)', () => {
     const { fn, host } = kernelOf(`const x = f32(12, (i) => i)\ncomponent k(i) { return vec3(x[i*3], x[i*3+1], x[i*3+2]) }\nk`);
     const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32', 3);
@@ -120,5 +203,12 @@ describe('WGSL emitter', () => {
     const t = temps[0]!;
     expect(wgsl).toContain(`_out[_flat * 3u + 0u] = ${t}.x;`);
     expect(wgsl).toContain(`_out[_flat * 3u + 2u] = ${t}.z;`);
+  });
+  it('a rank-3 kernel emits workgroup_size(4,4,4), gid.z, and the (x*H+y)*D+z flatten', () => {
+    const { fn, host } = kernelOf('component k(x, y, z) { return x + y + z } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).toContain('@workgroup_size(4, 4, 4)');
+    expect(wgsl).toContain('gid.z');
+    expect(wgsl).toContain('(gid.x * _p.cols + gid.y) * _p.deps + gid.z');
   });
 });

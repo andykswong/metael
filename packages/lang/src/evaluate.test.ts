@@ -460,6 +460,59 @@ describe('numeric core builtins', () => {
   it('a user function shadows a numeric builtin', () => {
     expect(run('function min(a, b) { 999 } min(1, 2);').value).toBe(999);
   });
+  it('min/abs/clamp/pow apply componentwise to vec args (GLSL semantics)', () => {
+    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(evaluateProgram('min(vec2(1,5), vec2(3,2)).x', h()).value).toBe(1);
+    expect(evaluateProgram('min(vec2(1,5), vec2(3,2)).y', h()).value).toBe(2);
+    expect(evaluateProgram('abs(vec2(-1, 2)).x', h()).value).toBe(1);
+    expect(evaluateProgram('clamp(vec2(-1, 5), 0, 1).y', h()).value).toBe(1); // scalar bounds broadcast
+  });
+  it('mismatched-width vec args are a builtin-arg error (not a silent truncation)', () => {
+    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('min(vec2(1,5), vec3(3,2,9)).x', h());
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    // a beyond-arity vec arg does not promote a scalar call to a vec
+    expect(evaluateProgram('min(1, 2, vec3(9,9,9))', h()).value).toBe(1);
+  });
+});
+
+describe('trig / hyperbolic / exponential math builtins', () => {
+  const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  it('tan/sinh/cosh/tanh evaluate', () => {
+    expect(evaluateProgram('tan(0)', h()).value as number).toBeCloseTo(0);
+    expect(evaluateProgram('sinh(0)', h()).value as number).toBeCloseTo(0);
+    expect(evaluateProgram('cosh(0)', h()).value as number).toBeCloseTo(1);
+    expect(evaluateProgram('tanh(0)', h()).value as number).toBeCloseTo(0);
+  });
+  it('asin/acos evaluate and domain-guard |x|>1 to the bad sentinel (→0 as a cell)', () => {
+    expect(evaluateProgram('asin(0)', h()).value as number).toBeCloseTo(0);
+    expect(evaluateProgram('acos(1)', h()).value as number).toBeCloseTo(0);
+    // |x|>1 is out of domain → fail-loud + the bad sentinel, which coerces to 0 downstream.
+    const r = evaluateProgram('asin(2)', h());
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(Number(r.value ?? 0)).toBe(0);
+  });
+  it('atan (1-arg) and atan2 (2-arg) evaluate', () => {
+    expect(evaluateProgram('atan(0)', h()).value as number).toBeCloseTo(0);
+    // atan2(y, x): first arg is the numerator (y), second is the denominator (x).
+    expect(evaluateProgram('atan2(1, 1)', h()).value as number).toBeCloseTo(Math.PI / 4);
+    expect(evaluateProgram('atan2(1, 0)', h()).value as number).toBeCloseTo(Math.PI / 2);
+  });
+  it('exp2/log2/inverseSqrt evaluate + guard domain', () => {
+    expect(evaluateProgram('exp2(3)', h()).value as number).toBeCloseTo(8);
+    expect(evaluateProgram('log2(8)', h()).value as number).toBeCloseTo(3);
+    expect(evaluateProgram('inverseSqrt(4)', h()).value as number).toBeCloseTo(0.5);
+    // x<=0 is out of domain for log2 → fail-loud + the bad sentinel (→0 as a cell).
+    const r = evaluateProgram('log2(0)', h());
+    expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
+    expect(Number(r.value ?? 0)).toBe(0);
+  });
+  it('degrees/radians/trunc evaluate', () => {
+    expect(evaluateProgram('degrees(3.141592653589793)', h()).value as number).toBeCloseTo(180);
+    expect(evaluateProgram('radians(180)', h()).value as number).toBeCloseTo(Math.PI);
+    expect(evaluateProgram('trunc(3.7)', h()).value).toBe(3);
+    expect(evaluateProgram('trunc(-3.7)', h()).value).toBe(-3);
+  });
 });
 
 describe('format (number formatting)', () => {
@@ -516,5 +569,29 @@ describe('extension seam — kind:value discriminant', () => {
     }
     const r = evaluateProgram('box();', { host: new PlainStorageHost(), env: new NodeEnv() });
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-UNKNOWN-CALL')).toBe(true);   // node not valid here
+  });
+});
+
+describe('vec/mat constructors — column-major', () => {
+  it('mat2 identity and mat2(4 nums) construct column-major via the interpreter', () => {
+    const idn = evaluateProgram('mat2()', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(idn.diagnostics).toEqual([]);   // identity constructs without error
+    const prod = evaluateProgram('(mat2(1,2,3,4) * vec2(5,6)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(prod.diagnostics).toEqual([]);
+    expect(prod.value).toBe(23);   // column-major: 1*5 + 3*6 (row-major would be 17)
+  });
+  it('normalize of a zero vector is a NaN vector (matches native shader normalize(0))', () => {
+    const r = evaluateProgram('normalize(vec3(0,0,0)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(Number.isNaN(r.value as number)).toBe(true);
+  });
+  it('normalize of a NONZERO vector still yields a unit vector (unchanged)', () => {
+    const r = evaluateProgram('length(normalize(vec3(3,4,0)))', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    expect(r.value as number).toBeCloseTo(1, 6);
+  });
+  it('a bad mat2 arg-count error names the column-major layout', () => {
+    const r = evaluateProgram('mat2(1,2,3)', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const d = r.diagnostics.find((x) => x.code === 'ML-LANG-BUILTIN-ARG');
+    expect(d?.message).toContain('column-major');
+    expect(d?.message).not.toContain('row-major');
   });
 });

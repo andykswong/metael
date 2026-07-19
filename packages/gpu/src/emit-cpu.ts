@@ -8,10 +8,19 @@ import { descriptorOf, NOT_HANDLED, MAX_RANGE, makeCallable } from '@metael/lang
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
 
-// The vec/mat builtin + constructor names. A kernel whose body references ANY of these builds a tagged
-// vec/mat value the hand-walk cannot construct (makeVec/makeMat are lang-internal), so such a kernel is
-// delegated WHOLE to the interpreter — authoritative for all vec math, cross/normalize included.
-const VEC_NAMES = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4', 'dot', 'cross', 'normalize', 'length']);
+// The vec/mat + numeric builtin names. A kernel whose body references ANY of these is delegated WHOLE
+// to the interpreter — authoritative for all vec math. The vec/mat constructors + dot/cross/normalize/
+// length build a tagged vec/mat value the hand-walk cannot construct (makeVec/makeMat are lang-internal).
+// The numeric builtins (min/abs/clamp/sqrt/… — GLSL-componentwise) apply over a vec arg's components,
+// which the hand-walk's scalar applyBuiltin cannot; the interpreter maps them componentwise, so a kernel
+// using any of them delegates. (A scalar-only use also delegates — harmless: the delegate IS the oracle.)
+const VEC_NAMES = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4', 'dot', 'cross', 'normalize', 'length',
+  'transpose', 'determinant', 'inverse', 'mat2x3', 'mat2x4', 'mat3x2', 'mat3x4', 'mat4x2', 'mat4x3',
+  'distance', 'reflect', 'refract', 'faceforward',
+  'qmul', 'qconj', 'qinvert', 'qaxisangle', 'qrotate', 'qslerp', 'qmat',
+  'min', 'max', 'abs', 'sign', 'floor', 'ceil', 'round', 'clamp', 'sqrt', 'pow', 'sin', 'cos', 'exp', 'log', 'fract', 'step', 'mix', 'smoothstep',
+  'tan', 'sinh', 'cosh', 'tanh', 'asin', 'acos', 'atan', 'atan2', 'exp2', 'log2', 'inverseSqrt',
+  'degrees', 'radians', 'trunc']);
 
 type Scope = Map<string, unknown>;
 
@@ -156,8 +165,22 @@ export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHo
       case 'pow': { const x = n(a[0]), y = n(a[1]); return guard(x, y) ? BAD : Math.pow(x, y); }
       case 'sin': { const x = n(a[0]); return guard(x) ? BAD : Math.sin(x); }
       case 'cos': { const x = n(a[0]); return guard(x) ? BAD : Math.cos(x); }
+      case 'tan': { const x = n(a[0]); return guard(x) ? BAD : Math.tan(x); }
+      case 'sinh': { const x = n(a[0]); return guard(x) ? BAD : Math.sinh(x); }
+      case 'cosh': { const x = n(a[0]); return guard(x) ? BAD : Math.cosh(x); }
+      case 'tanh': { const x = n(a[0]); return guard(x) ? BAD : Math.tanh(x); }
+      case 'asin': { const x = n(a[0]); return (guard(x) || x < -1 || x > 1) ? BAD : Math.asin(x); }
+      case 'acos': { const x = n(a[0]); return (guard(x) || x < -1 || x > 1) ? BAD : Math.acos(x); }
+      case 'atan': { const x = n(a[0]); return guard(x) ? BAD : Math.atan(x); }
+      case 'atan2': { const y = n(a[0]), x = n(a[1]); return guard(y, x) ? BAD : Math.atan2(y, x); }
       case 'exp': { const x = n(a[0]); return guard(x) ? BAD : Math.exp(x); }
+      case 'exp2': { const x = n(a[0]); return guard(x) ? BAD : Math.pow(2, x); }
       case 'log': { const x = n(a[0]); return (guard(x) || x <= 0) ? BAD : Math.log(x); }
+      case 'log2': { const x = n(a[0]); return (guard(x) || x <= 0) ? BAD : Math.log2(x); }
+      case 'inverseSqrt': { const x = n(a[0]); return (guard(x) || x <= 0) ? BAD : 1 / Math.sqrt(x); }
+      case 'degrees': { const x = n(a[0]); return guard(x) ? BAD : x * 180 / Math.PI; }
+      case 'radians': { const x = n(a[0]); return guard(x) ? BAD : x * Math.PI / 180; }
+      case 'trunc': { const x = n(a[0]); return guard(x) ? BAD : Math.trunc(x); }
       case 'fract': { const x = n(a[0]); return guard(x) ? BAD : x - Math.floor(x); }
       case 'step': { const e = n(a[0]), x = n(a[1]); return guard(e, x) ? BAD : (x < e ? 0 : 1); }
       case 'mix': { const p = n(a[0]), q = n(a[1]), t = n(a[2]); return guard(p, q, t) ? BAD : p + (q - p) * t; }
@@ -167,7 +190,7 @@ export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHo
     }
   }
   function applyVecBuiltin(name: string, a: readonly unknown[]): unknown {
-    const comps = (v: unknown): number[] => { const d: TypeDescriptor | undefined = descriptorOf(v); if (!d || d.lower?.shape !== 'vecN') return []; const nn = d.lower.n ?? 0; const out: number[] = []; for (let i = 0; i < nn; i++) out.push(toNum(getMemberSafe(v, 'xyzw'[i] as string))); return out; };
+    const comps = (v: unknown): number[] => { const d: TypeDescriptor | undefined = descriptorOf(v); if (!d || d.lower?.shape !== 'vecN') return []; const nn = d.lower.rows ?? 0; const out: number[] = []; for (let i = 0; i < nn; i++) out.push(toNum(getMemberSafe(v, 'xyzw'[i] as string))); return out; };
     if (name === 'dot') { const x = comps(a[0]); const y = comps(a[1]); return x.reduce((s, xi, i) => s + xi * (y[i] ?? 0), 0); }
     if (name === 'length') { const x = comps(a[0]); return Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0)); }
     // DEAD for a vec-bearing kernel: emitCpu delegates any body referencing a vec/mat name (vec2/3/4,

@@ -89,6 +89,15 @@ describe('GLSL-ES-3.0 emitter (compute-via-fragment)', () => {
     expect(glsl).not.toMatch(/a\.length/);
   });
 
+  it('declares a determinant local as float (it folds a matrix down to a scalar, not a mat)', () => {
+    // determinant carries a registry lowerName, so the componentwise lowerName fallback would wrongly declare
+    // `mat2 d = determinant(...)`. glslType must special-case determinant → float BEFORE that fallback.
+    const { fn, host } = kernelOf('component k(i) { const d = determinant(mat2(1,2,3,4)) return d } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).toMatch(/float d = determinant\(/);
+    expect(glsl).not.toMatch(/mat2 d = determinant\(/);
+  });
+
   it('guards a zero divisor for / and % (interpreter maps /0 and %0 to 0, not native inf/NaN)', () => {
     const div = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return 1 / a[i] }\nk`);
     const gdiv = emitGlsl(div.fn, gateKernel(div.fn, div.host).bindings, 'f32');
@@ -96,6 +105,18 @@ describe('GLSL-ES-3.0 emitter (compute-via-fragment)', () => {
     const mod = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return 1 % a[i] }\nk`);
     const gmod = emitGlsl(mod.fn, gateKernel(mod.fn, mod.host).bindings, 'f32');
     expect(gmod).toMatch(/\(.* == 0\.0 \? 0\.0 : .*trunc.*\)/);
+  });
+  it('vec/vec divide emits native componentwise divide (no scalar 0.0 guard)', () => {
+    // A scalar `(r == 0.0 ? 0.0 : l/r)` guard over VEC operands is a type-mismatched GLSL shader (the 0.0
+    // false-branch + the r==0.0 test are scalar). The width-aware guard branches on glslType: only the
+    // float/float path stays guarded; a vec operand emits the native componentwise divide.
+    const { fn, host } = kernelOf('component k(i) { return (vec2(i,1) / vec2(2,i)).x } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).not.toMatch(/== 0\.0 \? 0\.0/); // no scalar guard applied to the vec divide
+    // a plain SCALAR divide STILL emits the scalar /0 guard (path preserved, not blanket-removed)
+    const sc = kernelOf('component k(i) { return i / 2 } k');
+    const gsc = emitGlsl(sc.fn, gateKernel(sc.fn, sc.host).bindings, 'f32');
+    expect(gsc).toMatch(/\(.* == 0\.0 \? 0\.0 : .* \/ .*\)/);
   });
   it('guards bad-domain transcendentals (sqrt(neg)/log(<=0) → 0, matching the interpreter, not native NaN)', () => {
     const sq = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return sqrt(a[i] - 2) }\nk`);
@@ -121,5 +142,11 @@ describe('GLSL-ES-3.0 emitter (compute-via-fragment)', () => {
     expect(glsl).toContain('abs(');
     expect(glsl).toContain('clamp(');
     expect(glsl).not.toContain('unsupported');   // these are NOT dropped to a 0.0 placeholder
+  });
+  it('a rank-3 GLSL kernel decomposes _flat into (x,y,z)', () => {
+    const { fn, host } = kernelOf('component k(x, y, z) { return x + y + z } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).toContain('_deps'); // 3rd-dim uniform
+    expect(glsl).toMatch(/float .* = float\(.*% _deps\)/); // z = _flat % D
   });
 });

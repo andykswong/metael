@@ -54,10 +54,27 @@ change(() => { r = engine.gpu(kernel, { output: [256] }); });
 `gpu(kernel, cfg)` returns a `GpuResource` immediately (classification + shader emission are synchronous); the
 device dispatch settles on a later microtask and writes the resource cell, re-running any reactive reader.
 
+A kernel is a `component k(…)` whose parameters are **thread coordinates** — 1-D `k(i)` over `output: [N]`,
+2-D `k(x, y)` over `[W, H]`, or **3-D `k(x, y, z)` over `[W, H, D]`** (rank > 3, or an arity that does not
+match the output's dimension count, is a loud gate reject).
+
 A kernel body may use scalar arithmetic, `if`/ternary, a bounded `for (… of range(n))`, typed-array indexing
-`a[i]` + `a.length`, `vec`/`mat` intermediates, and the numeric + transcendental builtins
-(`min`/`max`/`abs`/`clamp`/`sqrt`/`pow`/`sin`/`cos`/`…`). Strings, objects, dynamic arrays, `while`, and helper
-calls are **rejected** by the gate with a span-anchored `MLGPU-*` diagnostic (`resource.core === false`,
+`a[i]` + `a.length`, and the full **`core`-profile numeric/vec/mat vocabulary**:
+
+- **Scalar math** — `min`/`max`/`abs`/`sign`/`floor`/`ceil`/`round`/`clamp`/`trunc`/`degrees`/`radians`,
+  `sqrt`/`pow`/`exp`/`exp2`/`log`/`log2`/`inverseSqrt`/`fract`/`step`/`mix`/`smoothstep`, the trig
+  `sin`/`cos`/`tan`, inverse-trig `asin`/`acos`/`atan`/`atan2`, and hyperbolic `sinh`/`cosh`/`tanh`. Each maps
+  to a shader intrinsic (with a domain guard where the interpreter has one) and applies **componentwise** to a
+  `vec` argument.
+- **vec/mat** — `vec2/3/4`, the square `mat2/3/4` + the six non-square `mat2x3`…`mat4x3` (`matCxR`, column-major),
+  componentwise `+ - * /`, vec/mat–scalar scaling, **column-major** `mat*vec` / `mat*mat`, swizzles, plus
+  `dot`/`cross`/`normalize`/`length`, `transpose`/`determinant`/`inverse`/`distance`/`reflect`/`refract`/`faceforward`,
+  and the `vec4`-convention quaternion family `qmul`/`qconj`/`qinvert`/`qaxisangle`/`qrotate`/`qslerp`/`qmat`. WGSL
+  has no native `inverse()` or quaternion type, so those are **hand-emitted** (a per-size `_invN`/`_qslerp`/`_qmat`
+  prelude helper) — byte-checked against the interpreter oracle.
+
+Strings, objects, dynamic arrays, `while`, helper calls, and **`rand()`** (it cannot match the deterministic
+oracle) are **rejected** by the gate with a span-anchored `MLGPU-*` diagnostic (`resource.core === false`,
 `resource.reasons` says why). A **static bounds-prover** additionally rejects a provably out-of-range index
 (`MLGPU-INDEX-STATIC`), leaving data-dependent indices to the sampled oracle.
 

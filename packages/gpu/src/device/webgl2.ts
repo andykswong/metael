@@ -74,9 +74,14 @@ export function tryWebGl2Backend(): Backend | null {
     async dispatch(input: DispatchInput): Promise<DispatchResult> {
       const start = performanceNow();
       const total = input.dims.reduce((a, b) => a * b, 1);
+      // The dispatch dims: W=dims[0], H=dims[1], D=dims[2]. `_cols` (=H) and `_deps` (=D) feed the shader's
+      // rank-3 flat-index decomposition (_x=_flat/(H*D), _y=(_flat/D)%H, _z=_flat%D), so a rank-3 dispatch must
+      // set cols=dims[1] (NOT 1) and deps=dims[2]. rank 2 keeps cols=dims[1], deps=1; rank 1 keeps cols=1.
       const rows = input.dims[0] ?? 1;
-      const cols = input.dims.length === 2 ? input.dims[1]! : 1;
-      // Output target dims. 2-D → cols×rows (fragment x=col, y=row). 1-D → texW×ceil(total/texW).
+      const cols = input.dims.length >= 2 ? input.dims[1]! : 1;
+      const deps = input.dims.length === 3 ? input.dims[2]! : 1;
+      // Output target dims. 2-D → cols×rows (fragment x=col, y=row). 1-D/3-D → a FLAT texW×ceil(total/texW)
+      // texture (no 3-D render target in WebGL2; the shader decomposes the flat texel index back to x,y,z).
       const outW = input.dims.length === 2 ? cols : texWidth(total);
       const outH = input.dims.length === 2 ? rows : Math.ceil(total / outW);
 
@@ -138,6 +143,7 @@ export function tryWebGl2Backend(): Backend | null {
       gl.uniform1i(gl.getUniformLocation(program, '_rows'), rows);
       gl.uniform1i(gl.getUniformLocation(program, '_cols'), cols);
       gl.uniform1i(gl.getUniformLocation(program, '_texW'), outW);
+      gl.uniform1i(gl.getUniformLocation(program, '_deps'), deps);
 
       // RGBA32F render target sized to the output grid.
       const outTex = gl.createTexture()!;

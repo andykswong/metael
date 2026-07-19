@@ -53,6 +53,52 @@ describe('createGpuEngine — CPU-only façade: dispatch + settle + dispose guar
     gpu[Symbol.dispose]();
   });
 
+  it('a rank mismatch (2 params, 1D output) is non-core', () => {
+    const gpu = createGpuEngine({ cpuOnly: true });
+    const k = gpu.compile('component k(x, y) { return x + y } k');
+    const r = gpu.dispatch(k, { output: [8] });
+    expect(r.core).toBe(false);
+    expect(r.reasons.some((d) => d.code === 'MLGPU-OUTPUT-SHAPE')).toBe(true);
+    gpu[Symbol.dispose]();
+  });
+
+  it('a rank>3 kernel (4 params, 4D output) is non-core with MLGPU-NOT-LOWERABLE', () => {
+    const gpu = createGpuEngine({ cpuOnly: true });
+    const k = gpu.compile('component k(x, y, z, w) { return x + y + z + w } k');
+    const r = gpu.dispatch(k, { output: [2, 2, 2, 2] });
+    expect(r.core).toBe(false);
+    expect(r.reasons.some((d) => d.code === 'MLGPU-NOT-LOWERABLE')).toBe(true);
+    gpu[Symbol.dispose]();
+  });
+
+  it('a multi-output rank mismatch (2 params, 1D output) is non-core', () => {
+    const gpu = createGpuEngine({ cpuOnly: true });
+    const k = gpu.compile('component k(x, y) { return { a: x + y, b: x - y } } k');
+    const r = gpu.dispatch(k, { output: [8], outputs: { a: {}, b: {} } });
+    expect(r.core).toBe(false);
+    expect(r.reasons.some((d) => d.code === 'MLGPU-OUTPUT-SHAPE')).toBe(true);
+    gpu[Symbol.dispose]();
+  });
+
+  it('a multi-output rank>3 kernel is non-core with MLGPU-NOT-LOWERABLE', () => {
+    const gpu = createGpuEngine({ cpuOnly: true });
+    const k = gpu.compile('component k(x, y, z, w) { return { a: x + y + z + w, b: x } } k');
+    const r = gpu.dispatch(k, { output: [2, 2, 2, 2], outputs: { a: {}, b: {} } });
+    expect(r.core).toBe(false);
+    expect(r.reasons.some((d) => d.code === 'MLGPU-NOT-LOWERABLE')).toBe(true);
+    gpu[Symbol.dispose]();
+  });
+
+  it('a VALID multi-output kernel (matching rank) stays core — the rank gate does not over-reject', () => {
+    const gpu = createGpuEngine({ cpuOnly: true });
+    // 1 param over a 1D output: arity 1 === dims 1 → the rank gate is satisfied.
+    const k = gpu.compile('const x = f32(4, (i) => i)\ncomponent k(i) { return { a: x[i] + 1, b: x[i] - 1 } }\nk');
+    const r = gpu.dispatch(k, { output: [4], backend: 'cpu', outputs: { a: {}, b: {} } });
+    expect(r.core).toBe(true);
+    expect(r.reasons).toEqual([]);
+    gpu[Symbol.dispose]();
+  });
+
   it('settle/dispatch throw after dispose() instead of spinning forever', async () => {
     const gpu = createGpuEngine({ cpuOnly: true });
     const kernel = gpu.compile(`const x = f32(8, (i) => i)\ncomponent k(i) { return x[i] * 2 }\nk`);

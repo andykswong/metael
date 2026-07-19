@@ -113,6 +113,20 @@ export interface GpuResource {
 
 const MAX_LIVE = 8;
 
+/** The RANK GATE shared by the single-output `gpu()` and the multi-output `gpuMulti()` paths: a kernel's
+ *  params ARE its thread coordinates, so the arity must match the output's dimension count, and at most 3
+ *  thread dimensions (x, y, z) are dispatchable. Returns the reasons to reject LOUDLY (a rank>3 kernel, or an
+ *  arity≠dims mismatch) rather than let one fall through silently-wrong. Both paths fold these into `core`.
+ *  Identical logic in both — deduped here so the two paths cannot drift in codes or wording. */
+function rankGate(kernel: UserFn, dims: readonly number[]): Diagnostic[] {
+  const rank = kernel.params.length;
+  const dimsRank = dims.length;
+  const reasons: Diagnostic[] = [];
+  if (rank > 3) reasons.push(makeDiagnostic('MLGPU-NOT-LOWERABLE', `a kernel of rank ${rank} is not lowerable — at most 3 thread dimensions (x, y, z) are supported`));
+  else if (rank !== dimsRank) reasons.push(makeDiagnostic('MLGPU-OUTPUT-SHAPE', `kernel arity (${rank}) must match the output dimension count (${dimsRank})`));
+  return reasons;
+}
+
 export interface GpuEngineDeps {
   tryWebGpu: () => Promise<Backend | null>;
   tryWebGl2: () => Backend | null;
@@ -146,6 +160,11 @@ export class GpuEngine {
     const requested: 'auto' | BackendKind = cfg.backend ?? 'auto';
     if (cfg.outputs !== undefined) return this.gpuMulti(kernel, cfg, precision, requested);
     const comps = compsOf(cfg.outputElement);   // f32→1 (default), vec2/3/4→2/3/4
+    // RANK GATE (before the kernel gate): a kernel's params ARE its thread coordinates, so the arity must
+    // match the output's dimension count, and at most 3 thread dimensions (x, y, z) are dispatchable. Reject
+    // LOUDLY here rather than let a rank>3 kernel or an arity≠dims mismatch fall through silently-wrong. The
+    // SAME gate is applied to the multi-output path (gpuMulti) via this shared helper so the two can't drift.
+    const rankReasons = rankGate(kernel, cfg.output);
     const { reasons: gateReasons, bindings } = gateKernel(kernel, this.host, comps);
     // A CONSERVATIVE static bounds proof over the kernel's buffer-index expressions, bounded by the output
     // dims (which the dims-agnostic gate never sees). It rejects (MLGPU-INDEX-STATIC) ONLY an index provably
@@ -166,10 +185,10 @@ export class GpuEngine {
     if (comps > 1 && outT === 'gpu-buffer') {
       cfgReasons.push(makeDiagnostic('MLGPU-NOT-LOWERABLE', "a vecN outputElement is not supported with outputType 'gpu-buffer' (a resident vecN buffer is a follow-on) — use outputType 'array' or 'buffer'"));
     }
-    const reasons = [...gateReasons, ...cfgReasons];
+    const reasons = [...gateReasons, ...cfgReasons, ...rankReasons];
     // core iff nothing was flagged — by the gate OR the static-bounds pass (which pushed into gateReasons) OR
-    // the config check. (The gate's own `core` is subsumed by `gateReasons.length === 0`.)
-    const core = gateReasons.length === 0 && cfgReasons.length === 0;
+    // the config check OR the rank gate. (The gate's own `core` is subsumed by `gateReasons.length === 0`.)
+    const core = gateReasons.length === 0 && cfgReasons.length === 0 && rankReasons.length === 0;
     // Fold the output width into the flags so a vecN run is a DISTINCT resource from a scalar run of the same
     // kernel (append `cN` for comps>1; a scalar comps=1 stays blank → the pre-vecN key is byte-identical).
     const flags = `${cfg.verify ? 'v' : ''}${cfg.benchmark ? 'b' : ''}${outT === 'buffer' ? 'B' : outT === 'gpu-buffer' ? 'G' : ''}${comps > 1 ? `c${comps}` : ''}`;   // distinct flags → distinct resource
@@ -767,6 +786,14 @@ export class GpuEngine {
     const bindings = buildBindingTable(kernel, free, this.host);
     const structureReasons = checkMultiOutputShape(kernel, names);
 
+    // RANK GATE (the SAME one the single-output path applies): the kernel's params ARE its thread coordinates
+    // for multi-output too (each named output is written per-cell over the shared grid), so the arity must
+    // match the output dims and at most 3 thread dimensions dispatch. The single-output pipeline the
+    // synthesized per-key kernels flow through never re-checks this (synthOutputKernel preserves the params),
+    // so without this a rank>3 / arity≠dims multi-output kernel would be silently accepted. Same helper →
+    // identical MLGPU codes + wording as the single-output path.
+    const rankReasons = rankGate(kernel, cfg.output);
+
     // Config validation. `outputs` + `outputElement` are mutually exclusive; an empty `outputs` is rejected;
     // v1 multi-output is ARRAY-mode only (buffer/gpu-buffer multi-output is a documented follow-on).
     const cfgReasons: Diagnostic[] = [];
@@ -793,7 +820,7 @@ export class GpuEngine {
           glsl: v.core ? emitGlsl(synth, v.bindings, precision, comps) : '' });
       }
     }
-    const reasons = [...cfgReasons, ...structureReasons, ...gateReasons];
+    const reasons = [...cfgReasons, ...structureReasons, ...gateReasons, ...rankReasons];
     const core = reasons.length === 0;
 
     // Memo key: the kernel + output dims + the outputs SPEC (names+elements) + input gens + flags + a `M`

@@ -36,11 +36,119 @@ const isXyzwSwizzle = (prop: string): boolean => [...prop].every((ch) => SWIZZLE
 // adapter compile error). So an over-range swizzle must be rejected even though its chars are all xyzw.
 const SWIZZLE_ORDER = 'xyzw';
 
+// The matrix constructors, name → [rows, cols]. A matCxR builds C columns of R rows, so its shape is R×C.
+// The square ctors (matN) are N×N; the six non-square ctors spell out both dimensions.
+const MAT_CTORS: Readonly<Record<string, [number, number]>> = {
+  mat2: [2, 2], mat3: [3, 3], mat4: [4, 4],
+  mat2x3: [3, 2], mat2x4: [4, 2], mat3x2: [2, 3], mat3x4: [4, 3], mat4x2: [2, 4], mat4x3: [3, 4],
+};
+/** The matrix shape an expression evaluates to, or null if it is not a matrix. Recognizes the matrix
+ *  constructors plus the matrix-returning ops (`transpose` swaps rows/cols; `inverse` keeps the shape;
+ *  `qmat` — a quaternion → rotation matrix — is 3×3). Structural + conservative: an unknown call, or an op
+ *  whose argument is not itself a matrix, is not a matrix here → null. */
+export function matShapeOf(e: Expr): { rows: number; cols: number } | null {
+  if (e.kind !== 'call' || e.callee.kind !== 'ident') return null;
+  const n = e.callee.name;
+  if (Object.hasOwn(MAT_CTORS, n)) { const [rows, cols] = MAT_CTORS[n]!; return { rows, cols }; }   // own-property check: a prototype-inherited callee name (constructor/toString/…) is NOT a ctor
+  if (n === 'transpose') { const s = e.args[0] ? matShapeOf(e.args[0]) : null; return s ? { rows: s.cols, cols: s.rows } : null; }
+  if (n === 'inverse') return e.args[0] ? matShapeOf(e.args[0]) : null;
+  if (n === 'qmat') return { rows: 3, cols: 3 };
+  return null;
+}
+
+/** A read-only map of local name → square matrix size (N for an N×N matrix). The WGSL emitter — unlike the GLSL
+ *  emitter's `tenv` — carries no local type env, so this is the ONE piece of local matrix-shape knowledge the
+ *  gate + emitter SHARE: it lets `inverse(M)` (M a local) resolve its `_invN` size. Only SQUARE locals are
+ *  recorded (a non-square matrix is never invertible). Exported so `emit-wgsl.ts` uses the SAME resolution the
+ *  gate does — a gate-accepted `inverse` is therefore always emitter-resolvable (no silent bare-arg WGSL). */
+export type LocalMats = ReadonlyMap<string, number>;
+
+/** The SQUARE size (N for N×N) of a matrix expression, consulting local matrix bindings — the single lowerability
+ *  rule for `inverse(E)`. Resolves: a matrix constructor / `qmat` leaf (square only); a local matrix binding
+ *  (`const M = mat3(...)`); and the shape-preserving/swapping ops `transpose`/`inverse` RECURSIVELY (so
+ *  `inverse(transpose(M))` — the normal-matrix idiom — resolves when M is a square local). A computed matrix
+ *  expression (a `mat*mat` product, `mat±mat`, `mat*scalar`, a ternary, an un-recorded local) is NOT statically
+ *  sized → null. `matShapeOf` alone can't do this: it is not locals-aware and its transpose/inverse recursion
+ *  bottoms out at a non-locals-aware `matShapeOf`, so a local-rooted chain returns null there. */
+export function matSizeOf(e: Expr, locals: LocalMats): number | null {
+  if (e.kind === 'ident') return locals.get(e.name) ?? null;
+  if (e.kind === 'call' && e.callee.kind === 'ident') {
+    const n = e.callee.name;
+    if (n === 'transpose' || n === 'inverse') return e.args[0] ? matSizeOf(e.args[0], locals) : null;
+    const m = matShapeOf(e);   // a ctor / qmat leaf — square only (transpose of a non-square ctor is caught above)
+    return m && m.rows === m.cols ? m.rows : null;
+  }
+  return null;
+}
+
+/** Build the local name → square-matrix-size map for a kernel body, in DECLARATION order (a later binding's init
+ *  can reference an earlier matrix local, e.g. `const B = transpose(A)`). A local rebound to a non-matrix (or a
+ *  computed matrix `matSizeOf` can't size) is REMOVED — so a later `inverse(that local)` is conservatively
+ *  unresolvable → gate-rejected. The gate and the emitter both call this over the same body, so they agree. */
+export function buildLocalMats(kernel: UserFn): Map<string, number> {
+  const locals = new Map<string, number>();
+  const record = (name: string, init: Expr): void => { const n = matSizeOf(init, locals); if (n !== null) locals.set(name, n); else locals.delete(name); };
+  const walkStmt = (s: Stmt): void => {
+    switch (s.kind) {
+      case 'const': case 'let': record(s.name, s.init); return;
+      case 'assign': if (s.target.kind === 'ident') record(s.target.name, s.value); return;
+      case 'if': s.then.forEach(walkStmt); s.else?.forEach(walkStmt); return;
+      case 'for': s.body.forEach(walkStmt); return;
+      case 'while': s.body.forEach(walkStmt); return;
+      default: return;   // expr / return contribute no new local matrix binding
+    }
+  };
+  kernel.body.forEach(walkStmt);
+  return locals;
+}
+
+/** A read-only map of local name → its FULL matrix/vector shape ({rows, cols}). The superset companion to
+ *  `LocalMats`: it keeps vecs (cols:1) and NON-square matrices too, so a shape-driven emitter/gate choice
+ *  (the WGSL divide-guard, mat-negate, and the determinant square check) can resolve a vec/mat LOCAL — not
+ *  just the square-invertible ones `LocalMats` records for `inverse`. */
+export type LocalShapes = ReadonlyMap<string, { rows: number; cols: number }>;
+
+/** The full {rows, cols} shape of a matrix/vector expression, consulting local bindings. Like `matSizeOf` but
+ *  returns the full shape (NON-square incl.) and also resolves a VEC (cols:1). A vec ctor → {rows:n, cols:1};
+ *  a mat ctor / `qmat` leaf → its {rows, cols}; `transpose` swaps; `inverse` keeps; a local → its recorded
+ *  shape. Unresolvable (a computed expr, an un-recorded local) → null. `matShapeOf` alone isn't locals-aware
+ *  and doesn't know vecs, so this is the ONE resolver the shape-driven emitter + the determinant gate SHARE. */
+export function shapeOfExpr(e: Expr, locals: LocalShapes): { rows: number; cols: number } | null {
+  if (e.kind === 'ident') return locals.get(e.name) ?? null;
+  if (e.kind === 'call' && e.callee.kind === 'ident') {
+    const n = e.callee.name;
+    if (n === 'transpose') { const s = e.args[0] ? shapeOfExpr(e.args[0], locals) : null; return s ? { rows: s.cols, cols: s.rows } : null; }
+    if (n === 'inverse') return e.args[0] ? shapeOfExpr(e.args[0], locals) : null;
+    const m = matShapeOf(e); if (m) return m;                          // mat ctor / qmat leaf (square + non-square)
+    if (n === 'vec2') return { rows: 2, cols: 1 }; if (n === 'vec3') return { rows: 3, cols: 1 }; if (n === 'vec4') return { rows: 4, cols: 1 };
+  }
+  return null;
+}
+
+/** Build the local name → full-shape map for a kernel body, in DECLARATION order (mirrors `buildLocalMats`
+ *  but keeps vecs + non-square mats). A rebinding to an unresolvable value REMOVES the local (conservative —
+ *  a later shape query on it returns null, the same not-proven behavior `buildLocalMats` gives). */
+export function buildLocalShapes(kernel: UserFn): Map<string, { rows: number; cols: number }> {
+  const locals = new Map<string, { rows: number; cols: number }>();
+  const record = (name: string, init: Expr): void => { const s = shapeOfExpr(init, locals); if (s) locals.set(name, s); else locals.delete(name); };
+  const walkStmt = (s: Stmt): void => {
+    switch (s.kind) {
+      case 'const': case 'let': record(s.name, s.init); return;
+      case 'assign': if (s.target.kind === 'ident') record(s.target.name, s.value); return;
+      case 'if': s.then.forEach(walkStmt); s.else?.forEach(walkStmt); return;
+      case 'for': case 'while': s.body.forEach(walkStmt); return;
+      default: return;   // expr / return contribute no new local shape binding
+    }
+  };
+  kernel.body.forEach(walkStmt);
+  return locals;
+}
+
 /** The vec width an expression evaluates to: 0 = scalar/unknown, 2/3/4 = a vecN. Structural + conservative:
  *  a `vec2/3/4(...)` call is its width; `normalize`/`mix` preserve their first arg's width; `cross` is 3;
  *  a vec-bound local/input is its n; a swizzle `v.xy` is the swizzle length (a single `.x` is scalar); a
  *  binary/cond/neg follows its vec operand. Anything unproven is 0 (scalar). `dot`/`length` are scalar. */
-function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap<string, number>): number {
+export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap<string, number>): number {
   switch (e.kind) {
     case 'call': {
       if (e.callee.kind === 'ident') {
@@ -48,17 +156,31 @@ function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap
         if (n === 'vec2') return 2; if (n === 'vec3') return 3; if (n === 'vec4') return 4;
         if (n === 'normalize' || n === 'mix') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth) : 0;
         if (n === 'cross') return 3;
+        // reflect/refract/faceforward return a vector of their first (incident/normal) arg's width — so a
+        // vecN output over one is accepted, not read as scalar and rejected.
+        if (n === 'reflect' || n === 'refract' || n === 'faceforward') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth) : 0;
+        // Quaternion ops that produce a quat (a vec4): qmul/qconj/qinvert/qaxisangle/qslerp always return a vec4.
+        if (n === 'qmul' || n === 'qconj' || n === 'qinvert' || n === 'qaxisangle' || n === 'qslerp') return 4;
+        // qrotate produces the rotated 3-vector (a vec3).
+        if (n === 'qrotate') return 3;
+        if (n === 'distance' || n === 'determinant') return 0;   // fold a vec/mat down to a scalar
       }
       return 0;   // dot/length/scalar builtins/helper calls → scalar
     }
     case 'ident': {
       if (localWidth.has(e.name)) return localWidth.get(e.name)!;
       const b = bindings.byName.get(e.name);
-      if (b && (b.role === 'buffer' || b.role === 'uniform') && b.lower.shape === 'vecN') return b.lower.n ?? 0;
+      if (b && (b.role === 'buffer' || b.role === 'uniform') && b.lower.shape === 'vecN') return b.lower.rows ?? 0;
       return 0;
     }
     case 'member': {
       const w = returnVecWidth(e.object, bindings, localWidth);
+      // A swizzle of an INCONSISTENT-shape object (w === -1 — the object is a `vec±mat`, a mismatched-width
+      // vec binary, a mismatched matmul, or a mismatched-branch ternary) stays inconsistent: `(vec2+mat2).x`
+      // has no lowerable value, so the -1 must propagate (not collapse to 0 via the `w >= 2` guard below and
+      // read as a legal scalar) so checkOutputShape still rejects it. Only an already-invalid expr is ever -1
+      // here — a valid vec object is always width 0/2/3/4 — so this never falsely rejects a real kernel.
+      if (w === -1) return -1;
       // A swizzle on a vec: `.xy`→2, single `.x`→scalar. A NON-xyzw swizzle (.rgb/.stpq) OR an OVER-RANGE
       // swizzle (a char indexing past the source vec's width, e.g. `.z` on a vec2) has no width here (returns 0)
       // — the gate's walkExpr rejects both outright, and reporting a phantom width (the raw swizzle length)
@@ -74,13 +196,53 @@ function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap
     case 'unary': return e.op === '!' ? 0 : returnVecWidth(e.operand, bindings, localWidth);
     case 'binary': {
       if (COMPARE.has(e.op)) return 0;   // a comparison is a bool → scalar
+      // The interpreter's vec/mat descriptor `binary` handler (the correctness oracle) evaluates ONLY a fixed
+      // set of (op, left-shape, right-shape) triples; every other combo returns NOT_HANDLED → ML-LANG-OP-
+      // UNSUPPORTED → the cell is 0. A shader emits the NATIVE op and computes a real value, so accepting a
+      // NOT_HANDLED combo is a SILENT GPU-vs-interpreter divergence (verify is off by default). We model that
+      // table EXACTLY here: an accepted combo returns its real result width; a NOT_HANDLED combo returns -1
+      // so checkOutputShape rejects it (never Math.max, which would fabricate a width for a combo the oracle
+      // can't evaluate). A matrix RESULT reads as width 0 — a matrix isn't a vecN, and a computed matrix isn't
+      // matShapeOf-recognized (it recognizes only ctor/transpose/inverse/qmat call nodes), so it flows as a
+      // scalar downstream, matching how the interpreter chains e.g. `((mat*scalar) * vec)`.
+      const lm = matShapeOf(e.left); const rm = matShapeOf(e.right);
       const l = returnVecWidth(e.left, bindings, localWidth); const r = returnVecWidth(e.right, bindings, localWidth);
-      // Two vec operands of DIFFERING widths (`vec3 + vec2`) is a shape error — the interpreter's vec binary
-      // NOT_HANDLEs a cross-width pair (→ garbage), and Math.max would fabricate one width. Signal -1
-      // ("inconsistent") so checkOutputShape rejects with MLGPU-OUTPUT-SHAPE. A scalar operand (width 0)
-      // broadcasts (vec ∘ scalar), so 0-vs-N is fine → the vec's width.
-      if (l >= 2 && r >= 2 && l !== r) return -1;
-      return Math.max(l, r);
+      // An operand that is itself inconsistent (a nested -1) makes the whole binary inconsistent → propagate.
+      if (l === -1 || r === -1) return -1;
+      // Operand shape classes (mutually exclusive: a mat has returnVecWidth 0 + a matShapeOf; a vec has
+      // width ≥ 2 + no matShapeOf; a scalar has width 0 + no matShapeOf).
+      const lMat = lm !== null; const rMat = rm !== null;
+      const lVec = l >= 2 && !lMat; const rVec = r >= 2 && !rMat;
+      const lScalar = l === 0 && !lMat; const rScalar = r === 0 && !rMat;
+      // The carve-out: plain scalar∘scalar arithmetic never touches the vec/mat descriptor (both operands are
+      // numbers), so it is always lowerable → width 0. (Math.max over two 0s = 0; kept for clarity.)
+      if (lScalar && rScalar) return Math.max(l, r);
+      // At least one operand is a vec/mat — apply the interpreter's table, keyed by op.
+      const op = e.op;
+      if (op === '*') {
+        // matmul: the LEFT operand is a matrix; the right is a mat|vec; inner dims must match (lm.cols === the
+        // right's row count). `vec * mat` (a vec on the LEFT of a matrix) is NOT matmul in the interpreter
+        // (`lMat && rs && o==='*'`), so it falls through to the trailing -1.
+        if (lMat && (rVec || rMat)) { const inner = rMat ? rm!.rows : r; return lm!.cols === inner ? (rMat ? 0 : lm!.rows) : -1; }
+        if (lVec && rScalar) return l;               // vec * scalar → scale
+        if (lScalar && rVec) return r;               // scalar * vec → scale
+        if (lVec && rVec) return l === r ? l : -1;   // vec * vec (equal width) → componentwise; differing → -1
+        if (lMat && rScalar) return 0;               // mat * scalar → a matrix (reads as scalar/mat downstream)
+        if (lScalar && rMat) return 0;               // scalar * mat → a matrix
+        return -1;                                   // vec * mat (vec left) → NOT_HANDLED
+      }
+      if (op === '/') {
+        if (lVec && rScalar) return l;               // vec / scalar → scale
+        if (lVec && rVec) return l === r ? l : -1;   // vec / vec (equal width) → componentwise
+        if (lMat && rScalar) return 0;               // mat / scalar → a matrix
+        return -1;                                   // scalar/vec, scalar/mat, mat/vec, mat/mat, vec/mat → NOT_HANDLED
+      }
+      if (op === '+' || op === '-') {
+        if (lVec && rVec) return l === r ? l : -1;   // vec ± vec (equal width) → componentwise; differing → -1
+        return -1;                                   // vec±scalar, scalar±vec, mat±mat, mat±scalar, scalar±mat, mat±vec, vec±mat → NOT_HANDLED
+      }
+      // Any other op with a vec/mat operand (`%`, `&&`, `||`) is undefined on the vec/mat descriptor → -1.
+      return -1;
     }
     case 'cond': {
       const t = returnVecWidth(e.then, bindings, localWidth); const el = returnVecWidth(e.else, bindings, localWidth);
@@ -105,6 +267,13 @@ function checkOutputShape(kernel: UserFn, comps: number, bindings: BindingTable,
         case 'const': case 'let': localWidth.set(s.name, returnVecWidth(s.init, bindings, localWidth)); break;
         case 'assign': if (s.target.kind === 'ident') localWidth.set(s.target.name, returnVecWidth(s.value, bindings, localWidth)); break;
         case 'return': {
+          // A matrix has no output-cell form: a kernel writes one scalar or one vecN per element, never a
+          // whole matrix. Catch it before the scalar/vec width check (a mat ctor otherwise reads as width 0 →
+          // a false "scalar" pass) and reject with a shape reason of its own.
+          if (s.value && matShapeOf(s.value)) {
+            reasons.push(makeDiagnostic('MLGPU-OUTPUT-SHAPE', `a matrix return has no output-cell form — a kernel returns a scalar or a vecN`, s.span));
+            break;
+          }
           const w = s.value ? returnVecWidth(s.value, bindings, localWidth) : 0;   // width 0 = scalar (vec is never 1)
           // w === -1 = "inconsistent" (a return whose width can't be determined — a mismatched-width ternary
           // or vec binary). Always a shape error regardless of the requested comps: the two branches disagree
@@ -242,6 +411,17 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
   // width. A `for`-binding is not vec-typed (it's a range index → scalar), so it stays width 0 (unset).
   const localWidth = new Map<string, number>();
 
+  // Local matrix sizes for the `inverse` lowerability check — precomputed over the WHOLE body (declaration order)
+  // so `inverse(M)` resolves M regardless of walk order, matching how the emitter precomputes then emits. The
+  // SAME `buildLocalMats`/`matSizeOf` the emitter's inverse resolution derives from → gate ↔ emitter cannot
+  // disagree on which inverses lower.
+  const localMats = buildLocalMats(fn);
+  // Local FULL shapes for the `determinant` square check — the superset companion to `localMats` that keeps
+  // vecs + NON-square mats. Precomputed over the whole body (same as the emitter's `buildLocalShapes`) so a
+  // non-square matrix bound to a LOCAL (`const m = mat2x3(...); determinant(m)`) resolves its {rows, cols}
+  // here and the determinant check below can reject it — `matShapeOf` alone (not locals-aware) could not.
+  const localShapes = buildLocalShapes(fn);
+
   // A kernel-local (const/let/for-binding/param) name may not start with `_`: the emitters reserve the
   // `_`-prefix for their own temporaries (`_r`/`_flat`/`_out`/`_p`/`_frag`/`_fetch`/`_fx`/…, `_u_`-scalars).
   // A user local named `_r` would collide with the vecN-return temp (a WGSL/GLSL redefinition) or shadow a
@@ -318,7 +498,31 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
           // emitter silently lowering the intrinsic while the oracle runs the user's body. Helper bodies are
           // still gated recursively below.
           if (b?.role === 'callee') { flag('MLGPU-NOT-LOWERABLE', `calling a helper function ('${e.callee.name}') is not yet lowerable — inline it into the kernel`, e.span); }
-          else if (spec) { if (spec.profile === 'host' || (spec.portability === 'cpu-only' && !spec.lowerName)) flag('MLGPU-NOT-LOWERABLE', `builtin '${e.callee.name}' has no shader lowering`, e.span); }
+          else if (spec) {
+            if (e.callee.name === 'rand') flag('MLGPU-NOT-LOWERABLE', `rand() cannot be lowered to a compute kernel — it cannot match the deterministic interpreter oracle`, e.span);
+            else if (spec.profile === 'host' || (spec.portability === 'cpu-only' && !spec.lowerName)) flag('MLGPU-NOT-LOWERABLE', `builtin '${e.callee.name}' has no shader lowering`, e.span);
+            // WGSL has NO builtin inverse() — the emitter hand-emits a per-SIZE `_invN` helper, so the arg's square
+            // size must be STATICALLY resolvable (a mat ctor, a matrix-typed local, or a transpose/inverse chain
+            // over one — via `matSizeOf` over `localMats`, the SAME rule the emitter uses). A computed-matrix arg
+            // (a `mat*mat` product, `mat±mat`, `mat*scalar`, a ternary, an un-recorded local) is unresolvable →
+            // REJECT here so the kernel falls back to CPU/interpreter (both correct) rather than the emitter
+            // silently dropping the inverse (a WGSL-only, adapter-only wrong result). This keeps gate ↔ emitter in
+            // lockstep: no gate-accepted `inverse` can reach the emitter's un-inverted-arg fallback.
+            else if (e.callee.name === 'inverse' && (!e.args[0] || matSizeOf(e.args[0], localMats) === null)) {
+              flag('MLGPU-NOT-LOWERABLE', `inverse(...) requires a statically-sized square matrix argument (a mat ctor or a matrix-typed local) — a computed matrix expression is not yet lowerable`, e.span);
+            }
+            // determinant is defined only for a SQUARE matrix (both shaders' native determinant + the interpreter
+            // oracle reject a non-square arg). Reject a non-square arg here so gate ↔ oracle agree. `shapeOfExpr`
+            // is locals-aware, so this catches BOTH a DIRECT non-square ctor (`determinant(mat2x3(...))`) AND a
+            // non-square matrix bound to a LOCAL (`const M = mat2x3(...); determinant(M)`) — the local's shape is
+            // recorded in `localShapes`. (A computed / un-recorded matrix arg resolves to null and is not flagged
+            // here; a non-square such arg still errors in the oracle + fails to compile on both shaders, so no
+            // silent wrong value results.)
+            else if (e.callee.name === 'determinant' && e.args[0]) {
+              const sh = shapeOfExpr(e.args[0], localShapes);
+              if (sh && sh.rows !== sh.cols) flag('MLGPU-NOT-LOWERABLE', `determinant(...) requires a square matrix`, e.span);
+            }
+          }
           else flag('MLGPU-NOT-LOWERABLE', `call '${e.callee.name}' is not a lowerable builtin or helper`, e.span);
         } else { flag('MLGPU-NOT-LOWERABLE', 'an indirect call is not lowerable', e.span); walkExpr(e.callee); }
         if (e.block) flag('MLGPU-NOT-LOWERABLE', 'a wrapping-block call is not lowerable in a compute kernel', e.span);

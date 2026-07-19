@@ -583,6 +583,92 @@ const GPU_HISTOGRAM = `component Story() {
   }
 }`;
 
+// GPU_3D — a rank-3 dispatch: the kernel takes THREE coords (x, y, z), so
+// `output: [W, H, D]` maps to a 3D grid (the WGSL bakes @workgroup_size(4,4,4)).
+// The value encodes its own coords (x*100 + y*10 + z) so the flat row-major
+// buffer (((x*H + y)*D + z) order) reads back legibly. Small dims (16 cells)
+// keep it a quick, verifiable grid. verify re-checks each sampled cell against
+// the interpreter (r.match.ok).
+const GPU_3D = `component Story() {
+  component k(x, y, z) {
+    return x * 100 + y * 10 + z
+  }
+  const r = gpu(k, { output: [2, 2, 4], verify: true })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const cells = join(map(head, (v) => round(v)), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "rank-3 dispatch [2, 2, 4]")
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "cells: [" + cells + ", ...]")
+      p({ class: "status" },
+        r.backend + " - matches interpreter=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_MATHFNS — the shader-intrinsic math builtins: a per-lane composition of
+// tan / atan2 / exp2 / log2 / inverseSqrt, each lowered to its native WGSL
+// intrinsic. The inputs are kept in-domain (log2/inverseSqrt args > 0) so the
+// finite result matches the interpreter oracle (r.match.ok).
+const GPU_MATHFNS = `component Story() {
+  const n = 32
+  const xs = f32(n, (i) => i * 0.04)
+  component k(i) {
+    const t = xs[i]
+    return tan(t) + atan2(t, 2) + exp2(t)
+      + log2(t + 1) + inverseSqrt(t + 1)
+  }
+  const r = gpu(k, { output: [n], verify: true })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const cells = join(map(head, (x) => round(x * 100) / 100), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "math intrinsics x " + n)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "cells: [" + cells + ", ...]")
+      p({ class: "status" },
+        r.backend + " - matches interpreter=" + r.match.ok)
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
+// GPU_QUAT — quaternion rotation: each lane builds a rotation quat about +z via
+// qaxisangle(axis, angle) then applies it to (1, 0, 0) with qrotate. The angle
+// varies per lane (i * 0.1) so every cell rotates by a different amount. The
+// quat ops are hand-emitted WGSL (there is no native quat type); we return the
+// rotated vector's y component (= sin(angle)) so a scalar output[n] works. No
+// verify: quaternion ops are `gpu-tolerant` — the f32 shader reassociates the
+// cross-product chain vs the f64 interpreter, so the values are correct but an
+// exact per-cell match isn't the right claim for a transcendental rotation.
+const GPU_QUAT = `component Story() {
+  const n = 32
+  component k(i) {
+    const angle = i * 0.1
+    const q = qaxisangle(vec3(0, 0, 1), angle)
+    const v = qrotate(q, vec3(1, 0, 0))
+    return v.y
+  }
+  const r = gpu(k, { output: [n] })
+  const head = r.value == null ? [] : slice(r.value, 0, 6)
+  const cells = join(map(head, (x) => round(x * 100) / 100), ", ")
+  div({ class: "gpu-demo" }) {
+    p({ class: "title" }, "quaternion rotate x " + n)
+    if (r.pending) {
+      p({ class: "status" }, "computing on " + r.backend + "...")
+    } else {
+      p({ class: "result" }, "rotated .y: [" + cells + ", ...]")
+      p({ class: "status" },
+        r.backend + " - quaternion ops (gpu-tolerant)")
+    }
+    pre({ class: "shader" }, r.wgsl)
+  }
+}`;
+
 export const EXAMPLES: readonly Example[] = [
   { id: 'counter', label: 'Counter', target: 'ui', blurb: 'fine-grained updates — a click patches one text node, no re-render', source: COUNTER },
   { id: 'todo', label: 'Todo (full-featured)', target: 'ui', blurb: 'multi-component, per-row edit, callback props, keyed reconcile, filters', source: TODO },
@@ -609,6 +695,9 @@ export const EXAMPLES: readonly Example[] = [
   { id: 'gpu-pipeline', label: 'GPU pipeline (A → B)', target: 'gpu', blurb: 'kernel A produces a resident gpu-buffer; kernel B consumes it as input', source: GPU_PIPELINE },
   { id: 'gpu-reduce', label: 'GPU reduction (sum)', target: 'gpu', blurb: 'a 2-arg associative reducer folds a buffer to one scalar (a multi-pass WebGL2 tree reduction)', source: GPU_REDUCE },
   { id: 'gpu-histogram', label: 'GPU histogram (scatter)', target: 'gpu', blurb: 'a 1-arg bin-mapper scatters values into per-bin counts (WebGPU atomicAdd; WebGL2 falls to the CPU oracle)', source: GPU_HISTOGRAM },
+  { id: 'gpu-3d', label: 'GPU 3D dispatch', target: 'gpu', blurb: 'a rank-3 kernel k(x,y,z) over [W,H,D] — the 3D dispatch grid', source: GPU_3D },
+  { id: 'gpu-mathfns', label: 'GPU math builtins', target: 'gpu', blurb: 'shader-intrinsic math builtins (tan/atan2/exp2/log2/inverseSqrt/…) lowered to WGSL', source: GPU_MATHFNS },
+  { id: 'gpu-quat', label: 'GPU quaternion rotation', target: 'gpu', blurb: 'rotate a vector by a quaternion (qaxisangle/qrotate) — hand-emitted WGSL', source: GPU_QUAT },
 ];
 
 export const DEFAULT_EXAMPLE_ID = 'todo';

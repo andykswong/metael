@@ -38,7 +38,7 @@ export interface BuiltinSpec {
  *  consumer needs it, without adding a code path now. */
 export const BUILTINS: Readonly<Record<string, BuiltinSpec>> = Object.freeze({
   // --- seeded / already shipped ---
-  rand:        { name: 'rand',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 0] },
+  rand:        { name: 'rand',        profile: 'core', portability: 'cpu-only',     takesClosure: false, arity: [0, 0] },
   range:       { name: 'range',       profile: 'host', portability: 'cpu-only',     takesClosure: false, arity: [1, 1] },
   map:         { name: 'map',         profile: 'host', portability: 'cpu-only',     takesClosure: true,  arity: [2, 2] },
   filter:      { name: 'filter',      profile: 'host', portability: 'cpu-only',     takesClosure: true,  arity: [2, 2] },
@@ -94,17 +94,57 @@ export const BUILTINS: Readonly<Record<string, BuiltinSpec>> = Object.freeze({
   mat2:        { name: 'mat2',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 4] },
   mat3:        { name: 'mat3',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 9] },
   mat4:        { name: 'mat4',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [0, 16] },
+  mat2x3:      { name: 'mat2x3',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [6, 6] },
+  mat2x4:      { name: 'mat2x4',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [8, 8] },
+  mat3x2:      { name: 'mat3x2',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [6, 6] },
+  mat3x4:      { name: 'mat3x4',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [12, 12] },
+  mat4x2:      { name: 'mat4x2',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [8, 8] },
+  mat4x3:      { name: 'mat4x3',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [12, 12] },
   dot:         { name: 'dot',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'dot' },
   cross:       { name: 'cross',       profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'cross' },
   normalize:   { name: 'normalize',   profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'normalize' },
   length:      { name: 'length',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'length' },
+  transpose:   { name: 'transpose',   profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'transpose' },
+  determinant: { name: 'determinant', profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'determinant' },
+  // No lowerName: WGSL has no inverse() at all (hand-emitted per matrix size); GLSL has inverse() natively
+  // (emitted by an explicit name override). The gate accepts it on portability 'gpu-tolerant'.
+  inverse:     { name: 'inverse',     profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
+  distance:    { name: 'distance',    profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'distance' },
+  reflect:     { name: 'reflect',     profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2], lowerName: 'reflect' },
+  refract:     { name: 'refract',     profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], lowerName: 'refract' },
+  faceforward: { name: 'faceforward', profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3] },
+
+  // --- quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w; no distinct quat value type) ---
+  // No lowerName: every q* op is HAND-EMITTED inline (or via a small prelude helper) on all targets —
+  // there is no native quaternion type or builtin in WGSL/GLSL. The gate accepts them on 'gpu-tolerant'.
+  qmul:       { name: 'qmul',       profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2] },
+  qconj:      { name: 'qconj',      profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
+  qinvert:    { name: 'qinvert',    profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
+  qaxisangle: { name: 'qaxisangle', profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2] },
+  qrotate:    { name: 'qrotate',    profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2] },
+  qslerp:     { name: 'qslerp',     profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3] },
+  qmat:       { name: 'qmat',       profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
 
   // --- transcendentals (implemented; native-lowerable to a shader builtin) ---
   sin:         { name: 'sin',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'sin' },
   cos:         { name: 'cos',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'cos' },
+  tan:         { name: 'tan',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'tan' },
+  sinh:        { name: 'sinh',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'sinh' },
+  cosh:        { name: 'cosh',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'cosh' },
+  tanh:        { name: 'tanh',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'tanh' },
+  asin:        { name: 'asin',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'asin' },
+  acos:        { name: 'acos',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'acos' },
+  atan:        { name: 'atan',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'atan' },
+  atan2:       { name: 'atan2',       profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [2, 2] },
   exp:         { name: 'exp',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'exp' },
+  exp2:        { name: 'exp2',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'exp2' },
   log:         { name: 'log',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'log' },
+  log2:        { name: 'log2',        profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1], lowerName: 'log2' },
+  inverseSqrt: { name: 'inverseSqrt', profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [1, 1] },
   fract:       { name: 'fract',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], lowerName: 'fract' },
+  degrees:     { name: 'degrees',     profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], lowerName: 'degrees' },
+  radians:     { name: 'radians',     profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], lowerName: 'radians' },
+  trunc:       { name: 'trunc',       profile: 'core', portability: 'exact',        takesClosure: false, arity: [1, 1], lowerName: 'trunc' },
   step:        { name: 'step',        profile: 'core', portability: 'exact',        takesClosure: false, arity: [2, 2], lowerName: 'step' },
   mix:         { name: 'mix',         profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], lowerName: 'mix' },
   smoothstep:  { name: 'smoothstep',  profile: 'core', portability: 'gpu-tolerant', takesClosure: false, arity: [3, 3], lowerName: 'smoothstep' },

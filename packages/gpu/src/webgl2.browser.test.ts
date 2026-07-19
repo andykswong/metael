@@ -193,10 +193,34 @@ describe('@metael/gpu — real WebGL2 dispatch (Chromium)', () => {
     expect((settled.value as number[] | null)?.[9]).toBeCloseTo(1, 3);  // sqrt(9-8)=1 still correct
   });
 
-  it('the emitted GLSL actually COMPILES + links on a real WebGL2 context (catches type errors a substring test misses)', async () => {
+  it('a rank-3 kernel matches the oracle on WebGL2 (the flat-index → (x,y,z) decomposition round-trips)', async () => {
+    const host = new RuntimeReactiveHost();
+    // A distinct value per (x,y,z) cell (x*100 + y*10 + z). WebGL2 has no 3-D render target: the shader reads
+    // the FLAT texel index and decomposes it back to (x,y,z) via z=_flat%D, y=(_flat/D)%H, x=_flat/(H*D). If
+    // that decomposition (or the backend's _cols=H/_deps=D uniforms) were wrong the cells would scramble →
+    // match.ok fails. The dims [W=2, H=3, D=4] are all distinct so a swapped axis can't accidentally agree.
+    const kernel = kernelOf(`component k(x, y, z) { return x * 100 + y * 10 + z } k`, host);
+    const engine = new GpuEngine(host, deps);
+    const cfg = { output: [2, 3, 4], backend: 'webgl2' as const, verify: true };
+    change(() => { engine.gpu(kernel, cfg); });
+    await new Promise((r) => setTimeout(r, 300));
+    let settled!: ReturnType<GpuEngine['gpu']>;
+    change(() => { settled = engine.gpu(kernel, cfg); });
+    expect(settled.pending).toBe(false);
+    expect(settled.backend).toBe(webgl2Live ? 'webgl2' : 'cpu');
+    expect(settled.match?.ok).toBe(true);   // the decomposed (x,y,z) coords ≡ the interpreter oracle
+    const out = settled.value as number[] | null;
+    // Flat index = (x*H + y)*D + z with H=3, D=4. Cell (1,2,3) → (1*3+2)*4+3 = 23 → value 1*100+2*10+3 = 123.
+    expect(out?.[23]).toBeCloseTo(123, 3);
+    expect(out?.[0]).toBeCloseTo(0, 3);     // cell (0,0,0)
+    // Cell (0,1,0) → (0*3+1)*4+0 = 4 → value 0*100+1*10+0 = 10 (proves y is decoded, not folded into x/z).
+    expect(out?.[4]).toBeCloseTo(10, 3);
+  });
+
+  it('the emitted GLSL actually COMPILES + links on a real WebGL2 context (catches type errors a substring test misses)', async (ctx) => {
     const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
     const gl = (canvas as HTMLCanvasElement).getContext('webgl2') as WebGL2RenderingContext | null;
-    if (!gl || !gl.getExtension('EXT_color_buffer_float')) { expect(true).toBe(true); return; }   // no WebGL2 float → skip
+    if (!gl || !gl.getExtension('EXT_color_buffer_float')) return ctx.skip('no WebGL2 context, or no EXT_color_buffer_float');
     const host = new RuntimeReactiveHost();
     const kernel = kernelOf(`
       const N = 8

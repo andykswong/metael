@@ -31,7 +31,7 @@ export function buildBindingTable(kernel: UserFn, freeNames: ReadonlySet<string>
     if (value === undefined) continue;
     const d = descriptorOf(value);
     if (d?.lower?.access === 'linear-buffer') { byName.set(name, { role: 'buffer', name, value, lower: d.lower }); continue; }
-    if (d?.lower?.access === 'value' && (d.lower.shape === 'vecN' || d.lower.shape === 'matNxN')) { byName.set(name, { role: 'uniform', name, value, lower: d.lower }); continue; }
+    if (d?.lower?.access === 'value' && (d.lower.shape === 'vecN' || d.lower.shape === 'matMxN')) { byName.set(name, { role: 'uniform', name, value, lower: d.lower }); continue; }
     if (typeof value === 'number') { byName.set(name, { role: 'scalar', name, value }); continue; }
     if (isUserFn(value)) { byName.set(name, { role: 'callee', name, fn: value }); continue; }
     // any other value (string, normal array/object, closure) is left absent → the gate rejects it.

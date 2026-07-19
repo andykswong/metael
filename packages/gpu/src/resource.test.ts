@@ -69,6 +69,27 @@ describe('gpu reactive resource (CPU backend, node)', () => {
     expect(plain.match).toBeNull();          // the no-flags dispatch never ran the oracle
     expect(verified.match?.ok).toBe(true);   // the verify:true dispatch re-ran + the oracle populated match
   });
+  it('a rank-3 kernel on the CPU floor computes per-(x,y,z) cells + verifies (row-major flat decomposition)', async () => {
+    // The CPU backend + the verify oracle both reconstruct (x,y,z) from a flat index via the shared row-major
+    // flatten (flat = (x*H + y)*D + z). A distinct value per cell (x*100 + y*10 + z) with all-distinct dims
+    // [W=2, H=3, D=4] means a swapped/collapsed axis would scramble the output → verify would fail.
+    const host = new RuntimeReactiveHost();
+    const kernel = kernelOf('component k(x, y, z) { return x * 100 + y * 10 + z }\nk', host);
+    const engine = new GpuEngine(host, cpuOnlyDeps);
+    const cfg = { output: [2, 3, 4], backend: 'cpu' as const, verify: true };
+    change(() => { engine.gpu(kernel, cfg); });
+    await new Promise((r) => setTimeout(r, 30));
+    let settled!: ReturnType<GpuEngine['gpu']>;
+    change(() => { settled = engine.gpu(kernel, cfg); });
+    expect(settled.pending).toBe(false);
+    expect(settled.backend).toBe('cpu');
+    expect(settled.match?.ok).toBe(true);   // the CPU coords ≡ the oracle's decomposed coords
+    const out = settled.value as number[];
+    // flat = (x*H + y)*D + z with H=3, D=4. (1,2,3) → (1*3+2)*4+3 = 23 → 123; (0,1,0) → 4 → 10.
+    expect(out[23]).toBe(123);
+    expect(out[0]).toBe(0);
+    expect(out[4]).toBe(10);
+  });
   it('a non-lowerable kernel is terminal (not pending, has reasons)', () => {
     const host = new RuntimeReactiveHost();
     const kernel = kernelOf(`component k(i) { return "x" + i }\nk`, host);
