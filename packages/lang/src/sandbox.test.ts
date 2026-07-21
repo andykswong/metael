@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram } from './evaluate.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 
 // The standing sandbox-escape gate. Proves DSL source cannot reach host internals/globals, cannot
 // mutate injected data, and cannot bypass the budgets — across EVERY access path, including the new
 // builtins' argument/callback paths. Any failure here is a P0.
 const run = (src: string, data?: unknown) =>
-  evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
 const codes = (src: string, data?: unknown) => run(src, data).diagnostics.map((d) => d.code);
 
 describe('sandbox: prototype-chain / forbidden-key escapes (every access path)', () => {
@@ -29,13 +31,13 @@ describe('sandbox: prototype-chain / forbidden-key escapes (every access path)',
     });
   }
   it('a spread-copied forbidden key does not leak onto the result', () => {
-    const r = run('const evil = fromEntries([["ok", 1]]); const merged = { ...evil }; keys(merged);');
+    const r = run('const evil = object([["ok", 1]]); const merged = { ...evil }; keys(merged);');
     expect(r.value).toEqual(['ok']);
   });
-  it('fromEntries rejects a forbidden key', () => {
-    const r = run('fromEntries([["__proto__", 1], ["ok", 2]]);');
+  it('object rejects a forbidden key AND builds a null-prototype record (no inherited proto/constructor/toString)', () => {
+    const r = run('object([["__proto__", 1], ["ok", 2]]);');
     expect(r.value).toEqual({ ok: 2 });
-    expect(Object.getPrototypeOf(r.value as object)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(r.value as object)).toBe(null);
   });
 });
 
@@ -78,7 +80,7 @@ describe('sandbox: globals + dynamic code are unreachable', () => {
 
 describe('sandbox: budgets cannot be bypassed (incl. via new builtins)', () => {
   const withBudget = (src: string, maxSteps = 5000) =>
-    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps }).diagnostics.map((d) => d.code);
+    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps, builtins: [MATH_BUILTINS, STD_BUILTINS] }).diagnostics.map((d) => d.code);
   it('a sort comparator that recurses trips ML-LANG-BUDGET (depth or steps), never hangs', () => {
     expect(withBudget('function rec(n) { rec(n) } sort([1,2,3], (a, b) => rec(a));', 5000)).toContain('ML-LANG-BUDGET');
   });
@@ -135,10 +137,10 @@ describe('sandbox: the custom-value-type protocol cannot be abused (typed arrays
   // A component-scoped run — a bare top-level `let` needs insideComponent (else ML-LANG-LET-SCOPE),
   // so the alias / mutable-buffer cases below can declare `let b = a`.
   const runIC = (src: string) =>
-    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), insideComponent: true });
+    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), insideComponent: true, builtins: [MATH_BUILTINS, STD_BUILTINS] });
   // A tight-budget run so an unbounded generator/loop trips the STEP budget quickly (never hangs).
   const codesBudget = (src: string, maxSteps = 5000) =>
-    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps }).diagnostics.map((d) => d.code);
+    evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps, builtins: [MATH_BUILTINS, STD_BUILTINS] }).diagnostics.map((d) => d.code);
 
   // (1) A program cannot FORGE a descriptor — a plain object shaped like a buffer is NOT a custom type.
   //     The DESCRIPTOR/GENERATION/FROZEN symbols are module-private and there is no builtin that reads them.

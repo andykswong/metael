@@ -4,7 +4,7 @@
 // (#source-slot). Both are capabilities the sandboxed language leaves a "hole" for — the playground because it
 // needs host APIs, the source viewer as a deliberate demo of "bring your own vocabulary" (the host registers
 // the rendering of a slot the language defines).
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
 import { el } from '../ui.ts';
 import { createPlayground } from '../playground/create.ts';
 import { tokensToSegments } from '../playground/highlight.ts';
@@ -12,7 +12,7 @@ import { LANDING_SOURCE } from './landing-source.ts';
 
 export function renderLanding(root: Element): void {
   // Mount the static chrome as a real metael program.
-  mount(LANDING_SOURCE, root, {});
+  renderSource(LANDING_SOURCE, root, {});
 
   // Fill the playground slot.
   const playSlot = root.querySelector('#hero-slot');

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from '@metael/lang';
@@ -7,7 +8,7 @@ import { emitGlsl } from './emit-glsl.ts';
 
 function kernelOf(src: string) {
   const host = new PlainStorageHost();
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('kernel');
   return { fn: res.value as UserFn, host };
 }
@@ -148,5 +149,84 @@ describe('GLSL-ES-3.0 emitter (compute-via-fragment)', () => {
     const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
     expect(glsl).toContain('_deps'); // 3rd-dim uniform
     expect(glsl).toMatch(/float .* = float\(.*% _deps\)/); // z = _flat % D
+  });
+
+  // ─── The structured constructors + column access (native to GLSL) ───
+  it('vecN composition passes vec args through natively (vec3(vec2(..), ..))', () => {
+    const { fn, host } = kernelOf('component k(i) { return vec3(vec2(i, i * 2), i + 7) } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host, 3).bindings, 'f32', 3);
+    expect(glsl).toContain('vec3(vec2(');
+  });
+  it('matMxN from column vecs emits the native column constructor (mat2(vec2(..), vec2(..)))', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat2(vec2(1, 2), vec2(3, 4)) return (m * vec2(i, i)).x } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(glsl).toContain('mat2 m = mat2(vec2(1.0, 2.0), vec2(3.0, 4.0))');   // the mat local declared mat2 + column ctor
+  });
+  it('a mat column read m[i] DECLARES the local as vecR (a float declaration would be a compile error)', () => {
+    // The glslType fix: `const c = m[0]` over a mat4 must declare `vec4 c`, not `float c`.
+    const { fn, host } = kernelOf('component k(i) { const m4 = mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 11, 12, 1) const c = m4[0] return c.x } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(glsl).toMatch(/vec4 c = m4\[int\(roundEven\(0\.0\)\)\];/);   // vec4, NOT float
+    expect(glsl).not.toMatch(/float c = m4\[/);
+  });
+  it('a mat3 column read into a vec3 output DECLARES the vec3 temp (m[i].xyz → vec3)', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4, 5, 6, 7, 8, 9) return m[1].xyz } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host, 3).bindings, 'f32', 3);
+    expect(glsl).toMatch(/vec3 _r0 = m\[int\(roundEven\(1\.0\)\)\]\.xyz;/);
+  });
+  it('a mat column divide emits the NATIVE componentwise divide, not a scalar ternary-guard (a compile error)', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4, 5, 6, 7, 8, 9) return (m[1] / 2).x } k');
+    const glsl = emitGlsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(glsl).toContain('(m[int(roundEven(1.0))] / 2.0).x');
+    expect(glsl).not.toMatch(/2\.0 == 0\.0 \? 0\.0 : m\[int/);   // no scalar guard over the column vec
+  });
+
+  // ─── newly-lowered scalar builtins: mod (native, already floored in GLSL) + the inverse hyperbolics ───
+  it('lowers mod to the native GLSL mod (already floored — sign follows the divisor), not a truncated form', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return mod(a[i], 3) }\nk');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).toContain('mod(');                    // native GLSL mod IS floored — no hand-emit
+    expect(glsl).not.toMatch(/trunc\(/);               // NOT the WGSL-style x - y*floor(x/y)/trunc form
+  });
+  it('lowers asinh/acosh/atanh to the native GLSL ES 3.00 builtins of the same name (via lowerName)', () => {
+    for (const name of ['asinh', 'acosh', 'atanh']) {
+      const { fn, host } = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return ${name}(a[i]) }\nk`);
+      expect(emitGlsl(fn, gateKernel(fn, host).bindings, 'f32')).toContain(`${name}(`);
+    }
+  });
+
+  // ─── the 32-bit bit ops: GLSL ES 3.00 lacks bitCount/bitfieldReverse (an ES 3.10 feature), so both lower via
+  //     an injected PRELUDE HELPER over uint + the bitwise operators (mirroring the _qslerp/_qmat prelude pattern) ───
+  it('lowers countOneBits via an injected _countOneBits prelude helper (SWAR popcount over uint), TRUNCATING the input (not round)', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return countOneBits(a[i]) }\nk');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).toContain('float _countOneBits(float x)');   // the helper is injected
+    expect(glsl).toMatch(/_countOneBits\(/);                   // and called at the site
+    expect(glsl).not.toContain('bitCount(');                   // never the ES-3.10-only builtin
+    expect(glsl).toContain('uint v = uint(int(x));');          // truncate toward zero (== `>>>0`), NOT roundEven
+    expect(glsl).not.toContain('roundEven(x)');                // never rounds the bit-op input
+  });
+  it('lowers reverseBits via an injected _reverseBits prelude helper (32-bit reverse over uint), TRUNCATING the input (not round)', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return reverseBits(a[i]) }\nk');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).toContain('float _reverseBits(float x)');     // the helper is injected
+    expect(glsl).toMatch(/_reverseBits\(/);                    // and called at the site
+    expect(glsl).not.toContain('bitfieldReverse(');            // never the ES-3.10-only builtin
+    expect(glsl).toContain('uint v = uint(int(x));');          // truncate toward zero (== `>>>0`), NOT roundEven
+    expect(glsl).not.toContain('roundEven(x)');
+  });
+  it('injects a bit-op prelude helper ONLY when the body references it (none otherwise)', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return a[i] + 1 }\nk');
+    const glsl = emitGlsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(glsl).not.toContain('_countOneBits');
+    expect(glsl).not.toContain('_reverseBits');
+  });
+});
+
+describe('GLSL emitter — loud failure on an un-lowerable builtin (no silent-0 placeholder)', () => {
+  it('throws when a head with no shader lowering reaches the emitter', () => {
+    const { fn, host } = kernelOf('component k(i) { return (perspective(1, 1, 1, 2) * vec4(1, 0, 0, 0)).x } k');
+    const { bindings } = gateKernel(fn, host, 1);
+    expect(() => emitGlsl(fn, bindings, 'f32', 1)).toThrow(/no GLSL lowering for builtin 'perspective'/);
   });
 });

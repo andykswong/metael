@@ -6,7 +6,7 @@ import { render } from './render.ts';
 
 describe('render() — headless (no container): pass driving + handle shape', () => {
   it('builds a tree from a producer and exposes it via tree() with keys assigned', () => {
-    const handle = render(() => h('div', { id: 'root' }, 'hi'), undefined, {});
+    const handle = render(() => h('div', { id: 'root' }, 'hi'), undefined);
     const tree = handle.tree();
     expect(tree?.tag).toBe('div');
     expect(tree?.key).toBe('/div#0');       // kind-namespaced (see keying.ts)
@@ -16,7 +16,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
 
   it('a structural signal read in the producer re-runs the pass (passCount increments)', () => {
     const show = signal(true);
-    const handle = render(() => (show.get() ? h('div', {}, 'A') : h('p', {}, 'B')), undefined, {});
+    const handle = render(() => (show.get() ? h('div', {}, 'A') : h('p', {}, 'B')), undefined);
     expect(handle.passCount()).toBe(1);
     expect(handle.tree()?.tag).toBe('div');
     // structural change: the producer reads show.get() at the top level → the tracked pass re-runs
@@ -28,7 +28,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
 
   it('a value-only signal read (inside a thunk) patches the node WITHOUT re-running the pass', () => {
     const label = signal('x');
-    const handle = render(() => h('span', {}, () => label.get()), undefined, {});
+    const handle = render(() => h('span', {}, () => label.get()), undefined);
     expect(handle.passCount()).toBe(1);
     // the reactive text is a #text child of the span; the leaf effect seeds its .text before build
     expect(handle.tree()?.children[0]?.text).toBe('x');
@@ -42,7 +42,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
 
   it('unmount() stops the pass so later writes do not re-run it', () => {
     const s = signal(0);
-    const handle = render(() => { s.get(); return h('div', {}, 'x'); }, undefined, {});
+    const handle = render(() => { s.get(); return h('div', {}, 'x'); }, undefined);
     expect(handle.passCount()).toBe(1);
     handle.unmount();
     handle.setState(() => s.set(1));
@@ -50,7 +50,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
   });
 
   it('tolerates an empty root: a producer returning null yields tree()===null (no crash)', () => {
-    const handle = render(() => null, undefined, {});
+    const handle = render(() => null, undefined);
     expect(handle.tree()).toBeNull();
     handle.unmount();
   });
@@ -60,7 +60,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
     // The JSX-conditional idiom at the top level: a false branch is a hole, not a crash.
     const handle = render(
       () => [show.get() && h('p', {}, 'banner'), h('span', {}, 'body')],
-      undefined, {},
+      undefined,
     );
     // only the span survives; it is the first (and only) real node
     expect(handle.tree()?.tag).toBe('span');
@@ -76,7 +76,7 @@ describe('render() — headless (no container): pass driving + handle shape', ()
     const fn = (): void => { fired++; };
     // Pass 1: the button carries onClick; pass 2 (mode=false): the same button (stable key) carries NO
     // handlers. The registry must be rebuilt fresh each pass so the stale onClick does not survive.
-    const handle = render(() => h('button', mode.get() ? { onClick: fn } : {}, 'x'), undefined, {});
+    const handle = render(() => h('button', mode.get() ? { onClick: fn } : {}, 'x'), undefined);
     expect(handle.hasHandler('/button#0', 'onClick')).toBe(true);
     handle.invokeHandler('/button#0', 'onClick', {});
     expect(fired).toBe(1);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mount } from './mount.ts';
+import { renderSource } from './lang/render-source.ts';
 
 describe('a reactive-text leaf effect survives a structural re-derive (reconcile)', () => {
   it('a button whose text reads a `let` keeps updating after a sibling structural change', () => {
@@ -16,7 +16,7 @@ describe('a reactive-text leaf effect survives a structural re-derive (reconcile
   }
 }`;
     const c = document.createElement('div'); document.body.appendChild(c);
-    const h = mount(src, c, {});
+    const h = renderSource(src, c, {});
     const N = () => c.querySelector('.n')?.textContent;
     (c.querySelector('.n') as HTMLButtonElement).click();       // n -> 1 (leaf, pre-structural)
     expect(N()).toBe('n=1');
@@ -44,7 +44,7 @@ describe('a reactive-text leaf effect survives a structural re-derive (reconcile
   }
 }`;
     const c = document.createElement('div'); document.body.appendChild(c);
-    const h = mount(src, c, {});
+    const h = renderSource(src, c, {});
     const clickBtn = () => Array.from(c.querySelectorAll('button')).find((b) => b.textContent === 'click') as HTMLButtonElement;
     clickBtn().click();                                          // n -> 1 (attr leaf, pre-structural)
     expect(clickBtn().className).toBe('n-1');

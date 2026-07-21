@@ -6,7 +6,10 @@
   "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./lang": { "types": "./dist/lang/index.d.ts", "import": "./dist/lang/index.js" }
+  },
   "files": ["/dist"],
   "engines": { "node": ">=24.0" },
   "scripts": {
@@ -40,5 +43,9 @@
   "dependencies": {
     "@metael/lang": "^0.1.0",
     "@metael/runtime": "^0.1.0"
+  },
+  "devDependencies": {
+    "@metael/math": "^0.1.0",
+    "@metael/std": "^0.1.0"
   }
 }

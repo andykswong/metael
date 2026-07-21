@@ -5,6 +5,8 @@
 // for ==/!=), so a dividing/comparing kernel stays bit-identical to the oracle.
 import type { UserFn, Expr, Stmt, ReactiveHost, TypeDescriptor, HostEnvironment } from '@metael/lang';
 import { descriptorOf, NOT_HANDLED, MAX_RANGE, makeCallable } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import * as core from '@metael/math';
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
 
@@ -20,7 +22,10 @@ const VEC_NAMES = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4', 'dot'
   'qmul', 'qconj', 'qinvert', 'qaxisangle', 'qrotate', 'qslerp', 'qmat',
   'min', 'max', 'abs', 'sign', 'floor', 'ceil', 'round', 'clamp', 'sqrt', 'pow', 'sin', 'cos', 'exp', 'log', 'fract', 'step', 'mix', 'smoothstep',
   'tan', 'sinh', 'cosh', 'tanh', 'asin', 'acos', 'atan', 'atan2', 'exp2', 'log2', 'inverseSqrt',
-  'degrees', 'radians', 'trunc']);
+  'degrees', 'radians', 'trunc',
+  // The componentwise SCALAR-map builtins that also promote over a vec arg (like sin/cos): a vec-arg use must
+  // delegate WHOLE to the interpreter (the hand-walk's scalar applyBuiltin can't map over a vec's components).
+  'mod', 'asinh', 'acosh', 'atanh', 'countOneBits', 'reverseBits']);
 
 type Scope = Map<string, unknown>;
 
@@ -30,6 +35,11 @@ type Scope = Map<string, unknown>;
 // bit-identical to the interpreter both when it flows onward (…+1 → NaN) and when it is the cell value (→0).
 const BAD: readonly unknown[] = Object.freeze([]);
 
+/** Compile the kernel AST into an eval-free JS closure that computes one output cell from its thread
+ *  coordinates. The returned function takes a cell's `coords` and returns its `comps` output components
+ *  (a single-element array for a scalar output). Buffer/vec access + operators delegate to the value
+ *  descriptors the interpreter oracle uses, so the CPU backend and the oracle are identical by construction;
+ *  a vec/builtin-bearing kernel delegates WHOLE to the interpreter (authoritative for vec math). */
 export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHost, comps = 1): (coords: readonly number[]) => number[] {
   // Extract a cell's `comps` components from an interpreter return value: a scalar wrapped as `[Number(v)]`
   // for comps=1; a vecN read component-wise (x,y,z,w) via the descriptor's getMember for comps>1 — the
@@ -50,7 +60,7 @@ export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHo
   if (bodyReferencesAny(kernel, VEC_NAMES)) {
     const declineEnv: HostEnvironment = { resolveCall: () => ({ handled: false }) };
     return (coords: readonly number[]): number[] => {
-      const call = makeCallable(kernel, { host, env: declineEnv, maxSteps: 1_000_000 });
+      const call = makeCallable(kernel, { host, env: declineEnv, maxSteps: 1_000_000, builtins: [MATH_BUILTINS] });
       const r = call(...coords);
       if (comps === 1) return [typeof r === 'number' ? r : Number(r ?? 0)];
       return extractComps(r);
@@ -87,8 +97,23 @@ export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHo
     }
   };
   const truthyE = (v: unknown): boolean => { const d = descriptorOf(v); if (d?.truthy) return d.truthy(v); return !(v === false || v === null || v === undefined || v === 0 || v === '' || (typeof v === 'number' && Number.isNaN(v))); };
-  const getIndexSafe = (obj: unknown, key: unknown): unknown => { const d = descriptorOf(obj); if (!d?.getIndex) return null; try { const res = d.getIndex(obj, key as number); return res === NOT_HANDLED ? null : res; } catch { return null; } };
-  const getMemberSafe = (obj: unknown, prop: string): unknown => { const d = descriptorOf(obj); if (!d?.getMember) return null; try { const res = d.getMember(obj, prop); return res === NOT_HANDLED ? null : res; } catch { return null; } };
+  const getIndexSafe = (obj: unknown, key: unknown): unknown => {
+    const d = descriptorOf(obj);
+    if (d?.getIndex) { try { const res = d.getIndex(obj, key as number); return res === NOT_HANDLED ? null : res; } catch { return null; } }
+    // A PLAIN metael array buffer input (no descriptor): mirror the interpreter's readMember — a valid,
+    // in-range integer index returns the element (?? null); anything else (OOB / non-integer) reads as null
+    // (the interpreter errors → null), so this hand-walk stays IDENTICAL to the interpreter oracle.
+    if (Array.isArray(obj) && typeof key === 'number' && Number.isInteger(key) && key >= 0 && key < obj.length) return obj[key] ?? null;
+    return null;
+  };
+  const getMemberSafe = (obj: unknown, prop: string): unknown => {
+    const d = descriptorOf(obj);
+    if (d?.getMember) { try { const res = d.getMember(obj, prop); return res === NOT_HANDLED ? null : res; } catch { return null; } }
+    // A PLAIN metael array buffer input: `.length` is the only lowerable member read (the gate allows just
+    // `buffer.length` + vec swizzles); mirror the interpreter (the element count).
+    if (Array.isArray(obj) && prop === 'length') return obj.length;
+    return null;
+  };
 
   const evalE = (e: Expr, scope: Scope): unknown => {
     switch (e.kind) {
@@ -173,6 +198,19 @@ export function emitCpu(kernel: UserFn, bindings: BindingTable, host: ReactiveHo
       case 'acos': { const x = n(a[0]); return (guard(x) || x < -1 || x > 1) ? BAD : Math.acos(x); }
       case 'atan': { const x = n(a[0]); return guard(x) ? BAD : Math.atan(x); }
       case 'atan2': { const y = n(a[0]), x = n(a[1]); return guard(y, x) ? BAD : Math.atan2(y, x); }
+      // Inverse hyperbolics: raw Math.* result (NaN out-of-domain for acosh x<1 / atanh |x|>=1), matching the
+      // interpreter's un-guarded scalar path + the native shader — a NaN-derived ARG still fails closed to BAD.
+      case 'asinh': { const x = n(a[0]); return guard(x) ? BAD : Math.asinh(x); }
+      case 'acosh': { const x = n(a[0]); return guard(x) ? BAD : Math.acosh(x); }
+      case 'atanh': { const x = n(a[0]); return guard(x) ? BAD : Math.atanh(x); }
+      // Floored modulo (sign follows the divisor — core.mod, NOT JS %). A NaN-derived arg → BAD.
+      case 'mod': { const x = n(a[0]), y = n(a[1]); return guard(x, y) ? BAD : core.mod(x, y); }
+      // Bit ops (32-bit unsigned): the CPU-emit leg of the tri-target lowering — CPU-emit ≡ interpreter by
+      // delegating to the core impls, which treat the arg as x>>>0 = TRUNCATE toward zero then wrap mod 2^32
+      // (matching the interpreter + the WGSL `bitcast<u32>(i32(x))` / GLSL `uint(int(x))` truncating coercion —
+      // NOT a round). A NaN/null-derived arg fails closed to BAD (a 0 output), like the other scalar ops.
+      case 'countOneBits': { const x = n(a[0]); return guard(x) ? BAD : core.countOneBits(x); }
+      case 'reverseBits': { const x = n(a[0]); return guard(x) ? BAD : core.reverseBits(x); }
       case 'exp': { const x = n(a[0]); return guard(x) ? BAD : Math.exp(x); }
       case 'exp2': { const x = n(a[0]); return guard(x) ? BAD : Math.pow(2, x); }
       case 'log': { const x = n(a[0]); return (guard(x) || x <= 0) ? BAD : Math.log(x); }

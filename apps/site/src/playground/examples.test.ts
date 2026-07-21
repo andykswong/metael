@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
 import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 import { EXAMPLES, DEFAULT_EXAMPLE_ID, exampleById } from './examples.ts';
 import { GpuUiEnv, runComputeSettled } from './targets.ts';
 
@@ -39,7 +41,7 @@ describe('curated examples', () => {
 
   it('every UI example derives with zero diagnostics (headless)', () => {
     for (const e of EXAMPLES.filter((x) => x.target === 'ui')) {
-      const h = mount(e.source, undefined, { data: e.data });
+      const h = renderSource(e.source, undefined, { data: e.data, builtins: [MATH_BUILTINS, STD_BUILTINS] });
       expect(h.diagnostics, `${e.id} should derive clean — got ${JSON.stringify(h.diagnostics)}`).toEqual([]);
       expect(h.tree(), `${e.id} should produce a tree`).not.toBeNull();
     }
@@ -55,7 +57,7 @@ describe('curated examples', () => {
     // the walk-effect before the deferred dispatch microtask fires, so this synchronous check never re-derives.
     for (const e of EXAMPLES.filter((x) => x.target === 'gpu')) {
       const env = new GpuUiEnv();
-      const h = mount(e.source, undefined, { data: e.data, envFactory: () => env });
+      const h = renderSource(e.source, undefined, { data: e.data, envFactory: () => env, builtins: [MATH_BUILTINS, STD_BUILTINS] });
       expect(h.diagnostics, `${e.id} should derive clean — got ${JSON.stringify(h.diagnostics)}`).toEqual([]);
       expect(h.tree(), `${e.id} should produce a tree`).not.toBeNull();
       h.unmount();
@@ -68,7 +70,7 @@ describe('curated examples', () => {
     // are proven clean on the settled compute path below; the plain-env sweep covers the rest.
     for (const e of EXAMPLES.filter((x) => x.target === 'compute' && !usesGpuHead(x.source))) {
       const res = evaluateProgram(e.source, {
-        host: new PlainStorageHost(), env: new RecordingHostEnv(), data: e.data,
+        host: new PlainStorageHost(), env: new RecordingHostEnv(), data: e.data, builtins: [MATH_BUILTINS, STD_BUILTINS],
       });
       expect(res.diagnostics, `${e.id} should evaluate clean — got ${JSON.stringify(res.diagnostics)}`).toEqual([]);
     }

@@ -11,35 +11,89 @@ import type { GenerationRef } from './ports.ts';
  *  arithmetic/relational op → ML-LANG-OP-UNSUPPORTED. (A throw or `null` would be ambiguous — null is
  *  a legal metael value — so a dedicated sentinel is required.) */
 export const NOT_HANDLED: unique symbol = Symbol('ml.notHandled');
+/** The type of the {@link NOT_HANDLED} sentinel — the return type of an operator/accessor handler that
+ *  declines to handle a given op/operand combination, leaving the interpreter to apply its uniform
+ *  fallback. */
 export type NotHandled = typeof NOT_HANDLED;
 
+/** The element kind of a lowered numeric type's backing store: 32-bit float, 64-bit float, 32-bit
+ *  signed int, or 32-bit unsigned int. Determines the emitted numeric width. */
 export type LowerElement = 'f32' | 'f64' | 'i32' | 'u32';
+/** The structural shape of a lowered type: a `scalar`, an N-wide `vecN`, or an M×N `matMxN`. */
 export type LowerShape = 'scalar' | 'vecN' | 'matMxN';
+/** How a lowered value is accessed: a single `value` (a scalar/vec/mat register), or a
+ *  `linear-buffer` (an indexable element store). */
 export type LowerAccess = 'value' | 'linear-buffer';
 
-/** A neutral, target-agnostic operator lowering — NOT shader text. A compile consumer renders it to
- *  WGSL/GLSL/CPU. Keyed on the language's BinOp (plus 'neg') via Lowering.ops. */
+/** A neutral, target-agnostic operator lowering — NOT shader text. A compile consumer renders it to a
+ *  concrete backend (e.g. WGSL/GLSL/CPU). Keyed on the language's {@link BinOp} (plus `'neg'`) via
+ *  {@link Lowering.ops}, so a descriptor declares how each of its operators maps to a target op without
+ *  the emitter hardcoding the type. */
 export type LowerOp =
-  | { readonly kind: 'componentwise'; readonly op: 'add' | 'sub' | 'mul' | 'div' }
-  | { readonly kind: 'unary'; readonly op: 'neg' }
-  | { readonly kind: 'scale' }
-  | { readonly kind: 'dot' }
-  | { readonly kind: 'matmul' }
-  | { readonly kind: 'builtin-call'; readonly name: string };
+  | {
+      /** Discriminant: a per-element binary op applied component-by-component (e.g. `vec + vec`). */
+      readonly kind: 'componentwise';
+      /** Which componentwise arithmetic op to apply. */
+      readonly op: 'add' | 'sub' | 'mul' | 'div';
+    }
+  | {
+      /** Discriminant: unary negation of every component. */
+      readonly kind: 'unary';
+      /** The unary op — always negation. */
+      readonly op: 'neg';
+    }
+  /** A scalar-times-value scale (e.g. `2 * vec`). */
+  | {
+      /** Discriminant: a scalar-times-value scale (e.g. `2 * vec`). */
+      readonly kind: 'scale';
+    }
+  | {
+      /** Discriminant: a vector dot product. */
+      readonly kind: 'dot';
+    }
+  | {
+      /** Discriminant: a matrix (or matrix–vector) multiply. */
+      readonly kind: 'matmul';
+    }
+  | {
+      /** Discriminant: a call to a named target-side builtin function. */
+      readonly kind: 'builtin-call';
+      /** The name of the target-side builtin to call. */
+      readonly name: string;
+    };
 
 /** A domain-agnostic description of how a type is STORED/ACCESSED and how its operators/members map to
- *  target ops. Complete: a compile consumer never hardcodes a type — a new numeric type is a library
- *  (a descriptor with `ops` + `members`) needing zero emitter edits. */
+ *  target ops. Complete on its own: a compile consumer never hardcodes a type — a new numeric type is a
+ *  library (a descriptor whose {@link Lowering} carries `ops` + `members`) that needs zero emitter edits.
+ *
+ *  @remarks Attached to a {@link TypeDescriptor} via {@link TypeDescriptor.lower}. */
 export interface Lowering {
+  /** The element kind of the backing store ({@link LowerElement}). */
   readonly element: LowerElement;
+  /** The structural shape — scalar, vector, or matrix ({@link LowerShape}). */
   readonly shape: LowerShape;
-  readonly n?: number;        // scalar-buffer element count (unchanged use)
-  readonly rows?: number;     // vec/mat rows (a vec is rows×1)
-  readonly cols?: number;     // vec/mat cols (a vec is 1)
+  /** Scalar-buffer element count (the number of elements in a linear buffer). */
+  readonly n?: number;
+  /** Row count for a vector/matrix (a vector is `rows`×1). */
+  readonly rows?: number;
+  /** Column count for a matrix (a vector is 1 column). */
+  readonly cols?: number;
+  /** Whether a value of this type can be placed in GPU storage (drives whether a compile consumer may
+   *  keep it resident on-device). */
   readonly gpuStorable: boolean;
+  /** How the value is accessed — a single value or a linear buffer ({@link LowerAccess}). */
   readonly access: LowerAccess;
+  /** The per-operator lowerings, keyed by {@link BinOp} (plus `'neg'`). A missing key means the
+   *  operator has no target lowering for this type. */
   readonly ops?: Readonly<Partial<Record<string, LowerOp>>>;
-  readonly members?: { readonly kind: 'swizzle' | 'component'; readonly of: string };
+  /** How member access lowers: a `swizzle` (multi-component, e.g. `v.xy`) or a single `component`
+   *  read, plus `of` — the underlying element/type name the members project from. */
+  readonly members?: {
+    /** Whether member access is a multi-component `swizzle` or a single `component` read. */
+    readonly kind: 'swizzle' | 'component';
+    /** The underlying element/type name the members project from. */
+    readonly of: string;
+  };
 }
 
 /** How the interpreter treats a value of a custom type. Handlers are built-in host code (typed arrays,
@@ -47,22 +101,82 @@ export interface Lowering {
  *  (the interpreter checks and emits ML-LANG-IMMUTABLE for a const value). An operator handler returns
  *  NOT_HANDLED for an op/combination it does not define. */
 export interface TypeDescriptor {
+  /** The type's display name, used in diagnostics (e.g. `type 'vec3' has no member 'w'`) and as the
+   *  fallback `[name]` string when no {@link TypeDescriptor.display} handler is defined. */
   readonly name: string;
+  /** An optional extra immutability predicate: returns `true` when a value should be treated as frozen
+   *  independent of the interpreter's own const/frozen box (OR-ed with it). A mutating handler is gated
+   *  by this before it runs. */
   readonly frozen?: (v: unknown) => boolean;
+  /** Handle a binary operator between two values (at least one carrying this descriptor). Returns the
+   *  result, or {@link NOT_HANDLED} for an op/operand combination this type does not define.
+   *  @param op - the binary operator ({@link BinOp}).
+   *  @param left - the left operand.
+   *  @param right - the right operand.
+   *  @returns the operator result, or {@link NOT_HANDLED}. */
   binary?(op: BinOp, left: unknown, right: unknown): unknown;
+  /** Decide value equality for `==`/`!=`, preferred over {@link TypeDescriptor.binary} when present.
+   *  @param a - the first operand.
+   *  @param b - the second operand.
+   *  @returns `true` iff the two values are equal by this type's semantics. */
   equals?(a: unknown, b: unknown): boolean;
+  /** Handle unary negation (`-v`). Returns the negated value, or {@link NOT_HANDLED} if undefined for
+   *  this type.
+   *  @param v - the value to negate.
+   *  @returns the negated value, or {@link NOT_HANDLED}. */
   neg?(v: unknown): unknown;
+  /** Read a named member (`v.prop`). Returns the member value, or {@link NOT_HANDLED} to signal no such
+   *  member (the interpreter then raises `ML-LANG-UNKNOWN-MEMBER`).
+   *  @param v - the container value.
+   *  @param prop - the member name.
+   *  @returns the member value, or {@link NOT_HANDLED}. */
   getMember?(v: unknown, prop: string): unknown;
+  /** Read an indexed element (`v[key]`). Returns the element, or {@link NOT_HANDLED} to signal no such
+   *  index/key. Also serves string keys when {@link TypeDescriptor.getMember} is absent.
+   *  @param v - the container value.
+   *  @param key - the numeric index or string key.
+   *  @returns the element value, or {@link NOT_HANDLED}. */
   getIndex?(v: unknown, key: number | string): unknown;
+  /** Write a named member in place (`v.prop = val`). Its presence marks the type MUTABLE (the
+   *  interpreter allocates a frozen box on tag). Throws a {@link BufferError} to surface a value error.
+   *  @param v - the container value.
+   *  @param prop - the member name.
+   *  @param val - the value to store. */
   setMember?(v: unknown, prop: string, val: unknown): void;
+  /** Write an indexed element in place (`v[key] = val`). Its presence marks the type MUTABLE. Throws a
+   *  {@link BufferError} to surface a bounds/coercion error.
+   *  @param v - the container value.
+   *  @param key - the numeric index or string key.
+   *  @param val - the value to store. */
   setIndex?(v: unknown, key: number | string, val: unknown): void;
+  /** Produce the elements a `for … of` over this value iterates.
+   *  @param v - the value to iterate.
+   *  @returns an iterable of the value's elements. */
   iterate?(v: unknown): Iterable<unknown>;
   /** Zero-copy access to a linear-buffer value's backing store (only present on `access: 'linear-buffer'`
-   *  descriptors). Returns the raw TypedArray + its element kind so a consumer (a compute backend) can read
-   *  it WITHOUT the O(n) `iterate` → number[] copy. The returned data is the live store — treat it read-only. */
-  bufferView?(v: unknown): { readonly data: ArrayLike<number>; readonly element: LowerElement };
+   *  descriptors). Returns the raw backing array + its element kind so a consumer (a compute backend) can
+   *  read it WITHOUT the O(n) {@link TypeDescriptor.iterate} → `number[]` copy. The returned data is the
+   *  live store — treat it read-only.
+   *  @param v - the linear-buffer value.
+   *  @returns the live backing array and its {@link LowerElement} kind. */
+  bufferView?(v: unknown): {
+    /** The live backing array — treat it as read-only. */
+    readonly data: ArrayLike<number>;
+    /** The element kind of the backing array ({@link LowerElement}). */
+    readonly element: LowerElement;
+  };
+  /** Decide the value's truthiness for `if`/`&&`/`||`/`!`, overriding the language's default rule.
+   *  @param v - the value to test.
+   *  @returns the value's truthiness. */
   truthy?(v: unknown): boolean;
+  /** Coerce the value to a string for string `+` and `join`. Should be bounded (not proportional to a
+   *  large backing store). Absent → the language uses the `[name]` fallback.
+   *  @param v - the value to stringify.
+   *  @returns the value's display string. */
   display?(v: unknown): string;
+  /** How this type is stored/accessed and how its operators/members lower to target ops
+   *  ({@link Lowering}). Present on types a compile consumer can lower; absent for an interpreter-only
+   *  type. */
   readonly lower?: Lowering;
 }
 
@@ -86,9 +200,17 @@ export function tagCustom<T extends object>(v: T, descriptor: TypeDescriptor, ge
   return v;
 }
 
+/** Read the {@link TypeDescriptor} attached to a value by {@link tagCustom}, or `undefined` if the value
+ *  carries none (a plain metael value). This is the single lookup every dispatch site uses to decide
+ *  whether a value has custom-type behavior.
+ *  @param v - the value to inspect.
+ *  @returns the value's descriptor, or `undefined`. */
 export function descriptorOf(v: unknown): TypeDescriptor | undefined {
   return (typeof v === 'object' && v !== null) ? (v as { [DESCRIPTOR]?: TypeDescriptor })[DESCRIPTOR] : undefined;
 }
+/** Whether a value carries a custom-type {@link TypeDescriptor} (i.e. {@link descriptorOf} is defined).
+ *  @param v - the value to test.
+ *  @returns `true` iff the value is a tagged custom type. */
 export function isCustomType(v: unknown): boolean {
   return descriptorOf(v) !== undefined;
 }
@@ -109,162 +231,33 @@ export function markFrozen(v: unknown): void {
   const box = (typeof v === 'object' && v !== null) ? (v as { [FROZEN]?: FrozenBox })[FROZEN] : undefined;
   if (box) box.frozen = true;
 }
+/** Whether a mutable custom value has been frozen (by {@link markFrozen}). Always `false` for an
+ *  immutable custom value (which has no frozen box) and for a non-custom value. The interpreter checks
+ *  this before running a mutating handler, emitting `ML-LANG-IMMUTABLE` for a frozen value.
+ *  @param v - the value to test.
+ *  @returns `true` iff the value is a frozen mutable custom value. */
 export function isFrozenCustom(v: unknown): boolean {
   const box = (typeof v === 'object' && v !== null) ? (v as { [FROZEN]?: FrozenBox })[FROZEN] : undefined;
   return box ? box.frozen : false;
 }
 
-// ─────────────────────────────────────────── typed arrays (first custom-type consumer) ───────────────────────────────────────────
-
-/** Per-element coercion + WGSL storage element for each typed-array kind. i32/u32 truncate-then-wrap
- *  mod 2^32; f32 rounds via Math.fround; f64 is exact. NaN/±Inf/-0 follow the underlying TypedArray. */
-interface BufferKind { readonly ctor: { new (n: number): { [i: number]: number; length: number } }; readonly element: LowerElement; readonly gpuStorable: boolean; coerce(x: number): number }
-const F32: BufferKind = { ctor: Float32Array, element: 'f32', gpuStorable: true, coerce: (x) => Math.fround(x) };
-const F64: BufferKind = { ctor: Float64Array, element: 'f64', gpuStorable: false, coerce: (x) => x };
-const I32: BufferKind = { ctor: Int32Array,   element: 'i32', gpuStorable: true, coerce: (x) => x | 0 };
-const U32: BufferKind = { ctor: Uint32Array,  element: 'u32', gpuStorable: true, coerce: (x) => x >>> 0 };
-export const BUFFER_KINDS: Readonly<Record<'f32' | 'f64' | 'i32' | 'u32', BufferKind>> = { f32: F32, f64: F64, i32: I32, u32: U32 };
+// ─────────────────────────────────────────── linear-buffer error signal ───────────────────────────────────────────
 
 /** A marker error a descriptor handler throws to surface a value error (bounds/coercion) — the
  *  interpreter's read/write hooks catch it and map it to a diagnostic (descriptors are stateless/shared
- *  and can't reach the Runner). */
-export class BufferError extends Error { constructor(readonly code: string, readonly detail: string) { super(code); } }
-
-/** The shared typed-array descriptor for a given kind. One descriptor object per kind (stateless). The
- *  backing store is a real JS TypedArray held on a field the language can't read (Symbol-keyed). */
-const STORE: unique symbol = Symbol('ml.buffer.store');
-function makeTypedArrayDescriptor(kind: BufferKind): TypeDescriptor {
-  const lower: Lowering = { element: kind.element, shape: 'scalar', gpuStorable: kind.gpuStorable, access: 'linear-buffer' };
-  const storeOf = (v: unknown): { [i: number]: number; length: number } => (v as { [STORE]: { [i: number]: number; length: number } })[STORE];
-  return {
-    name: `${kind.element}buffer`,
-    frozen: isFrozenCustom,
-    getIndex: (v, key) => {
-      if (typeof key !== 'number') return NOT_HANDLED;
-      const store = storeOf(v);
-      if (!Number.isInteger(key) || key < 0 || key >= store.length) throw new BufferError('ML-LANG-INDEX-RANGE', `index ${String(key)} is out of range (length ${store.length})`);
-      return store[key];
-    },
-    getMember: (v, prop) => (prop === 'length' ? storeOf(v).length : NOT_HANDLED),
-    setIndex: (v, key, val) => {
-      const store = storeOf(v);
-      if (typeof key !== 'number' || !Number.isInteger(key) || key < 0 || key >= store.length) throw new BufferError('ML-LANG-INDEX-RANGE', `index ${String(key)} is out of range (length ${store.length})`);
-      if (typeof val !== 'number') throw new BufferError('ML-LANG-BUILTIN-ARG', 'a typed-array element must be a number');
-      store[key] = kind.coerce(val);
-    },
-    iterate: (v) => { const store = storeOf(v); const out: number[] = []; for (let i = 0; i < store.length; i++) out.push(store[i] as number); return out; },
-    bufferView: (v) => ({ data: storeOf(v), element: kind.element }),
-    display: (v) => { const store = storeOf(v); const head: string[] = []; for (let i = 0; i < Math.min(store.length, 8); i++) head.push(String(store[i])); const abbreviated = store.length > 8; return `${kind.element}[${head.join(', ')}${abbreviated ? `, … (len ${store.length})` : ''}]`; },
-    lower,
-  };
+ *  and can't reach the Runner). The concrete buffer/vec/mat INSTANCES live in a standard-library module;
+ *  this error type is part of the shared protocol so a library handler can raise a diagnostic. */
+export class BufferError extends Error {
+  /**
+   * Construct a buffer error carrying a diagnostic code and detail message.
+   *
+   * @param code - the diagnostic code the interpreter surfaces (e.g. a bounds/coercion code).
+   * @param detail - the human-readable diagnostic message.
+   */
+  constructor(
+    /** The diagnostic code the interpreter maps this error to when it catches the throw. */
+    readonly code: string,
+    /** The human-readable diagnostic detail message. */
+    readonly detail: string,
+  ) { super(code); }
 }
-/** Allocate + tag a typed-array custom value. The backing TypedArray is Symbol-hidden; `gen` is the
- *  reactive change-signal for in-place mutation. */
-export function makeTypedArray(kind: keyof typeof BUFFER_KINDS, store: { [i: number]: number; length: number }, gen: GenerationRef): object {
-  const box = {};
-  Object.defineProperty(box, STORE, { value: store, enumerable: false, configurable: false, writable: false });
-  return tagCustom(box, TYPED_ARRAY_DESCRIPTORS[kind], gen);
-}
-export const TYPED_ARRAY_DESCRIPTORS: Readonly<Record<'f32' | 'f64' | 'i32' | 'u32', TypeDescriptor>> = {
-  f32: makeTypedArrayDescriptor(F32), f64: makeTypedArrayDescriptor(F64), i32: makeTypedArrayDescriptor(I32), u32: makeTypedArrayDescriptor(U32),
-};
-
-// ─────────────────────────────────────────── vec/mat (second custom-type consumer — immutable value math) ───────────────────────────────────────────
-
-const VEC_STORE: unique symbol = Symbol('ml.vec.store');
-const SWIZZLE = 'xyzw';
-interface VecStore { c: ArrayLike<number>; rows: number; cols: number }
-const storeOfVec = (v: unknown): VecStore => (v as { [VEC_STORE]: VecStore })[VEC_STORE];
-/** A vec is a single-column matrix. */
-const isVec = (s: VecStore): boolean => s.cols === 1;
-/** Test-only reader for the (Symbol-hidden) store — no language-surface access. */
-export function vecStoreOf(v: unknown): VecStore { return storeOfVec(v); }
-
-function vecLower(rows: number, cols: number, element: LowerElement = 'f32'): Lowering {
-  const mat = cols > 1;
-  return {
-    element, shape: mat ? 'matMxN' : 'vecN', rows, cols, gpuStorable: true, access: 'value',
-    ops: mat
-      ? { '*': { kind: 'matmul' } }
-      : {
-          '+': { kind: 'componentwise', op: 'add' }, '-': { kind: 'componentwise', op: 'sub' },
-          '/': { kind: 'componentwise', op: 'div' }, '*': { kind: 'componentwise', op: 'mul' },
-          'neg': { kind: 'unary', op: 'neg' },   // negation, NOT subtraction — a compile consumer emits `-v`
-        },
-    members: mat ? undefined : { kind: 'swizzle', of: SWIZZLE },
-  };
-}
-
-const vecDescriptors = new Map<string, TypeDescriptor>();
-function vecDescriptor(rows: number, cols: number): TypeDescriptor {
-  const key = cols > 1 ? `mat${cols}x${rows}` : `vec${rows}`;
-  const existing = vecDescriptors.get(key);
-  if (existing) return existing;
-  const componentwise = (op: 'add' | 'sub' | 'mul' | 'div', a: ArrayLike<number>, b: ArrayLike<number>): number[] => {
-    const out: number[] = [];
-    for (let i = 0; i < a.length; i++) { const x = a[i] as number; const y = b[i] as number; out.push(op === 'add' ? x + y : op === 'sub' ? x - y : op === 'mul' ? x * y : x / y); }
-    return out;
-  };
-  const desc: TypeDescriptor = {
-    name: key,
-    binary: (o, l, r) => {
-      const ls = descriptorOf(l) ? storeOfVec(l) : null;
-      const rs = descriptorOf(r) ? storeOfVec(r) : null;
-      const lMat = ls && !isVec(ls); const rMat = rs && !isVec(rs);
-      // vec ∘ scalar / scalar ∘ vec — scale
-      if (ls && isVec(ls) && typeof r === 'number' && (o === '*' || o === '/')) return makeVec(Array.from(ls.c, (x) => o === '*' ? x * r : x / r));
-      if (rs && isVec(rs) && typeof l === 'number' && o === '*') return makeVec(Array.from(rs.c, (x) => x * l));
-      // mat ∘ scalar / scalar ∘ mat — scale (componentwise, same shape)
-      if (lMat && typeof r === 'number' && (o === '*' || o === '/')) return makeMat(Array.from(ls!.c, (x) => o === '*' ? x * r : x / r), ls!.rows, ls!.cols);
-      if (rMat && typeof l === 'number' && o === '*') return makeMat(Array.from(rs!.c, (x) => x * l), rs!.rows, rs!.cols);
-      // matmul: mat * (mat|vec) — a vec is the cols===1 case
-      if (lMat && rs && o === '*') { const p = matmul(ls!, rs); return p ? (p.cols === 1 ? makeVec(p.c) : makeMat(p.c, p.rows, p.cols)) : NOT_HANDLED; }
-      // vec componentwise + - * / (equal length)
-      if (ls && rs && isVec(ls) && isVec(rs) && ls.rows === rs.rows && (o === '+' || o === '-' || o === '*' || o === '/'))
-        return makeVec(componentwise(o === '+' ? 'add' : o === '-' ? 'sub' : o === '*' ? 'mul' : 'div', Array.from(ls.c), Array.from(rs.c)));
-      return NOT_HANDLED;
-    },
-    equals: (l, r) => {
-      const ls = descriptorOf(l) ? storeOfVec(l) : null; const rs = descriptorOf(r) ? storeOfVec(r) : null;
-      if (!ls || !rs || ls.rows !== rs.rows || ls.cols !== rs.cols) return false;
-      return Array.from(ls.c).every((x, i) => x === rs.c[i]);
-    },
-    neg: (v) => { const s = storeOfVec(v); const c = Array.from(s.c, (x) => -x); return isVec(s) ? makeVec(c) : makeMat(c, s.rows, s.cols); },
-    getMember: (v, prop) => {
-      const s = storeOfVec(v);
-      if (!isVec(s)) return NOT_HANDLED;   // matrices have no swizzle
-      if (prop.length === 1) { const i = SWIZZLE.indexOf(prop); return (i >= 0 && i < s.rows) ? s.c[i] : NOT_HANDLED; }
-      const idxs = [...prop].map((ch) => SWIZZLE.indexOf(ch));
-      if (idxs.some((i) => i < 0 || i >= s.rows) || idxs.length < 2 || idxs.length > 4) return NOT_HANDLED;
-      return makeVec(idxs.map((i) => s.c[i] as number));
-    },
-    display: (v) => { const s = storeOfVec(v); return `${isVec(s) ? `vec${s.rows}` : `mat${s.cols}x${s.rows}`}(${Array.from(s.c).join(', ')})`; },
-    lower: vecLower(rows, cols),
-  };
-  vecDescriptors.set(key, desc);
-  return desc;
-}
-/** Column-major matrix product A(R×K) · B(K×C) → R×C. A vec is a K×1 / R×1 column. Null on inner-dim
- *  mismatch (A.cols !== B.rows). Column-major flat index (r,c) → c*rows + r. */
-function matmul(a: VecStore, b: VecStore): { c: number[]; rows: number; cols: number } | null {
-  if (a.cols !== b.rows) return null;
-  const R = a.rows, K = a.cols, C = b.cols;
-  const out = new Array<number>(R * C).fill(0);
-  for (let c = 0; c < C; c++) for (let r = 0; r < R; r++) {
-    let s = 0;
-    for (let k = 0; k < K; k++) s += (a.c[k * R + r] as number) * (b.c[c * K + k] as number);
-    out[c * R + r] = s;
-  }
-  return { c: out, rows: R, cols: C };
-}
-export function makeVec(components: number[]): object {
-  const box = {};
-  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), rows: components.length, cols: 1 } satisfies VecStore, enumerable: false, configurable: false, writable: false });
-  return tagCustom(box, vecDescriptor(components.length, 1));
-}
-export function makeMat(components: number[], rows: number, cols: number): object {
-  const box = {};
-  Object.defineProperty(box, VEC_STORE, { value: { c: components.map((x) => Math.fround(x)), rows, cols } satisfies VecStore, enumerable: false, configurable: false, writable: false });
-  return tagCustom(box, vecDescriptor(rows, cols));
-}
-export function identityMat(n: number): number[] { const out = new Array<number>(n * n).fill(0); for (let i = 0; i < n; i++) out[i * n + i] = 1; return out; }

@@ -3,6 +3,7 @@ import { RuntimeReactiveHost } from './reactive-host.ts';
 import { change, effect } from './reactive.ts';
 import { evaluateProgram, descriptorOf, generationOf } from '@metael/lang';
 import { RecordingHostEnv } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 
 describe('per-value generation signal — in-place mutation is reactive', () => {
   it('allocateGeneration starts at 0; touch increments; read subscribes', () => {
@@ -30,7 +31,7 @@ describe('per-value generation signal — in-place mutation is reactive', () => 
 
   it('a buffer created + mutated through the evaluator carries a live generation', () => {
     const host = new RuntimeReactiveHost();
-    const res = evaluateProgram('f32([1, 2, 3])', { host, env: new RecordingHostEnv() });
+    const res = evaluateProgram('f32([1, 2, 3])', { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
     const buf = res.value;
     expect(descriptorOf(buf)?.lower?.access).toBe('linear-buffer');
     const gen = generationOf(buf);

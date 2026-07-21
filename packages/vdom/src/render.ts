@@ -18,34 +18,46 @@ import { reconcile, flattenFragments, type ReconcileHooks } from './reconcile.ts
 import { attachDelegation } from './delegate.ts';
 import { assignKeys } from './keying.ts';
 import { bindReactive, disposeLeaf } from './bind.ts';
+import { normalizeNodes, type RenderNode } from './normalize.ts';
 import { type VNode } from './vnode.ts';
+import { type VDomHandleBase } from './handle.ts';
 
-export interface RenderOptions {
-  /** Reserved for parity with MountOptions; currently unused by the API path. */
-  readonly reserved?: never;
-}
-
-/** A producer result entry: a VNode, or a conditional hole (`cond && node` → false/null/undefined) that is
- *  dropped — the same JSX-conditional idiom h() accepts for children. */
-export type RenderNode = VNode | null | undefined | boolean;
+export type { RenderNode } from './normalize.ts';
 /** The host callback render() drives: returns one node or a list, with conditional holes allowed. */
 export type RenderProducer = () => RenderNode | RenderNode[];
 
-export interface RenderHandle {
-  tree(): VNode | null;
-  diagnostics: Diagnostic[];
+/** The handle {@link render} returns: the shared {@link VDomHandleBase} (retained-tree view, diagnostics,
+ *  handler firing, teardown, test-only probes) plus render's own reactive-write lever, `setState` — run a
+ *  fn inside the render's `change()` boundary (vs mount's `updateData`, which pushes new data + re-derives). */
+export interface RenderHandle extends VDomHandleBase {
   /** Run `fn` inside the render's change() boundary (drive a reactive write like a handler would). */
   setState(fn: () => void): void;
-  /** Fire a captured handler by node key + event inside the change() boundary. */
-  invokeHandler(nodeKey: string, event: string, arg: unknown): void;
-  hasHandler(nodeKey: string, event: string): boolean;
-  /** How many times the tracked structural pass ran (a value-only change must NOT increment it). */
-  passCount(): number;
-  unmount(): void;
 }
 
-export function render(producer: RenderProducer, container: Element | undefined, _opts: RenderOptions = {}): RenderHandle {
-  const diagnostics: Diagnostic[] = [];
+/** Optional overrides for {@link render}'s per-pass tree handling, for a caller whose producer emits nodes
+ *  that are ALREADY keyed and whose leaf effects + handler registry were built upstream (the DSL front door).
+ *  All fields are additive: a plain `render(producer, container)` with no hooks behaves exactly as before. */
+export interface RenderCoreHooks {
+  /** The nodes are ALREADY keyed (by an upstream minter) — skip the core's `assignKeys` re-keying. A caller
+   *  whose handler registry is keyed by those same upstream keys sets this, so re-keying cannot desync the
+   *  registry from the element `data-key` attributes. */
+  preKeyed?: boolean;
+  /** Supply the handler registry for THIS pass instead of deriving it from the tree via `bindReactive` (a
+   *  caller that captured handlers upstream). When set, the core does NOT run `bindReactive` (that caller's
+   *  leaf effects were bound upstream); it only swaps in these handlers. */
+  onPassHandlers?: (nodes: VNode[]) => Map<string, (arg: unknown) => void>;
+  /** Use THIS diagnostics array instead of a fresh one, so a caller that also pushes its own per-pass
+   *  diagnostics shares ONE array with the core's convergence diagnostics (`ML-VDOM-CONVERGE`). */
+  diagnostics?: Diagnostic[];
+}
+
+/** Mount a host-authored producer into `container` and keep it live. `producer` returns the {@link VNode}
+ *  tree (built with {@link h}); its top-level signal reads subscribe the tracked pass, so a structural write
+ *  re-runs it and reconciles the retained tree, while a value-only write fires only a leaf effect and patches
+ *  one DOM node. Pass `undefined` for `container` to run headless (tree-only, no DOM). Returns a
+ *  {@link RenderHandle}. */
+export function render(producer: RenderProducer, container: Element | undefined, hooks?: RenderCoreHooks): RenderHandle {
+  const diagnostics = hooks?.diagnostics ?? [];
   const index = new Map<string, Element>();
   const liveRegistry = new Map<string, (arg: unknown) => void>();
   let passDisposers: Array<() => void> = [];   // leaf-effect disposers for the CURRENT pass
@@ -56,7 +68,7 @@ export function render(producer: RenderProducer, container: Element | undefined,
   let detach: (() => void) | null = null;
 
   // onRemove disposes a removed subtree's leaf effects (manual teardown — no GC to rely on).
-  const hooks: ReconcileHooks = { onRemove: (v) => disposeLeaf(v) };
+  const reconcileHooks: ReconcileHooks = { onRemove: (v) => disposeLeaf(v) };
 
   const runProducer = (): VNode[] => {
     // Dispose the prior pass's leaf effects (a fresh pass re-binds them) BEFORE re-running the producer.
@@ -67,16 +79,23 @@ export function render(producer: RenderProducer, container: Element | undefined,
     // children, so `() => null` (an empty root) and `() => [cond && node, ...]` (a top-level JSX-conditional)
     // are tolerated rather than crashing assignKeys on a non-object. tree() then returns null for an empty
     // result, matching the DSL mount() path.
-    const tree = (Array.isArray(raw) ? raw : [raw]).filter(
-      (n): n is VNode => n !== null && n !== undefined && n !== false && n !== true,
-    );
-    assignKeys(tree, '');
+    const tree = normalizeNodes(raw);
+    // Skip re-keying for a pre-keyed producer: its nodes already carry an upstream minter's keys that its
+    // handler registry is keyed by, so assignKeys would overwrite them and desync the registry.
+    if (!hooks?.preKeyed) assignKeys(tree, '');
     // Rebuild the handler registry fresh each pass (mirrors mount()): otherwise a handler removed from — or
     // absent on — a surviving element leaves a stale entry that still fires on click. bindReactive only ever
     // set()s, never deletes; the synchronous repopulate below keeps delegation correct (events fire only
     // outside this producer).
     liveRegistry.clear();
-    bindReactive(tree, passDisposers, liveRegistry);
+    if (hooks?.onPassHandlers) {
+      // A pre-built registry: this producer's leaf effects were bound upstream (not by bindReactive), so
+      // swap in its handlers and do NOT bindReactive (which would double-bind / re-key).
+      const passH = hooks.onPassHandlers(tree);
+      for (const [k, v] of passH) liveRegistry.set(k, v);
+    } else {
+      bindReactive(tree, passDisposers, liveRegistry);
+    }
     return tree;
   };
 
@@ -90,7 +109,7 @@ export function render(producer: RenderProducer, container: Element | undefined,
       built = true;
       currentRoot = next;
     } else {
-      currentRoot = reconcile(container, currentRoot, next, doc, index, hooks);
+      currentRoot = reconcile(container, currentRoot, next, doc, index, reconcileHooks);
     }
   };
 

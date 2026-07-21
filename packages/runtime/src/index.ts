@@ -8,6 +8,8 @@ export { diffKeyed, applyKeyedDiff } from './keyed-diff.ts';
 export type { KeyedOp, KeyedReconcileHooks } from './keyed-diff.ts';
 export { derive } from './derive.ts';
 export type { DeriveOptions, DeriveResult } from './derive.ts';
+export { composeEnvs } from './compose-envs.ts';
+export type { ComposedHostEnv } from './compose-envs.ts';
 
 // Convenience re-exports of the lang seam a domain needs alongside the runtime (single import site).
 export {
@@ -17,4 +19,5 @@ export {
 export type {
   HostEnvironment, ReactiveHost, KeyMinter, HostValue, CellRef, EffectRegion,
   Region, LangWrapper, Arg, Scope, Diagnostic, SourceSpan, LowerOptions, LowerResult,
+  BindableHostEnv,
 } from '@metael/lang';

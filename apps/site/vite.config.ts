@@ -6,7 +6,10 @@ import { defineConfig } from 'vite';
 const alias = {
   '@metael/lang': fileURLToPath(new URL('../../packages/lang/src/index.ts', import.meta.url)),
   '@metael/runtime': fileURLToPath(new URL('../../packages/runtime/src/index.ts', import.meta.url)),
+  '@metael/vdom/lang': fileURLToPath(new URL('../../packages/vdom/src/lang/index.ts', import.meta.url)),
   '@metael/vdom': fileURLToPath(new URL('../../packages/vdom/src/index.ts', import.meta.url)),
+  '@metael/gpu/builder': fileURLToPath(new URL('../../packages/gpu/src/builder/index.ts', import.meta.url)),
+  '@metael/gpu/lang': fileURLToPath(new URL('../../packages/gpu/src/lang/index.ts', import.meta.url)),
   '@metael/gpu': fileURLToPath(new URL('../../packages/gpu/src/index.ts', import.meta.url)),
 };
 

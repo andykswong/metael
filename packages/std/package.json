@@ -1,0 +1,28 @@
+{
+  "name": "@metael/std",
+  "version": "0.1.0",
+  "description": "metael standard library — general collections, string, structural, random, and datetime builtins for the metael language kernel.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["/dist"],
+  "engines": { "node": ">=24.0" },
+  "scripts": {
+    "clean": "rimraf dist *.tsbuildinfo",
+    "prebuild": "npm run lint",
+    "build": "vite build",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/std"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/andykswong/metael.git", "directory": "packages/std" },
+  "keywords": ["metael", "stdlib", "collections", "string", "typescript"],
+  "author": "Andy K.S. Wong <andykswong@outlook.com>",
+  "license": "MIT",
+  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "homepage": "https://github.com/andykswong/metael#readme",
+  "publishConfig": { "access": "public", "provenance": true },
+  "dependencies": { "@metael/lang": "^0.1.0" }
+}

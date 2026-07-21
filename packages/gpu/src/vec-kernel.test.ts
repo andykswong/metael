@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
@@ -7,7 +8,7 @@ import { GpuEngine } from './resource.ts';
 import { gateKernel } from './gate.ts';
 import { emitWgsl } from './emit-wgsl.ts';
 
-function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
+function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
 
 describe('vec math in kernels (CPU path, node)', () => {
@@ -56,7 +57,7 @@ describe('vec math lowers to native WGSL vecN via Lowering.ops', () => {
     const res = evaluateProgram(`
       const a = f32(48, (i) => i)
       component k(i) { const u = vec3(a[i*3], a[i*3+1], a[i*3+2]); const v = u * u; return dot(u, v) }
-      k`, { host, env: new RecordingHostEnv() });
+      k`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
     const fn = res.value as UserFn;
     const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
     expect(wgsl).toContain('vec3<f32>');

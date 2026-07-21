@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, isUserFn, makeCallable } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from '@metael/lang';
@@ -8,7 +9,7 @@ import { checkMatch } from './oracle.ts';
 
 function kernelOf(src: string): { fn: UserFn; host: PlainStorageHost } {
   const host = new PlainStorageHost();
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('expected kernel');
   return { fn: res.value, host };
 }
@@ -72,7 +73,7 @@ describe('CPU emitter — eval-free closure tree over descriptor handlers', () =
     const { bindings } = gateKernel(fn, host);
     const cpu = emitCpu(fn, bindings, host);
     const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
-    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 100000 });
+    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 100000, builtins: [MATH_BUILTINS] });
     const ref = [0, 1, 2, 3].map((i) => Number(call(i)));
     expect(ref).toEqual([NaN, NaN, 1, 2]);          // the interpreter's actual per-cell result ([]+1 → NaN)
     output.forEach((v, i) => expect(Object.is(v, ref[i])).toBe(true));   // CPU-emit ≡ interpreter, NaN incl.
@@ -133,7 +134,7 @@ describe('CPU emitter — eval-free closure tree over descriptor handlers', () =
     const { bindings } = gateKernel(fn, host);
     const cpu = emitCpu(fn, bindings, host);
     const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
-    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 100000 });
+    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 100000, builtins: [MATH_BUILTINS] });
     const ref = [0, 1, 2, 3].map((i) => Number(call(i)));
     expect(ref).toEqual([NaN, NaN, NaN, NaN]);
     output.forEach((v, i) => expect(Object.is(v, ref[i])).toBe(true));   // CPU-emit ≡ interpreter, NaN incl.
@@ -155,6 +156,98 @@ describe('CPU emitter — eval-free closure tree over descriptor handlers', () =
     const cpu = emitCpu(fn, bindings, host);
     const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);   // x=[0,1,2,3]; >1 at i=2,3
     expect(output).toEqual([1, 1, 10, 10]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+
+  // ─── The structured constructors + column access — CPU-emit ≡ the interpreter oracle ───
+  // A vec/mat-bearing kernel delegates the WHOLE cell to the interpreter (the oracle), so the CPU path is
+  // identical by construction. These pin that the composed ctors + a mat column read produce the right
+  // output cells AND that checkMatch (the interpreter oracle) agrees — the CPU emit path handles all three.
+  it('vecN composition: vec3(vec2(i, i*2), i+7) flattens correctly (CPU-emit == oracle)', () => {
+    const { fn, host } = kernelOf('component k(i) { return vec3(vec2(i, i * 2), i + 7) } k');
+    const { bindings } = gateKernel(fn, host, 3);
+    const cpu = emitCpu(fn, bindings, host, 3);
+    // 3 cells × 3 comps, interleaved: cell i = [i, i*2, i+7].
+    const output = [0, 1, 2].flatMap((i) => cpu([i]));
+    expect(output).toEqual([0, 0, 7, 1, 2, 8, 2, 4, 9]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [3], precision: 'f32', sampleCount: 3, comps: 3 }).ok).toBe(true);
+  });
+  it('matMxN from column vecs: (mat2(vec2(1,2), vec2(3,4)) * vec2(i,i+1)).x (CPU-emit == oracle)', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat2(vec2(1, 2), vec2(3, 4)) const v = vec2(i, i + 1) return (m * v).x } k');
+    const { bindings } = gateKernel(fn, host, 1);
+    const cpu = emitCpu(fn, bindings, host, 1);
+    // Column-major mat2 [[1,2],[3,4]] · [i, i+1] → .x (row 0) = 1*i + 3*(i+1) = 4i + 3.
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(output).toEqual([3, 7, 11, 15]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+  it('m[i] mat column read: mat3(...)[1].xyz reads column 1 as a vec3 (CPU-emit == oracle)', () => {
+    // Column-major mat3 with an i-dependent middle column; m[1] is that column (column-major slots 3,4,5).
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4 * i, 5 * i, 6 * i, 7, 8, 9) return m[1].xyz } k');
+    const { bindings } = gateKernel(fn, host, 3);
+    const cpu = emitCpu(fn, bindings, host, 3);
+    // cell i = column 1 = [4i, 5i, 6i].
+    const output = [0, 1, 2].flatMap((i) => cpu([i]));
+    expect(output).toEqual([0, 0, 0, 4, 5, 6, 8, 10, 12]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [3], precision: 'f32', sampleCount: 3, comps: 3 }).ok).toBe(true);
+  });
+});
+
+describe('CPU emitter — newly-lowered scalar builtins match the interpreter oracle', () => {
+  it('mod is FLOORED (sign follows the divisor), matching the interpreter — not JS % (was NaN before the fix)', () => {
+    // BEFORE the fix, `mod` was in neither VEC_NAMES nor applyBuiltin, so the hand-walk hit applyBuiltin's
+    // default → NaN (all-zero as a cell after coercion). Now it delegates WHOLE to the interpreter (in
+    // VEC_NAMES, like sin/cos), so the CPU cell == the interpreter's floored mod.
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return mod(a[i], 3) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(output).toEqual([0, 1, 2, 0]);   // NOT [NaN, NaN, NaN, NaN]
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+  it('mod with a NEGATIVE dividend follows the DIVISOR sign (floored), matching the interpreter', () => {
+    // a[i] - 2 = [-2,-1,0,1]; mod(_, 3) floored = [1, 2, 0, 1] (JS % would give [-2,-1,0,1]).
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return mod(a[i] - 2, 3) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(output).toEqual([1, 2, 0, 1]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+  it('asinh matches the interpreter (Math.asinh), CPU-emit == oracle', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return asinh(a[i]) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    expect(cpu([2])[0]).toBeCloseTo(Math.asinh(2), 6);
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+  it('acosh/atanh return NaN out-of-domain (no fail-loud guard) — CPU-emit == interpreter', () => {
+    // acosh domain is x>=1: at i=0 (x=0) the interpreter returns NaN (a raw Math.acosh), and so must the CPU.
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return acosh(a[i]) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    expect(Number.isNaN(cpu([0])[0]!)).toBe(true);        // acosh(0) → NaN (out of domain, no guard)
+    expect(cpu([2])[0]).toBeCloseTo(Math.acosh(2), 6);    // acosh(2) is in-domain
+  });
+  it('countOneBits is the population count over x>>>0, CPU-emit == interpreter oracle', () => {
+    // a[i] = 2*i+1 = [1, 3, 5, 7] → popcounts [1, 2, 2, 3].
+    const { fn, host } = kernelOf('const a = f32(4, (i) => 2*i + 1)\ncomponent k(i) { return countOneBits(a[i]) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(output).toEqual([1, 2, 2, 3]);
+    expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
+  });
+  it('reverseBits reverses the 32-bit pattern (unsigned), CPU-emit == interpreter oracle — incl. a large output', () => {
+    // a[i] = [1, 2, 3, 4] → reversed = [2^31, 2^30, 0xC0000000, 2^29]. 0xC0000000 (3221225472) is NOT f32-exact
+    // as a raw integer, but the oracle frounds BOTH sides, and reversal preserves the f32-exact bit-span, so the
+    // CPU cell (== interpreter, both f64) frounds to the same f32 as the shader would — the match is exact.
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i + 1)\ncomponent k(i) { return reverseBits(a[i]) }\nk');
+    const { bindings } = gateKernel(fn, host);
+    const cpu = emitCpu(fn, bindings, host);
+    const output = [0, 1, 2, 3].map((i) => cpu([i])[0]!);
+    expect(output).toEqual([2 ** 31, 2 ** 30, 0xC0000000, 2 ** 29]);
     expect(checkMatch({ fn, host, bindings, output, dims: [4], precision: 'f32', sampleCount: 4 }).ok).toBe(true);
   });
 });

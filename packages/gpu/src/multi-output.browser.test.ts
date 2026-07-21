@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { GpuEngine } from './resource.ts';
 import { tryWebGl2Backend } from './device/webgl2.ts';
 
-function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
+function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
 
 // Whether THIS runner can actually dispatch on WebGL2. When true the multi-output test REQUIRES the webgl2
 // backend actually ran — the point is proving the N-sequential-passes (one fragment pass per named output)

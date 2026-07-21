@@ -5,17 +5,36 @@
 import type { UserFn, Lowering, Expr, Stmt, ReactiveHost } from '@metael/lang';
 import { descriptorOf, readClosureValue, isUserFn } from '@metael/lang';
 
+/** What a kernel's free identifier resolves to. A kernel param is a thread `coord` (its axis); a closed-over
+ *  value is a `buffer` (a typed array indexed `a[i]`), a `uniform` (a vec/mat value), a `scalar` (a plain
+ *  number, baked as a compile-time constant), or a `callee` (a helper function referenced by call). */
 export type Binding =
+  /** A kernel PARAMETER — a thread coordinate along the given output `axis` (param 0 → axis x, 1 → y, 2 → z). */
   | { readonly role: 'coord'; readonly name: string; readonly axis: number }
+  /** A closed-over TYPED-ARRAY input, valid only as `name[i]` / `name.length`. `lower` carries its element
+   *  type + linear-buffer storage class. */
   | { readonly role: 'buffer'; readonly name: string; readonly value: unknown; readonly lower: Lowering }
+  /** A closed-over VEC/MAT value bound as a shader uniform. `lower` carries its vecN/matMxN shape. */
   | { readonly role: 'uniform'; readonly name: string; readonly value: unknown; readonly lower: Lowering }
+  /** A closed-over plain NUMBER, baked into the shader as a compile-time constant `value`. */
   | { readonly role: 'scalar'; readonly name: string; readonly value: number }
+  /** A closed-over HELPER `function` referenced by a call; `fn` is its declaration (gated recursively). */
   | { readonly role: 'callee'; readonly name: string; readonly fn: UserFn };
 
+/** The resolved bindings for a kernel body: the ordered thread-coordinate params plus every free name's
+ *  {@link Binding}. Shared across the gate, emitters, and oracle so they agree on name resolution. */
 export interface BindingTable {
+  /** The kernel's parameter names in declaration order — index `a` is the coordinate along output axis `a`. */
   readonly params: readonly string[];
+  /** Every resolved free name (and each param) → its {@link Binding}. */
   readonly byName: ReadonlyMap<string, Binding>;
 }
+
+// The synthesized Lowering for a PLAIN metael array (a `const x = [1, 2, 3]` literal with NO typed-array
+// descriptor). A plain array coerces to an f32 store at dispatch, so it is treated exactly as an f32
+// scalar `linear-buffer` — the same shape a `f32([...])` value carries — keeping every downstream consumer
+// (gate / resolveInputs / bufferGenSegment / emitters) uniform with a real f32 buffer, no special-casing.
+const PLAIN_ARRAY_LOWERING: Lowering = { element: 'f32', shape: 'scalar', gpuStorable: true, access: 'linear-buffer' };
 
 /** Resolve the kernel's params + free identifiers against its closure. `freeNames` is the set of bare
  *  identifiers the body references (collected by collectFreeNames). A name that resolves to a buffer/vec/
@@ -34,7 +53,16 @@ export function buildBindingTable(kernel: UserFn, freeNames: ReadonlySet<string>
     if (d?.lower?.access === 'value' && (d.lower.shape === 'vecN' || d.lower.shape === 'matMxN')) { byName.set(name, { role: 'uniform', name, value, lower: d.lower }); continue; }
     if (typeof value === 'number') { byName.set(name, { role: 'scalar', name, value }); continue; }
     if (isUserFn(value)) { byName.set(name, { role: 'callee', name, fn: value }); continue; }
-    // any other value (string, normal array/object, closure) is left absent → the gate rejects it.
+    // A PLAIN metael array of all numbers (a `const x = [1, 2, 3]` literal — NO typed-array descriptor) is a
+    // valid buffer input: it coerces to an f32 store at dispatch (resolveInputs) + fingerprints by content.
+    // Synthesize the SAME f32 `linear-buffer` Lowering a typed array carries so the whole downstream pipeline
+    // (gate / resolveInputs / bufferGenSegment / computeGens / emitters) treats it identically to an f32
+    // buffer — the coercion produces exactly that. A MIXED / non-number array (a string element, a nested
+    // array) is NOT a buffer: leave it absent so the gate still rejects it (MLGPU-BAD-INPUT).
+    if (Array.isArray(value) && value.length > 0 && value.every((x) => typeof x === 'number')) {
+      byName.set(name, { role: 'buffer', name, value, lower: PLAIN_ARRAY_LOWERING }); continue;
+    }
+    // any other value (string, mixed/empty array, object, closure) is left absent → the gate rejects it.
   }
   return { params, byName };
 }

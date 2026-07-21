@@ -31,6 +31,9 @@ function asOwnResident(v: unknown, token: object): WebGpuResident | null {
   return v && typeof v === 'object' && (v as WebGpuResident).token === token ? (v as WebGpuResident) : null;
 }
 
+/** Probe for a working WebGPU backend, verifying a REAL adapter + device (a truthy `navigator.gpu` is NOT
+ *  enough). Resolves the backend on success, or `null` when WebGPU is absent or adapter/device acquisition
+ *  fails — so the engine cleanly re-ladders down to WebGL2 / CPU. */
 export async function tryWebGpuBackend(): Promise<Backend | null> {
   const gpu = (globalThis.navigator as { gpu?: GPU } | undefined)?.gpu;
   if (!gpu) return null;

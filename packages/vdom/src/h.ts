@@ -14,8 +14,16 @@ const USER_KEY: unique symbol = Symbol.for('metael.vdom.userKey');
 /** Sentinel tag for a transparent fragment (children splice into the parent). */
 export const Fragment = FRAGMENT;
 
+/** A reactive value passed to {@link h}: a zero-arg function read inside a leaf effect. As a child it
+ *  becomes a reactive `TEXT` vnode; as a prop it becomes a reactive attribute — either way `render()` binds
+ *  it so a value-only change patches one DOM node without a re-derive. */
 export type Thunk = () => unknown;
+/** An accepted child of {@link h}: a {@link VNode}, a primitive coerced to static text, a {@link Thunk} for
+ *  reactive text, or `null`/`undefined`/`false`/`true` (skipped — the JSX-conditional idiom `cond && node`). */
 export type Child = VNode | string | number | boolean | null | undefined | Thunk;
+/** The props bag passed to {@link h}: an `on…` function is a captured event handler, any other function is a
+ *  reactive attribute {@link Thunk}, `key` sets the reconcile identity, and every other value is a static
+ *  attribute. */
 export type Props = Record<string, unknown>;
 
 function isHandlerName(name: string): boolean { return /^on[A-Z]/.test(name); }
@@ -33,6 +41,11 @@ function toChild(c: Child): VNode | null {
   return { tag: TEXT, props: {}, children: [], key: '', text: String(c) };
 }
 
+/** The API-first hyperscript builder: construct a {@link VNode} from host TypeScript, producing exactly what
+ *  the display vocabulary's `resolveCall` produces so the downstream build/reconcile path can't tell the two
+ *  apart. Splits `props` into static attributes, captured `on…` handlers, and reactive-attribute thunks;
+ *  normalizes each child via the {@link Child} rules. Keys are left empty here and assigned positionally in a
+ *  later pass — supply `key` only for list identity. */
 export function h(tag: string, props: Props | null = {}, ...children: Child[]): VNode {
   const p = props ?? {};
   const handlers: Handler[] = [];

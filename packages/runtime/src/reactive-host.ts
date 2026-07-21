@@ -24,6 +24,10 @@ export class RuntimeReactiveHost implements ReactiveHost {
   /** The DisposableStack of the innermost open scope(), or null when not inside a scope. */
   private currentOwner: DisposableStack | null = null;
 
+  /** Construct a host for one derive pass.
+   *  @param priorState - the previous pass's settled state S (cellKey → value); a keyed cell whose key
+   *         appears here latches to that carried value (surviving instance), otherwise it starts from
+   *         its initializer. Omit on a first derive. */
   constructor(priorState?: ReadonlyMap<string, unknown>) { this.priorState = priorState; }
 
   allocateCell(initial: unknown, cellKey?: string): CellRef {

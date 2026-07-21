@@ -6,7 +6,7 @@ export default defineConfig({
   // index.ts, so no .js is emitted for them — this drops their stray .d.ts from the published tarball).
   plugins: [dts({ tsconfigPath: './tsconfig.build.json', exclude: ['**/*.test.ts', '**/*.browser.test.ts', 'src/test/**'] })],
   build: {
-    lib: { entry: 'src/index.ts', formats: ['es'], fileName: 'index' },
+    lib: { entry: { 'index': 'src/index.ts', 'lang/index': 'src/lang/index.ts' }, formats: ['es'] },
     target: 'esnext',
     rollupOptions: {
       // Externalize every bare specifier (@metael/lang, @metael/runtime) — bundle only relative sources.

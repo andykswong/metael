@@ -1,9 +1,11 @@
 // packages/lang/src/collections-iterable.test.ts
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from './index.ts';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 
 function run(src: string) {
-  return evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  return evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
 }
 
 describe('collection builtins accept a typed array (any iterate-able), not just a plain array', () => {
@@ -39,7 +41,7 @@ describe('collection builtins accept a typed array (any iterate-able), not just 
     const orig = host.readGeneration.bind(host);
     host.readGeneration = (g) => { reads++; return orig(g); };
     // Reads the buffer ONLY via a collection builtin (reduce) — the sole generation-registration path.
-    evaluateProgram('const b = f32([1, 2, 3])\nreduce(b, (a, x) => a + x, 0)', { host, env: new RecordingHostEnv() });
+    evaluateProgram('const b = f32([1, 2, 3])\nreduce(b, (a, x) => a + x, 0)', { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(reads).toBeGreaterThan(0);
     // Baseline: for-of over the same buffer is the established subscription path — it also reads.
     // A top-level for-of executes immediately (a component decl would not run until invoked).
@@ -47,12 +49,12 @@ describe('collection builtins accept a typed array (any iterate-able), not just 
     let forReads = 0;
     const orig2 = host2.readGeneration.bind(host2);
     host2.readGeneration = (g) => { forReads++; return orig2(g); };
-    evaluateProgram('const b = f32([1, 2, 3])\nfor (x of b) { x }', { host: host2, env: new RecordingHostEnv() });
+    evaluateProgram('const b = f32([1, 2, 3])\nfor (x of b) { x }', { host: host2, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(forReads).toBeGreaterThan(0);
   });
 
   it('a plain string is NOT silently treated as a char array (no descriptor → errors)', () => {
-    const r = evaluateProgram('map("abc", (x) => x)', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('map("abc", (x) => x)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
   });
 });

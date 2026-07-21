@@ -1,9 +1,10 @@
 // packages/lang/src/buffer-view.test.ts
 import { describe, it, expect } from 'vitest';
-import { evaluateProgram, PlainStorageHost, RecordingHostEnv, descriptorOf, makeTypedArray, BUFFER_KINDS } from './index.ts';
+import { evaluateProgram, PlainStorageHost, RecordingHostEnv, descriptorOf } from './index.ts';
+import { makeTypedArray, BUFFER_KINDS, MATH_BUILTINS } from '@metael/math/lang';
 
 function buf(src: string): unknown {
-  return evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv() }).value;
+  return evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value;
 }
 
 describe('typed-array bufferView — the zero-copy raw-store seam', () => {

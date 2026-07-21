@@ -4,11 +4,26 @@ import type { UserFn } from '@metael/lang';
 import type { BindingTable } from '../binding.ts';
 import type { DeviceLimits } from '../cost.ts';
 
+/** Which compute backend ran (or is requested): the WebGPU device, the WebGL2 compute-via-fragment fallback,
+ *  or the always-available CPU interpreter floor. */
 export type BackendKind = 'webgpu' | 'webgl2' | 'cpu';
 
+/** The payload a backend consumes to run one MAP dispatch: the kernel + its bindings, the output grid, the
+ *  precision, both shaders, the CPU-fallback per-cell function, the resolved input buffers + scalar uniforms,
+ *  and the optional resident-buffer plumbing (retain the output on-device / bind a prior output directly). */
 export interface DispatchInput {
-  readonly kernel: UserFn; readonly bindings: BindingTable; readonly dims: readonly number[];
-  readonly precision: 'f16' | 'f32'; readonly wgsl: string; readonly glsl: string;
+  /** The kernel being dispatched (carried for the CPU backend + oracle; the GPU legs run the shaders). */
+  readonly kernel: UserFn;
+  /** The kernel's resolved bindings (buffer/scalar/coord roles + shapes). */
+  readonly bindings: BindingTable;
+  /** The output grid dimensions — one thread per cell. */
+  readonly dims: readonly number[];
+  /** The numeric precision this dispatch runs at (`'f16'` only reaches a shader-f16 WebGPU device). */
+  readonly precision: 'f16' | 'f32';
+  /** The WGSL compute shader (consumed by the WebGPU leg). */
+  readonly wgsl: string;
+  /** The GLSL-ES compute-via-fragment shader (consumed by the WebGL2 leg). */
+  readonly glsl: string;
   /** Compute ONE output cell's components (length `outputComps`, default 1). For a scalar (`f32`) output
    *  the array is a single-element `[value]`, byte-identical to the pre-vecN scalar cell; for a vecN output
    *  it is the cell's N components in x,y,z,w order — the FLAT-INTERLEAVED layout every backend produces. */
@@ -16,7 +31,10 @@ export interface DispatchInput {
   /** The output element's component width (f32→1, vec2→2, vec3→3, vec4→4). Absent → 1 (scalar, back-compat
    *  with any caller not setting it). Every backend writes `outputComps` values per cell, interleaved. */
   readonly outputComps?: number;
+  /** The input buffers by name — each an f32 CPU-side copy every backend can upload (a resident fast-path is
+   *  offered separately via `residentInputs`). */
   readonly inputs: readonly { readonly name: string; readonly data: Float32Array }[];
+  /** The kernel's closed-over scalar-constant uniforms by name, set as `_u_<name>` in the shaders. */
   readonly scalars: readonly { readonly name: string; readonly value: number }[];
   /** When true, the backend RETAINS the output buffer on-device and returns a `resident` handle to it in the
    *  result (in addition to reading it back for the oracle / CPU-fallback output) — the plumbing that lets a
@@ -56,8 +74,13 @@ export interface HistogramDispatchInput {
   readonly scalars: readonly { readonly name: string; readonly value: number }[];
 }
 export interface HistogramDispatchResult { readonly counts: number[]; readonly ms: number }
+/** The result of a MAP dispatch: the readback output (always present) + the elapsed time, plus the optional
+ *  resident-buffer handle when `retainOutput` was requested. */
 export interface DispatchResult {
+  /** The output values in the flat-interleaved layout (`output[cell * comps + k]`). Always present — it is
+   *  the oracle source + the CPU-fallback / foreign-backend readback. */
   readonly output: Float32Array;   // always present (CPU-fallback / oracle source)
+  /** The dispatch time in milliseconds. */
   readonly ms: number;
   /** Present when `retainOutput` was set: the backend-native resident buffer + a disposer to free it. The
    *  `gpuBuffer` is opaque (a GPUBuffer / a WebGL2 texture wrapper / a Float32Array for CPU); only the SAME
@@ -65,14 +88,19 @@ export interface DispatchResult {
   readonly resident?: { readonly gpuBuffer: unknown; readonly dispose: () => void };
 }
 
+/** A compute backend: a device (or the CPU interpreter) that runs a map dispatch, and optionally a reduction
+ *  or a histogram scatter. Three impls slot behind it — CPU (always works), WebGPU, and WebGL2. */
 export interface Backend {
+  /** Which backend this is — used by the engine's re-ladder + backend-honesty reporting. */
   readonly kind: BackendKind;
+  /** This device's limits, reported to the cost gate. */
   readonly limits: DeviceLimits;
   /** Optional device-capability flags. `f16` is true when the backend can run a `precision: 'f16'` dispatch
    *  correctly (a WebGPU device with the `shader-f16` feature). Absent/undefined ⇒ NO f16 shader path (the
    *  cpu + webgl2 backends, and a WebGPU device without the feature) → the engine falls an f16 request back
    *  to f32 with a note. */
   readonly features?: { readonly f16: boolean };
+  /** Run one MAP dispatch: compute every output cell and read the result back. */
   dispatch(input: DispatchInput): Promise<DispatchResult>;
   /** Run a REDUCTION (fold N inputs → 1 scalar). Optional — a backend that can't reduce (a WGSL leg still
    *  scaffolded) omits it, so the engine re-ladders to a rung that can (webgl2's ping-pong / the cpu floor).
@@ -83,6 +111,7 @@ export interface Backend {
    *  histogram straight to the `cpuHistogram` oracle, and webgl2 because its fragment stage has NO atomics —
    *  so the engine routes a webgl2 histogram to the cpu oracle too (a documented fallback, settled 'cpu'). */
   dispatchHistogram?(input: HistogramDispatchInput): Promise<HistogramDispatchResult>;
+  /** Release the device + any GPU resources this backend holds. */
   [Symbol.dispose](): void;
 }
 

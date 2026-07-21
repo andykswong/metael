@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
 import type { UserFn, Diagnostic, Expr } from '@metael/lang';
@@ -7,7 +8,7 @@ import { intervalOf, checkStaticBounds } from './bounds.ts';
 import { buildBindingTable, collectFreeNames, type BindingTable } from './binding.ts';
 
 function kernelOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('kernel: ' + JSON.stringify(res.diagnostics)); return res.value;
 }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
@@ -38,6 +39,17 @@ describe('static out-of-bounds bounds-prover', () => {
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpu']>;
     change(() => { s = engine.gpu(kernel, { output: [4], backend: 'cpu' }); });
+    expect(s.core).toBe(false);
+    expect(s.reasons.some((r) => r.code === 'MLGPU-INDEX-STATIC')).toBe(true);
+  });
+  it('rejects a provably-OOB index on a PLAIN-array buffer (its length is statically known too)', async () => {
+    const host = new RuntimeReactiveHost();
+    // A plain array x has length 3; output [3] → coord i ∈ [0,2], i+3 ∈ [3,5] ≥ 3 → provably OOB. The
+    // prover reads a plain array's length directly (no descriptor), so it catches this like a typed array.
+    const kernel = kernelOf(`const x = [1, 2, 3]\ncomponent k(i) { return x[i + 3] }\nk`, host);
+    const engine = new GpuEngine(host, cpuDeps);
+    let s!: ReturnType<GpuEngine['gpu']>;
+    change(() => { s = engine.gpu(kernel, { output: [3], backend: 'cpu' }); });
     expect(s.core).toBe(false);
     expect(s.reasons.some((r) => r.code === 'MLGPU-INDEX-STATIC')).toBe(true);
   });

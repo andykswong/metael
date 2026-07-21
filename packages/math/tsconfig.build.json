@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "rootDir": "./src", "outDir": "./dist", "noEmit": false, "paths": { "@metael/math": ["./src/core/index.ts"] } },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.browser.test.ts"]
+}

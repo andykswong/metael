@@ -27,13 +27,38 @@ import {
 } from './evaluate.ts';
 import { descriptorOf, generationOf } from './custom-types.ts';
 
+/**
+ * Options for {@link lowerEntry}: the evaluation host capabilities ({@link EvalOptions}) plus the
+ * identity {@link KeyMinter} and the entry-component selector that lowering additionally needs.
+ */
 export interface LowerOptions extends EvalOptions {
+  /**
+   * Mints the stable identity key for every lowered node — a structural lexical ordinal for an ordinary
+   * child, or a list-item key (an author `key` prop, else a content hash plus the iteration ordinal) for
+   * a node produced inside a `for`-of. A node's key latches its reactive state across a re-derive, so a
+   * surviving node keeps its cells while a fresh one resets.
+   */
   minter: KeyMinter;
+  /**
+   * Name of the root component to instantiate. Defaults to `'Story'`; a name that does not resolve to a
+   * declared `component` fails closed with an `ML-LANG-NO-ENTRY` diagnostic.
+   */
   entry?: string;
   /** Opt `data` into reactivity so a `data.x` read lowers to a trackable Region (Proxy-FREE). */
   reactiveData?: boolean;
 }
-export interface LowerResult { value: unknown; diagnostics: Diagnostic[] }
+/**
+ * The outcome of {@link lowerEntry}: the lowered host-value tree and the diagnostics collected during
+ * the run. Like {@link evaluateProgram}, `lowerEntry` never throws — a parse or author error, a budget
+ * or recursion limit, or a missing entry component surfaces here as a diagnostic with `value` set to a
+ * safe `null`.
+ */
+export interface LowerResult {
+  /** The lowered root node (an opaque {@link HostValue}), or `null` if the run failed closed. */
+  value: unknown;
+  /** Every diagnostic collected during parsing + lowering, in order. Empty on a fully-successful run. */
+  diagnostics: Diagnostic[];
+}
 
 /** Lift a lowered value into the ordered Arg shape the host contract wants. lang's core grammar has
  *  no named-arg syntax at the call level (a call arg is positional), so `name` stays undefined; the
@@ -62,6 +87,22 @@ function nextOrdinal(ctx: KeyContext, kind: string): number {
  *  than a structural ordinal — so keyed items stay stable and duplicate-content siblings differ. */
 interface ListHint { readonly ordinal: number }
 
+/**
+ * Parse a metael program and lower its entry component into an ordered tree of host-built nodes.
+ *
+ * The child-collection entry point. Runs the top-level declarations for effect, then instantiates the
+ * designated entry component ({@link LowerOptions.entry}, default `'Story'`) as the parentless root and
+ * child-collects its body. Node identity is minted through {@link LowerOptions.minter} and nodes are
+ * built through the injected {@link HostEnvironment}, so the kernel stays pure and the produced node
+ * type is opaque here. Total and non-throwing: a parse or author error, an exhausted budget, or a
+ * missing entry component surfaces as a diagnostic with a safe `null` value.
+ *
+ * @param source - the program source text.
+ * @param opts - host capabilities, the identity minter, and the entry selector ({@link LowerOptions}).
+ * @returns the lowered root node + the diagnostics collected during the run ({@link LowerResult}).
+ * @remarks Lowering runs on top of the evaluator, sharing its budget/diagnostics runner, so a
+ *          runaway walk fails closed with an `ML-LANG-BUDGET` diagnostic exactly like evaluation.
+ */
 export function lowerEntry(source: string, opts: LowerOptions): LowerResult {
   const runner = new Runner(resolveOptions(opts));
   const root = new Environment();
@@ -353,7 +394,9 @@ function mintKey(ctx: KeyContext, head: string, args: unknown[], hint: ListHint 
 /** Merge the object-typed args into one record for author-key extraction + content hashing (list
  *  items). Non-object args (a bare `text(k)` content string) contribute nothing to the key content. */
 function argContent(args: unknown[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  // Null-prototype base: Object.assign copies only OWN enumerable keys onto it, so the merged record
+  // carries no inherited `__proto__`/`constructor`/`toString` (matches the object-literal builder).
+  const out: Record<string, unknown> = Object.create(null);
   for (const a of args) {
     if (a !== null && typeof a === 'object' && !Array.isArray(a)) Object.assign(out, a as Record<string, unknown>);
   }
@@ -375,7 +418,8 @@ function lowerArg(arg: Expr, env: Environment, ctx: KeyContext, r: Runner, opts:
   // resolves to its current value here, consistent with the rest of arg resolution). This arg object is
   // NOT frozen — it may carry Region thunks that must stay live for leaf effects.
   if (arg.kind === 'object') {
-    const out: Record<string, unknown> = {};
+    // Null-prototype record (matches the evaluator's object literal): no inherited proto/constructor/toString.
+    const out: Record<string, unknown> = Object.create(null);
     for (const entry of arg.entries) {
       if (entry.spread) {
         const src = evalExpr(entry.value, env, r);

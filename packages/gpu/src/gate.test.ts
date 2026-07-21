@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from '@metael/lang';
@@ -6,7 +7,7 @@ import { gateKernel } from './gate.ts';
 
 function kernelOf(src: string): { fn: UserFn; host: PlainStorageHost } {
   const host = new PlainStorageHost();
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('expected the last expression to be the kernel function');
   return { fn: res.value, host };
 }
@@ -76,8 +77,17 @@ describe('compute-lowerability gate — rejects with a span-anchored MLGPU reaso
     const v = reject(`function k(i) { return "x" + i }\nk`);
     expect(v.core).toBe(false);
   });
-  it('rejects a normal-array input (not a typed array)', () => {
-    const v = reject(`const a = [1, 2, 3]\nfunction k(i) { return a[i] }\nk`);
+  it('accepts a plain all-number array input as a buffer (coerced to f32 at dispatch)', () => {
+    // A plain metael array of all numbers is a valid buffer input — it is classified role:'buffer' and
+    // coerced ONCE to an f32 store at dispatch. (The rejection now applies only to a MIXED/empty array.)
+    const { fn, host } = kernelOf(`const a = [1, 2, 3]\nfunction k(i) { return a[i] }\nk`);
+    const v = gateKernel(fn, host);
+    expect(v.core).toBe(true);
+    expect(v.reasons).toEqual([]);
+    expect(v.bindings.byName.get('a')?.role).toBe('buffer');
+  });
+  it('rejects a MIXED (non-all-number) array input', () => {
+    const v = reject(`const a = [1, "two", 3]\nfunction k(i) { return a[i] }\nk`);
     expect(v.core).toBe(false);
     expect(v.reasons.some((r) => r.code === 'MLGPU-BAD-INPUT')).toBe(true);
   });
@@ -360,5 +370,54 @@ describe('gate — output-shape inference for the P4 vec/mat ops', () => {
   it('determinant of a square LOCAL stays lowerable', () => {
     const { fn, host } = kernelOf('component k(i) { const m = mat2(1,2,3,4) return determinant(m) } k');
     expect(gateKernel(fn, host, 1).core).toBe(true);
+  });
+});
+
+describe('gate — the structured constructors + column access (vecN composition, matMxN-from-columns, m[i])', () => {
+  const coreN = (src: string, comps: number): boolean => { const { fn, host } = kernelOf(`component k(i) { return ${src} } k`); return gateKernel(fn, host, comps).core; };
+  const reasons = (src: string, comps: number) => { const { fn, host } = kernelOf(`component k(i) { return ${src} } k`); return gateKernel(fn, host, comps).reasons; };
+
+  it('accepts vecN composition (a vecM arg to a vecN ctor when the flattened width totals N)', () => {
+    expect(coreN('vec3(vec2(i, i), i)', 3)).toBe(true);         // vec2 + scalar → vec3
+    expect(coreN('vec4(vec2(i, i), vec2(i, i))', 4)).toBe(true); // vec2 + vec2 → vec4
+    expect(coreN('vec4(vec3(i, i, i), i)', 4)).toBe(true);       // vec3 + scalar → vec4
+    expect(coreN('vec4(i, vec2(i, i), i)', 4)).toBe(true);       // scalar + vec2 + scalar → vec4
+  });
+  it('accepts matMxN from column vecs (vecR args to a matMxN ctor)', () => {
+    expect(coreN('(mat2(vec2(1, 2), vec2(3, 4)) * vec2(i, i)).x', 1)).toBe(true);   // 2 column vec2s
+    expect(coreN('(mat3(vec3(1, 2, 3), vec3(4, 5, 6), vec3(7, 8, 9)) * vec3(i, i, i)).x', 1)).toBe(true);  // 3 column vec3s
+  });
+  it('accepts an index node whose object is a matMxN (m[i] column read) and reports it as a vecR output', () => {
+    expect(coreN('mat3(1, 2, 3, 4, 5, 6, 7, 8, 9)[1].xyz', 3)).toBe(true);   // m[i] → vec3, .xyz swizzle → vec3 output
+    expect(coreN('mat2(1, 2, 3, 4)[0].xy', 2)).toBe(true);                    // m[i] → vec2, .xy → vec2 output
+    // A mat column bound to a LOCAL then swizzled resolves via the locals-aware shape map.
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4, 5, 6, 7, 8, 9) const c = m[1] return c.xyz } k');
+    expect(gateKernel(fn, host, 3).core).toBe(true);
+  });
+  it('a mat-column vecR is a WIDTH-typed operand: a wrong-width output over m[i] is rejected', () => {
+    // `mat3(...)[1]` is a vec3; requesting a vec2 output over it must be a shape reject (not a silent pass).
+    const rs = reasons('mat3(1, 2, 3, 4, 5, 6, 7, 8, 9)[1].xyz', 2);
+    expect(rs.some((r) => r.code === 'MLGPU-OUTPUT-SHAPE')).toBe(true);
+  });
+  it('rejects an over-range swizzle on a mat column (m[i] of a mat2 is a vec2 — .z is out of range)', () => {
+    // `mat2(...)[0]` is a vec2; `.z` reads past its width — the interpreter NOT_HANDLEs it, so the gate must
+    // reject (the mat-index shape now feeds the over-range swizzle check).
+    const rs = reasons('mat2(1, 2, 3, 4)[0].z', 1);
+    expect(rs.some((r) => r.code === 'MLGPU-NOT-LOWERABLE' && /swizzle/.test(r.message))).toBe(true);
+  });
+});
+
+describe('gate — the newly-lowered scalar builtins accept, including the 32-bit bit ops', () => {
+  const accepts = (src: string): boolean => { const { fn, host } = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return ${src} }\nk`); return gateKernel(fn, host, 1).core; };
+
+  it('accepts mod / asinh / acosh / atanh (all have a faithful shader lowering)', () => {
+    expect(accepts('mod(a[i], 3)')).toBe(true);
+    expect(accepts('asinh(a[i])')).toBe(true);
+    expect(accepts('acosh(a[i])')).toBe(true);
+    expect(accepts('atanh(a[i])')).toBe(true);
+  });
+  it('accepts countOneBits / reverseBits — WGSL native + a GLSL ES 3.00 prelude helper; the f32 store is lossless (a popcount is 0..32; reversal preserves the f32-exact bit-span)', () => {
+    expect(accepts('countOneBits(a[i])')).toBe(true);
+    expect(accepts('reverseBits(a[i])')).toBe(true);
   });
 });

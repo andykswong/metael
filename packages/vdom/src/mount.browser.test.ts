@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mount } from './mount.ts';
+import { renderSource } from './lang/render-source.ts';
 
 // Fine-grained (value-only) path proofs at the mount level: a reactive `let` read only by a leaf position
 // (span(n) / a reactive attribute) patches ONLY that DOM position with NO walk-effect re-run — the
@@ -39,7 +39,7 @@ beforeEach(() => { container = document.createElement('div'); document.body.appe
 
 describe('@metael/vdom mount — fine-grained value path (real DOM)', () => {
   it('a counter click patches the SAME span text node with NO walk-effect re-run (fine-grained)', () => {
-    const h = mount(COUNTER, container, {});
+    const h = renderSource(COUNTER, container, {});
     expect(h.diagnostics).toEqual([]);
     const span = container.querySelector('span')!;
     expect(span.textContent).toBe('0');
@@ -55,7 +55,7 @@ describe('@metael/vdom mount — fine-grained value path (real DOM)', () => {
   });
 
   it('a reactive ATTRIBUTE change patches the live element attr in place with NO walk-effect re-run', () => {
-    const h = mount(REACTIVE_ATTR, container, {});
+    const h = renderSource(REACTIVE_ATTR, container, {});
     expect(h.diagnostics).toEqual([]);
     const span = container.querySelector('span')!;
     expect(span.getAttribute('class')).toBe('off');
@@ -68,7 +68,7 @@ describe('@metael/vdom mount — fine-grained value path (real DOM)', () => {
   });
 
   it('a STRUCTURAL change (an `if` cell) DOES re-run the walk-effect (the diff path)', () => {
-    const h = mount(STRUCTURAL, container, {});
+    const h = renderSource(STRUCTURAL, container, {});
     expect(h.diagnostics).toEqual([]);
     expect(container.querySelector('span')!.textContent).toBe('under');
     const passesAfterBuild = h.passCount();
@@ -94,7 +94,7 @@ component Story() {
 
 describe('@metael/vdom mount — controlled form-control value/checked (real DOM property, not attribute)', () => {
   it('resetting a reactive `value` clears the input even after the user has typed (dirty field)', () => {
-    const h = mount(CONTROLLED_INPUT, container, {});
+    const h = renderSource(CONTROLLED_INPUT, container, {});
     expect(h.diagnostics).toEqual([]);
     const input = container.querySelector('input.field') as HTMLInputElement;
     // Simulate the user typing (dirties the field — the live value now lives on the .value PROPERTY).
@@ -116,7 +116,7 @@ component Story() {
     button({ onClick: () => { on = true } }, "check")
   }
 }`;
-    const h = mount(src, container, {});
+    const h = renderSource(src, container, {});
     expect(h.diagnostics).toEqual([]);
     const cb = container.querySelector('input.cb') as HTMLInputElement;
     expect(cb.checked).toBe(false);

@@ -269,7 +269,7 @@ map(passing, (r) => ({
 
 const GROUP_COUNT = `// Word frequency — now with includes() for membership.
 // (Object keys are still built from [key, value] pairs via
-// fromEntries — the deterministic, immutable-rebuild idiom.)
+// object() — the deterministic, immutable-rebuild idiom.)
 const words = ["red", "blue", "red", "green", "blue", "red"]
 const uniq = reduce(
   words,
@@ -277,16 +277,16 @@ const uniq = reduce(
   []
 )
 
-fromEntries(
+object(
   map(uniq, (w) => [w, filter(words, (x) => x == w).length])
 )`;
 
-const OBJECT_SHAPE = `// Invert/transform a lookup table via entries + fromEntries
+const OBJECT_SHAPE = `// Invert/transform a lookup table via entries + object()
 // + spread (immutable rebuild, deterministic key order).
 const prices = { apple: 3, pear: 5, plum: 2 }
 const bumped = { ...prices, plum: 20 }
 
-fromEntries(
+object(
   map(entries(bumped), (kv) => [kv[0], kv[1] * 2])
 )`;
 
@@ -682,8 +682,8 @@ export const EXAMPLES: readonly Example[] = [
     blurb: 'filter + map over injected data with a derived grade', source: DATA_TRANSFORM,
     data: [{ name: 'Ann', score: 91 }, { name: 'Bo', score: 58 }, { name: 'Cy', score: 73 }, { name: 'Dee', score: 84 }],
   },
-  { id: 'group-count', label: 'Word frequency', target: 'compute', blurb: 'reduce + a hand-written has() + fromEntries — a groupBy without the builtin', source: GROUP_COUNT },
-  { id: 'object-shape', label: 'Object reshape', target: 'compute', blurb: 'entries / map / fromEntries + spread — immutable object rebuild', source: OBJECT_SHAPE },
+  { id: 'group-count', label: 'Word frequency', target: 'compute', blurb: 'reduce + includes + object — a groupBy without a dedicated builtin', source: GROUP_COUNT },
+  { id: 'object-shape', label: 'Object reshape', target: 'compute', blurb: 'entries / map / object + spread — immutable object rebuild', source: OBJECT_SHAPE },
   { id: 'custom-math', label: 'Vector & buffer math', target: 'compute', blurb: 'vec/mat operators, swizzles, dot/cross/length + a typed-array buffer', source: CUSTOM_MATH },
   { id: 'iterable-builtins', label: 'Builtins over a buffer', target: 'compute', blurb: 'map/filter/slice/reduce/sort accept a typed array directly', source: ITERABLE_BUILTINS },
   { id: 'gpu-compute-map', label: 'GPU map (compute)', target: 'compute', blurb: 'a gpu map kernel on the pure compute path — the settled resource, pretty-printed (no DOM)', source: GPU_COMPUTE_MAP },

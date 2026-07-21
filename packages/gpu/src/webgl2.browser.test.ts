@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, descriptorOf } from '@metael/lang';
 import type { UserFn, HostEnvironment, Arg, HostValue, SourceSpan } from '@metael/lang';
@@ -11,8 +12,8 @@ import { emitWgsl } from './emit-wgsl.ts';
 import { emitCpu } from './emit-cpu.ts';
 import type { DispatchInput } from './device/index.ts';
 
-function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
-function reducerOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('reducer'); return res.value; }
+function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
+function reducerOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('reducer'); return res.value; }
 
 // Assemble a DispatchInput by hand, mirroring the engine's `resource.ts` assembly (gate → tri-target emit →
 // zero-copy input resolution → scalar uniforms). Used to drive the backend contract DIRECTLY (the engine
@@ -371,7 +372,7 @@ describe('@metael/gpu — real WebGL2 dispatch (Chromium)', () => {
   it('sums a 1024-element buffer via a multi-pass WebGL2 tree reduction (matches the oracle)', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32(1024, (i) => i + 1)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(1024, (i) => i + 1)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, deps);
     const cfg = { input: xs, identity: 0, backend: 'webgl2' as const, verify: true };
     change(() => { engine.gpuReduce(reducer, cfg); });
@@ -388,7 +389,7 @@ describe('@metael/gpu — real WebGL2 dispatch (Chromium)', () => {
   it('sums a 777-element buffer (a non-tile-multiple length exercises the partial-tile identity guard)', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32(777, (i) => i + 1)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(777, (i) => i + 1)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, deps);
     const cfg = { input: xs, identity: 0, backend: 'webgl2' as const, verify: true };
     change(() => { engine.gpuReduce(reducer, cfg); });
@@ -406,7 +407,7 @@ describe('@metael/gpu — real WebGL2 dispatch (Chromium)', () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component mx(a, b) { return a > b ? a : b }\nmx`, host);
     // A shuffled range so the max is not the last element — the tree fold must still find it.
-    const xs = evaluateProgram(`f32(500, (i) => (i * 37) % 500)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(500, (i) => (i * 37) % 500)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, deps);
     const cfg = { input: xs, identity: -1e30, backend: 'webgl2' as const, verify: true };
     change(() => { engine.gpuReduce(reducer, cfg); });

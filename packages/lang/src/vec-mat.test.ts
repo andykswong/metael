@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram, descriptorOf } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
-import { makeVec, makeMat, vecStoreOf, descriptorOf as _d } from './custom-types.ts';
-import { NOT_HANDLED as NOT_HANDLED_EXPORT } from './custom-types.ts';
+import { makeVec, makeMat, vecStoreOf, MATH_BUILTINS } from '@metael/math/lang';
+import { descriptorOf as _d, NOT_HANDLED as NOT_HANDLED_EXPORT } from '@metael/lang';
 
-const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
 
 function mul(a: object, b: object): object {
   const res = _d(a)!.binary!('*' as never, a, b);

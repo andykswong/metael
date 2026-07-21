@@ -6,9 +6,15 @@
 // disposal contract runLeafEffect/scope() were built to serve). The domain supplies create + dispose
 // (and its own recursion/patch); the runtime owns the diff + teardown-on-remove.
 
+/** One reconciliation instruction produced by {@link diffKeyed} to turn a `prev` key sequence into a
+ *  `next` one. */
 export type KeyedOp =
+  /** A key present in `next` but not matched in `prev` (a new element, or a duplicate key): create it at
+   *  `index` in the next sequence. */
   | { type: 'add'; key: string; index: number }
+  /** A key present in `prev` but absent from `next`: the element is gone and should be torn down. */
   | { type: 'remove'; key: string }
+  /** A matched key whose position shifted: relocate the retained element from index `from` to `to`. */
   | { type: 'move'; key: string; from: number; to: number };
 
 /** Pure op generation over two key sequences. Duplicate keys in `next` past the first occurrence are
@@ -40,8 +46,14 @@ export function diffKeyed(prev: readonly string[], next: readonly string[]): Key
   return ops;
 }
 
+/** The domain-supplied callbacks {@link applyKeyedDiff} uses to build and tear down list instances while
+ *  reconciling. The runtime owns the diff + teardown-on-remove; the domain owns instance construction and
+ *  disposal. */
 export interface KeyedReconcileHooks<T> {
+  /** Build a fresh instance for a `next` key with no reusable match, at its position `index` in the next
+   *  sequence. */
   create: (key: string, index: number) => T;
+  /** Tear down a `prev` instance that was not carried into the output (its subtree/effects are released). */
   dispose: (item: T) => void;
 }
 

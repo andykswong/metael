@@ -6,7 +6,11 @@
   "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./lang": { "types": "./dist/lang/index.d.ts", "import": "./dist/lang/index.js" },
+    "./builder": { "types": "./dist/builder/index.d.ts", "import": "./dist/builder/index.js" }
+  },
   "files": ["/dist"],
   "engines": { "node": ">=24.0" },
   "scripts": {
@@ -26,6 +30,7 @@
   "publishConfig": { "access": "public", "provenance": true },
   "dependencies": {
     "@metael/lang": "^0.1.0",
+    "@metael/math": "^0.1.0",
     "@metael/runtime": "^0.1.0"
   }
 }

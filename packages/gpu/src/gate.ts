@@ -4,12 +4,29 @@
 // span-anchored. A buffer has no whole-value form in a shader — it is valid ONLY as `a[i]` or `a.length`;
 // anywhere else it is flagged. Helper (callee) bodies are gated recursively against their own closures.
 import type { UserFn, Expr, Stmt, Diagnostic, ReactiveHost } from '@metael/lang';
-import { BUILTINS, makeDiagnostic } from '@metael/lang';
+import { makeDiagnostic } from '@metael/lang';
+import { BUILTINS } from '@metael/math/lang';
 import { buildBindingTable, collectFreeNames } from './binding.ts';
 import type { BindingTable } from './binding.ts';
 
-export interface GateVerdict { readonly core: boolean; readonly reasons: Diagnostic[]; readonly bindings: BindingTable }
+/** The outcome of gating a kernel for GPU-lowerability: whether it can lower, why not (if not), and the
+ *  resolved binding table (reused by the emitters + the oracle so they see the SAME name resolution). */
+export interface GateVerdict {
+  /** `true` iff the kernel is fully GPU-lowerable — every free name resolved, every construct supported, and
+   *  the output shape matched the requested `comps`. `false` means `reasons` is non-empty. */
+  readonly core: boolean;
+  /** The MLGPU-* diagnostics explaining WHY the kernel is not lowerable (empty when `core` is `true`), each
+   *  span-anchored to the offending expression. */
+  readonly reasons: Diagnostic[];
+  /** The kernel's resolved bindings (each free name → coord/buffer/uniform/scalar/callee). Returned so the
+   *  caller reuses this exact table for the emitters + the oracle rather than rebuilding it. */
+  readonly bindings: BindingTable;
+}
 
+/** Decide whether `kernel` can lower to a compute shader: walk its body + closure against the supported
+ *  construct/builtin set, reject anything the interpreter oracle and the shader emitters can't agree on, and
+ *  (for the kernel body, not helpers) check every `return` matches the requested output width `comps`
+ *  (1 = scalar, 2/3/4 = a vecN). Returns a {@link GateVerdict}; never throws. */
 export function gateKernel(kernel: UserFn, host: ReactiveHost, comps = 1): GateVerdict {
   const reasons: Diagnostic[] = [];
   const visited = new Set<UserFn>();
@@ -23,8 +40,38 @@ export function gateKernel(kernel: UserFn, host: ReactiveHost, comps = 1): GateV
   return { core: reasons.length === 0, reasons, bindings };
 }
 
+/** Rewrite a kernel body's TRAILING TOP-LEVEL bare-expression statement into an explicit `return` of that
+ *  expression — the ONE transform that makes the emitters honor metael's implicit-last-expression return the
+ *  interpreter already applies. The interpreter's `execBlockValue` returns the value of a body's LAST
+ *  statement when that statement is an `expr` (a trailing `i + 1` IS the return); the shader/CPU emitters, by
+ *  contrast, lower ONLY an explicit `{kind:'return'}` to the output write and evaluate-and-discard a bare
+ *  `{kind:'expr'}` — so a kernel written `component k(i) { i + 1 }` would dispatch all-zeros while the oracle
+ *  computes the real values. Applying this normalization ONCE (before the gate + every emitter) makes
+ *  CPU/WGSL/GLSL and the interpreter oracle agree.
+ *
+ *  Mirrors the interpreter's semantics EXACTLY: only the LAST statement is the implicit return, and only when
+ *  it is a bare `expr` — a body ending in a `let`/`const`/`assign`/`if`/`for`/`while`/`function`/`component`
+ *  yields no implicit value (its `execStmt` returns `null`), so it is left unchanged; a body already ending in
+ *  an explicit `return` is left untouched; an empty body is left unchanged. Does NOT recurse into `if`/`for`/
+ *  `while` bodies — the interpreter does not propagate a nested block's trailing expr as the function's return,
+ *  only the top-level last statement counts. Returns a NEW array (never mutates the input body). */
+export function normalizeImplicitReturn(body: readonly Stmt[]): Stmt[] {
+  if (body.length === 0) return [...body];
+  const last = body[body.length - 1]!;
+  if (last.kind !== 'expr') return [...body];
+  const rewritten: Extract<Stmt, { kind: 'return' }> = { kind: 'return', value: last.expr, span: last.span };
+  return [...body.slice(0, -1), rewritten];
+}
+
 // A compare op yields a bool (scalar), never a vec — so `a[i] > 0` reads as width 0, not a vec operand.
 const COMPARE = new Set(['==', '!=', '<', '<=', '>', '>=']);
+// The 32-bit bit ops (u32 reinterpret via truncation, matching `>>>0`). The interpreter promotes them
+// componentwise over a vec arg, but the shader emitters lower them for a SCALAR only (WGSL
+// `f32(countOneBits(bitcast<u32>(i32(x))))`; the GLSL `float` prelude helper via `uint(int(x))`) — a vec arg
+// would need a per-width u32 vec cast the scalar case can't express — so the gate
+// REJECTS a vec-typed arg (it falls to the interpreter/CPU, both correct) and admits only the scalar form,
+// keeping gate ↔ emitter in lockstep. A scalar bit input is the sole in-practice shape.
+const BIT_OPS = new Set(['countOneBits', 'reverseBits']);
 // The ONLY swizzle chars the interpreter's vec descriptor evaluates (getMember indexes 'xyzw'). A color
 // (.rgb) / texture (.stpq) swizzle returns NOT_HANDLED → 0 on the CPU oracle + CPU emitter while the
 // WGSL/GLSL shaders compute the real components → a silent GPU-vs-CPU divergence. Only xyzw is lowerable.
@@ -115,6 +162,11 @@ export type LocalShapes = ReadonlyMap<string, { rows: number; cols: number }>;
  *  and doesn't know vecs, so this is the ONE resolver the shape-driven emitter + the determinant gate SHARE. */
 export function shapeOfExpr(e: Expr, locals: LocalShapes): { rows: number; cols: number } | null {
   if (e.kind === 'ident') return locals.get(e.name) ?? null;
+  // A matrix indexes to its i-th COLUMN — a vec of the matrix's ROW count (GLSL/WGSL `m[i]` is native).
+  // Resolve the object's shape (locals-aware): a matMxN (cols > 1) → a column vec {rows, cols:1}. Anything
+  // else (a vec — swizzle-only, no lowerable index; a buffer/unknown) → null. Mirrors the interpreter's mat
+  // getIndex (a column vec) so the width recognizer agrees with the oracle.
+  if (e.kind === 'index') { const o = shapeOfExpr(e.object, locals); return o && o.cols > 1 ? { rows: o.rows, cols: 1 } : null; }
   if (e.kind === 'call' && e.callee.kind === 'ident') {
     const n = e.callee.name;
     if (n === 'transpose') { const s = e.args[0] ? shapeOfExpr(e.args[0], locals) : null; return s ? { rows: s.cols, cols: s.rows } : null; }
@@ -147,18 +199,21 @@ export function buildLocalShapes(kernel: UserFn): Map<string, { rows: number; co
 /** The vec width an expression evaluates to: 0 = scalar/unknown, 2/3/4 = a vecN. Structural + conservative:
  *  a `vec2/3/4(...)` call is its width; `normalize`/`mix` preserve their first arg's width; `cross` is 3;
  *  a vec-bound local/input is its n; a swizzle `v.xy` is the swizzle length (a single `.x` is scalar); a
- *  binary/cond/neg follows its vec operand. Anything unproven is 0 (scalar). `dot`/`length` are scalar. */
-export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap<string, number>): number {
+ *  matrix column read `m[i]` is the matrix's ROW count (GLSL/WGSL native — resolved via `localShapes`, the
+ *  SAME full-shape map the emitter uses so gate ↔ emitter agree); a binary/cond/neg follows its vec operand.
+ *  Anything unproven is 0 (scalar). `dot`/`length` are scalar. `localShapes` carries the body's mat/vec LOCAL
+ *  shapes (from `buildLocalShapes`) so a `const m = mat3(...); m[i]` resolves its column width. */
+export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: ReadonlyMap<string, number>, localShapes: LocalShapes = new Map()): number {
   switch (e.kind) {
     case 'call': {
       if (e.callee.kind === 'ident') {
         const n = e.callee.name;
         if (n === 'vec2') return 2; if (n === 'vec3') return 3; if (n === 'vec4') return 4;
-        if (n === 'normalize' || n === 'mix') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth) : 0;
+        if (n === 'normalize' || n === 'mix') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth, localShapes) : 0;
         if (n === 'cross') return 3;
         // reflect/refract/faceforward return a vector of their first (incident/normal) arg's width — so a
         // vecN output over one is accepted, not read as scalar and rejected.
-        if (n === 'reflect' || n === 'refract' || n === 'faceforward') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth) : 0;
+        if (n === 'reflect' || n === 'refract' || n === 'faceforward') return e.args[0] ? returnVecWidth(e.args[0], bindings, localWidth, localShapes) : 0;
         // Quaternion ops that produce a quat (a vec4): qmul/qconj/qinvert/qaxisangle/qslerp always return a vec4.
         if (n === 'qmul' || n === 'qconj' || n === 'qinvert' || n === 'qaxisangle' || n === 'qslerp') return 4;
         // qrotate produces the rotated 3-vector (a vec3).
@@ -173,8 +228,15 @@ export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: Read
       if (b && (b.role === 'buffer' || b.role === 'uniform') && b.lower.shape === 'vecN') return b.lower.rows ?? 0;
       return 0;
     }
+    case 'index': {
+      // A matrix column read `m[i]` yields a vec of the matrix's ROW count (native `m[i]` in GLSL/WGSL, and
+      // the interpreter's mat getIndex returns exactly that column vec). Resolve the object's shape via the
+      // locals-aware `shapeOfExpr`: a matMxN (cols > 1) → its rows; a buffer/vec/unknown index → scalar (0).
+      const s = shapeOfExpr(e, localShapes);
+      return s && s.cols === 1 && s.rows >= 2 ? s.rows : 0;
+    }
     case 'member': {
-      const w = returnVecWidth(e.object, bindings, localWidth);
+      const w = returnVecWidth(e.object, bindings, localWidth, localShapes);
       // A swizzle of an INCONSISTENT-shape object (w === -1 — the object is a `vec±mat`, a mismatched-width
       // vec binary, a mismatched matmul, or a mismatched-branch ternary) stays inconsistent: `(vec2+mat2).x`
       // has no lowerable value, so the -1 must propagate (not collapse to 0 via the `w >= 2` guard below and
@@ -193,7 +255,7 @@ export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: Read
       }
       return 0;
     }
-    case 'unary': return e.op === '!' ? 0 : returnVecWidth(e.operand, bindings, localWidth);
+    case 'unary': return e.op === '!' ? 0 : returnVecWidth(e.operand, bindings, localWidth, localShapes);
     case 'binary': {
       if (COMPARE.has(e.op)) return 0;   // a comparison is a bool → scalar
       // The interpreter's vec/mat descriptor `binary` handler (the correctness oracle) evaluates ONLY a fixed
@@ -206,7 +268,7 @@ export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: Read
       // matShapeOf-recognized (it recognizes only ctor/transpose/inverse/qmat call nodes), so it flows as a
       // scalar downstream, matching how the interpreter chains e.g. `((mat*scalar) * vec)`.
       const lm = matShapeOf(e.left); const rm = matShapeOf(e.right);
-      const l = returnVecWidth(e.left, bindings, localWidth); const r = returnVecWidth(e.right, bindings, localWidth);
+      const l = returnVecWidth(e.left, bindings, localWidth, localShapes); const r = returnVecWidth(e.right, bindings, localWidth, localShapes);
       // An operand that is itself inconsistent (a nested -1) makes the whole binary inconsistent → propagate.
       if (l === -1 || r === -1) return -1;
       // Operand shape classes (mutually exclusive: a mat has returnVecWidth 0 + a matShapeOf; a vec has
@@ -245,7 +307,7 @@ export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: Read
       return -1;
     }
     case 'cond': {
-      const t = returnVecWidth(e.then, bindings, localWidth); const el = returnVecWidth(e.else, bindings, localWidth);
+      const t = returnVecWidth(e.then, bindings, localWidth, localShapes); const el = returnVecWidth(e.else, bindings, localWidth, localShapes);
       // A ternary whose two branches disagree on vec width (`t ? vec3(..) : vec2(..)`) can't be given one
       // consistent output width. Math.max would collapse (3,2)→3 and let it reach the emitter (a raw shader
       // compile error / silent pad-or-truncate). Signal -1 ("inconsistent") so checkOutputShape rejects it.
@@ -260,12 +322,16 @@ export function returnVecWidth(e: Expr, bindings: BindingTable, localWidth: Read
  *  widths so a `const v = vec3(...); return normalize(v)` is proven. Pushes MLGPU-OUTPUT-SHAPE on a mismatch. */
 function checkOutputShape(kernel: UserFn, comps: number, bindings: BindingTable, reasons: Diagnostic[]): void {
   const localWidth = new Map<string, number>();
+  // The body's mat/vec LOCAL shapes — so a matrix column read `m[i]` (`const m = mat3(...); m[i]`) resolves
+  // its column width. The SAME `buildLocalShapes` the emitter uses, so the gate ↔ emitter shape inference for
+  // a mat-index agrees. Precomputed over the whole body (declaration order).
+  const localShapes = buildLocalShapes(kernel);
   const expected = comps === 1 ? 'a scalar (f32)' : `a vec${comps}`;
   const walk = (stmts: readonly Stmt[]): void => {
     for (const s of stmts) {
       switch (s.kind) {
-        case 'const': case 'let': localWidth.set(s.name, returnVecWidth(s.init, bindings, localWidth)); break;
-        case 'assign': if (s.target.kind === 'ident') localWidth.set(s.target.name, returnVecWidth(s.value, bindings, localWidth)); break;
+        case 'const': case 'let': localWidth.set(s.name, returnVecWidth(s.init, bindings, localWidth, localShapes)); break;
+        case 'assign': if (s.target.kind === 'ident') localWidth.set(s.target.name, returnVecWidth(s.value, bindings, localWidth, localShapes)); break;
         case 'return': {
           // A matrix has no output-cell form: a kernel writes one scalar or one vecN per element, never a
           // whole matrix. Catch it before the scalar/vec width check (a mat ctor otherwise reads as width 0 →
@@ -274,7 +340,7 @@ function checkOutputShape(kernel: UserFn, comps: number, bindings: BindingTable,
             reasons.push(makeDiagnostic('MLGPU-OUTPUT-SHAPE', `a matrix return has no output-cell form — a kernel returns a scalar or a vecN`, s.span));
             break;
           }
-          const w = s.value ? returnVecWidth(s.value, bindings, localWidth) : 0;   // width 0 = scalar (vec is never 1)
+          const w = s.value ? returnVecWidth(s.value, bindings, localWidth, localShapes) : 0;   // width 0 = scalar (vec is never 1)
           // w === -1 = "inconsistent" (a return whose width can't be determined — a mismatched-width ternary
           // or vec binary). Always a shape error regardless of the requested comps: the two branches disagree
           // on the output width, so no single output element fits.
@@ -469,7 +535,7 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
         // object isn't a provable vec (w == 0 — e.g. a complexly-derived local), the return-site
         // `returnVecWidth`/`checkOutputShape` check catches it; a non-vec `.foo` member is handled above.
         else if (!isBufferIdent(e.object) && isXyzwSwizzle(prop) && prop.length >= 1 && prop.length <= 4) {
-          const w = returnVecWidth(e.object, bindings, localWidth);
+          const w = returnVecWidth(e.object, bindings, localWidth, localShapes);
           if (w >= 2 && [...prop].some((ch) => SWIZZLE_ORDER.indexOf(ch) >= w)) {
             flag('MLGPU-NOT-LOWERABLE', `swizzle '.${prop}' reads past the width of a vec${w} (the interpreter cannot evaluate an out-of-range component) — index only x${w >= 2 ? 'y' : ''}${w >= 3 ? 'z' : ''}${w >= 4 ? 'w' : ''}`, e.span);
           }
@@ -522,6 +588,12 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
               const sh = shapeOfExpr(e.args[0], localShapes);
               if (sh && sh.rows !== sh.cols) flag('MLGPU-NOT-LOWERABLE', `determinant(...) requires a square matrix`, e.span);
             }
+            // The 32-bit bit ops lower for a SCALAR only (the emitters' truncating u32 reinterpret). A vec arg
+            // (the interpreter would promote componentwise) has no scalar-case lowering → REJECT so it falls to
+            // the interpreter/CPU (both correct) rather than the emitter's scalar cast over a vec (a type error).
+            else if (BIT_OPS.has(e.callee.name) && e.args[0] && returnVecWidth(e.args[0], bindings, localWidth, localShapes) >= 2) {
+              flag('MLGPU-NOT-LOWERABLE', `${e.callee.name}(...) is lowerable for a scalar bit input only — a vec argument runs on the interpreter/CPU`, e.span);
+            }
           }
           else flag('MLGPU-NOT-LOWERABLE', `call '${e.callee.name}' is not a lowerable builtin or helper`, e.span);
         } else { flag('MLGPU-NOT-LOWERABLE', 'an indirect call is not lowerable', e.span); walkExpr(e.callee); }
@@ -533,7 +605,7 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
   };
   const walkStmt = (s: Stmt): void => {
     switch (s.kind) {
-      case 'const': case 'let': checkReservedName(s.name, s.span); walkExpr(s.init); localWidth.set(s.name, returnVecWidth(s.init, bindings, localWidth)); return;
+      case 'const': case 'let': checkReservedName(s.name, s.span); walkExpr(s.init); localWidth.set(s.name, returnVecWidth(s.init, bindings, localWidth, localShapes)); return;
       case 'assign': {
         // An input buffer is bound read-only in every emitter (WGSL `var<storage, read>`; the CPU/GLSL
         // paths read it through the descriptor and never store into it), so an index-write `buf[i] = …`
@@ -546,7 +618,7 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
           flag('MLGPU-INPUT-WRITE', `cannot assign to an input buffer ('${name}') inside a kernel — inputs are read-only in a compute dispatch`, s.span);
         }
         walkExpr(s.value); walkExpr(s.target);
-        if (t.kind === 'ident') localWidth.set(t.name, returnVecWidth(s.value, bindings, localWidth));
+        if (t.kind === 'ident') localWidth.set(t.name, returnVecWidth(s.value, bindings, localWidth, localShapes));
         return;
       }
       case 'expr': walkExpr(s.expr); return;

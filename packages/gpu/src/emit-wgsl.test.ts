@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from '@metael/lang';
 import { gateKernel } from './gate.ts';
 import { emitWgsl } from './emit-wgsl.ts';
 
-function kernelOf(src: string) { const host = new PlainStorageHost(); const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('kernel'); return { fn: res.value as UserFn, host }; }
+function kernelOf(src: string) { const host = new PlainStorageHost(); const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('kernel'); return { fn: res.value as UserFn, host }; }
 
 describe('WGSL emitter', () => {
   it('emits a compute entry with workgroup size, a bounds guard, storage buffers, and a flat-index write', () => {
@@ -210,5 +211,87 @@ describe('WGSL emitter', () => {
     expect(wgsl).toContain('@workgroup_size(4, 4, 4)');
     expect(wgsl).toContain('gid.z');
     expect(wgsl).toContain('(gid.x * _p.cols + gid.y) * _p.deps + gid.z');
+  });
+
+  // ─── The structured constructors + column access (native to WGSL) ───
+  it('vecN composition passes vec args through natively (vec3<f32>(vec2<f32>(..), ..))', () => {
+    const { fn, host } = kernelOf('component k(i) { return vec3(vec2(i, i * 2), i + 7) } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host, 3).bindings, 'f32', 3);
+    expect(wgsl).toContain('vec3<f32>(vec2<f32>(');   // the vecM arg emits as its own vec expr, joined
+  });
+  it('matMxN from column vecs emits the native column constructor (mat2x2<f32>(vec2<f32>(..), vec2<f32>(..)))', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat2(vec2(1, 2), vec2(3, 4)) return (m * vec2(i, i)).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(wgsl).toContain('mat2x2<f32>(vec2<f32>(f32(1), f32(2)), vec2<f32>(f32(3), f32(4)))');
+  });
+  it('m[i] mat column read emits m[u32(round(..))] and the vecN return reads it as a vec3', () => {
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4, 5, 6, 7, 8, 9) return m[1].xyz } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host, 3).bindings, 'f32', 3);
+    expect(wgsl).toMatch(/let _r0 = m\[u32\(round\(f32\(1\)\)\)\]\.xyz;/);   // the column read → a vec3 temp
+    expect(wgsl).toContain('_out[_flat * 3u + 0u] = _r0.x;');                // 3 flat writes ⇒ shape resolved to vec3
+    expect(wgsl).toContain('_out[_flat * 3u + 2u] = _r0.z;');
+  });
+  it('a mat column divide emits the NATIVE componentwise divide, not a scalar select-guard (a WGSL type error)', () => {
+    // `m[1] / 2` — the column read is a vec, so the divide guard must NOT wrap it in the scalar
+    // `select(l/r, f32(0), r == f32(0))` (a vec/scalar type mismatch); it emits the bare native divide.
+    const { fn, host } = kernelOf('component k(i) { const m = mat3(1, 2, 3, 4, 5, 6, 7, 8, 9) return (m[1] / 2).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(wgsl).toContain('(m[u32(round(f32(1)))] / f32(2)).x');
+    expect(wgsl).not.toMatch(/select\(m\[u32\(round\(f32\(1\)\)\)\] \//);   // no scalar guard over the column vec
+  });
+
+  // ─── newly-lowered scalar builtins: mod (floored) + the inverse hyperbolics (native, via lowerName) ───
+  it('lowers mod to the FLOORED form x - y*floor(x/y), NOT the truncated WGSL % (sign follows the divisor)', () => {
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return mod(a[i], 3) }\nk');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).toContain('floor(');                   // the floored form
+    expect(wgsl).not.toMatch(/\]\s*%\s*/);              // no bare truncated `%` operator
+    expect(wgsl).toMatch(/\) - \(.*\) \* floor\(/);     // x - y*floor(x/y)
+  });
+  it('lowers asinh/acosh/atanh to the native WGSL builtins of the same name (via lowerName)', () => {
+    for (const name of ['asinh', 'acosh', 'atanh']) {
+      const { fn, host } = kernelOf(`const a = f32(4, (i) => i)\ncomponent k(i) { return ${name}(a[i]) }\nk`);
+      expect(emitWgsl(fn, gateKernel(fn, host).bindings, 'f32')).toContain(`${name}(`);
+    }
+  });
+  it('mod over a vec arg emits a componentwise floored form (WGSL floor/*/− are componentwise)', () => {
+    const { fn, host } = kernelOf('component k(i) { return mod(vec2(i, i), 3).x } k');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host, 1).bindings, 'f32', 1);
+    expect(wgsl).toContain('floor(');
+    expect(wgsl).not.toMatch(/vec2<f32>\(i, i\)\s*%/);   // never a bare `%` over the vec
+  });
+
+  // ─── the 32-bit bit ops: WGSL has native countOneBits/reverseBits (on u32), so a round-trip wraps them. The
+  //     input is TRUNCATED toward zero (matching the interpreter's ToUint32 / `>>>0` coercion), NOT rounded — via
+  //     `bitcast<u32>(i32(x))`: `i32(f)` truncates, and the bitcast reproduces `>>>0`'s negative wrap. ───
+  it('lowers countOneBits via the native WGSL builtin, TRUNCATING f32 through i32+bitcast (not round)', () => {
+    // The map-output store is f32, but the bit op is defined on u32 — so the arg is `bitcast<u32>(i32(x))`
+    // (truncate toward zero, matching `>>>0`) and the native result (a 0..32 count) is cast back to `f32`.
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return countOneBits(a[i]) }\nk');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).toMatch(/f32\(countOneBits\(bitcast<u32>\(i32\(.*\)\)\)\)/);
+    expect(wgsl).not.toMatch(/countOneBits\(u32\(round\(/);   // never rounds the bit-op input (would diverge from the oracle)
+  });
+  it('lowers reverseBits via the native WGSL builtin, TRUNCATING f32 through i32+bitcast (not round)', () => {
+    // Reversal preserves the significant-bit SPAN, so reverseBits of an f32-exact integer is itself f32-exact
+    // — the f32 store is lossless for the buffer's (f32-exact) integer inputs.
+    const { fn, host } = kernelOf('const a = f32(4, (i) => i)\ncomponent k(i) { return reverseBits(a[i]) }\nk');
+    const wgsl = emitWgsl(fn, gateKernel(fn, host).bindings, 'f32');
+    expect(wgsl).toMatch(/f32\(reverseBits\(bitcast<u32>\(i32\(.*\)\)\)\)/);
+    expect(wgsl).not.toMatch(/reverseBits\(u32\(round\(/);
+  });
+});
+
+// The LOUD no-lowering placeholder: a builtin with no shader lowering must THROW at emit (a gate↔emitter
+// drift is loud), NOT emit a silent f32(0)/0.0 that compiles to a wrong-but-quiet 0. The gate normally
+// rejects such a head first (so this is unreachable for a gate-accepted kernel), but the throw is the
+// defense-in-depth that turns a future drift into a caught diagnostic instead of a silent divergence.
+describe('WGSL emitter — loud failure on an un-lowerable builtin (no silent-0 placeholder)', () => {
+  it('throws when a head with no shader lowering reaches the emitter', () => {
+    // `perspective` builds a mat4 and has no WGSL lowering; it currently passes the (shape-only) gate, so it
+    // reaches the emitter's fallthrough — which must THROW, not emit a silent placeholder.
+    const { fn, host } = kernelOf('component k(i) { return (perspective(1, 1, 1, 2) * vec4(1, 0, 0, 0)).x } k');
+    const { bindings } = gateKernel(fn, host, 1);
+    expect(() => emitWgsl(fn, bindings, 'f32', 1)).toThrow(/no WGSL lowering for builtin 'perspective'/);
   });
 });

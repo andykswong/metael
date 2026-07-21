@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mount } from './mount.ts';
+import { STD_BUILTINS } from '@metael/std';
+import { renderSource } from './lang/render-source.ts';
 import { reconcile, type ReconcileHooks } from './reconcile.ts';
 import { createDom } from './patch.ts';
 import { type VNode } from './vnode.ts';
@@ -10,7 +11,7 @@ beforeEach(() => { container = document.createElement('div'); document.body.appe
 
 describe('@metael/vdom disposal — a removed subtree is torn down (no leak, no resurrection)', () => {
   it('removing a row via a DSL click detaches it + it never returns on a later add', () => {
-    const h = mount(TODO, container, {});          // items in-component; remove = filter() reassign, add = spread
+    const h = renderSource(TODO, container, { builtins: [STD_BUILTINS] });   // items in-component; remove = filter() reassign, add = spread
     const rows = () => Array.from(container.querySelectorAll('li'));
     const removed = rows()[1]!;                      // the id:1 "second" row
     (removed.querySelector('button') as HTMLButtonElement).click();   // remove id:1

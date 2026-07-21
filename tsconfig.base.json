@@ -16,7 +16,13 @@
       "@metael/lang": ["./packages/lang/src/index.ts"],
       "@metael/runtime": ["./packages/runtime/src/index.ts"],
       "@metael/vdom": ["./packages/vdom/src/index.ts"],
-      "@metael/gpu": ["./packages/gpu/src/index.ts"]
+      "@metael/vdom/lang": ["./packages/vdom/src/lang/index.ts"],
+      "@metael/gpu/builder": ["./packages/gpu/src/builder/index.ts"],
+      "@metael/gpu/lang": ["./packages/gpu/src/lang/index.ts"],
+      "@metael/gpu": ["./packages/gpu/src/index.ts"],
+      "@metael/math": ["./packages/math/src/core/index.ts"],
+      "@metael/math/lang": ["./packages/math/src/lang/index.ts"],
+      "@metael/std": ["./packages/std/src/index.ts"]
     }
   }
 }

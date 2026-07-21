@@ -9,13 +9,16 @@
 // vec/mat construct + operate natively. Unlike WGSL, GLSL has no `let` type inference — a `const`/`let`
 // must be declared with a concrete type, so each initializer's GLSL type is inferred (float / vecN / matN).
 import type { UserFn, Expr, Stmt } from '@metael/lang';
-import { BUILTINS } from '@metael/lang';
+import { BUILTINS } from '@metael/math/lang';
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
 
 // Core-exact builtins the gate accepts but that carry no registry `lowerName` — they map to a native GLSL
 // function of the same name (round → roundEven so ties-to-even matches the interpreter/CPU + WGSL).
-const GLSL_CORE_FN: Readonly<Record<string, string>> = { min: 'min', max: 'max', abs: 'abs', sign: 'sign', floor: 'floor', ceil: 'ceil', clamp: 'clamp', round: 'roundEven' };
+// `mod` maps to GLSL's native `mod`, which is ALREADY floored (sign follows the divisor) — exactly metael's
+// core.mod — so no bespoke case is needed (unlike WGSL, whose `%` is truncated). Its result is componentwise
+// for a vec arg (like the other core fns), which `glslType`'s GLSL_CORE_FN branch declares correctly.
+const GLSL_CORE_FN: Readonly<Record<string, string>> = { min: 'min', max: 'max', abs: 'abs', sign: 'sign', floor: 'floor', ceil: 'ceil', clamp: 'clamp', round: 'roundEven', mod: 'mod' };
 const VEC_CTORS = new Set(['vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4', 'mat2x3', 'mat2x4', 'mat3x2', 'mat3x4', 'mat4x2', 'mat4x3']);
 const COMPARE_OPS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 
@@ -58,10 +61,54 @@ function glslQuatPrelude(kernel: UserFn): string[] {
   return out;
 }
 
+const COUNTONEBITS_NAME: ReadonlySet<string> = new Set(['countOneBits']);
+const REVERSEBITS_NAME: ReadonlySet<string> = new Set(['reverseBits']);
+// ─── the 32-bit bit ops as GLSL ES 3.00 prelude helpers (injected ONCE before `main`, keyed on body references) ───
+// GLSL ES 3.00 (the WebGL2 target) has NO bitCount/bitfieldReverse (an ES 3.10 feature), but it DOES have `uint`,
+// the bitwise operators, and int↔uint reinterpret casts — enough to hand-roll both ops (mirroring the quat prelude
+// pattern). Each helper takes/returns `float` (the scalar body type): the arg is reinterpreted as a 32-bit unsigned
+// integer via `uint(int(x))` — TRUNCATE toward zero (matching the interpreter's ToUint32 / `x >>> 0` coercion), NOT
+// round. `int(float)` truncates toward zero per the GLSL ES 3.00 spec; the double cast goes through `int` first
+// because `uint(negativeFloat)` is undefined, whereas int→uint is a defined bit-pattern reinterpret — so a negative
+// input wraps like `>>>0` (uint(int(-1.0)) = 0xFFFFFFFF). Truncation (not roundEven) is what `>>>0` does, so a
+// fractional input like 3.9 counts bits of 3, matching the interpreter, rather than rounding up to 4.
+//   _countOneBits: the SWAR population count — pairwise bit sums (0x55), 2-bit sums (0x33), nibble sums (0x0F),
+//     then a `* 0x01010101 >> 24` horizontal byte sum. The result is 0..32 → always f32-exact.
+//   _reverseBits: the standard 32-bit reverse — swap adjacent bits, then 2-bit fields, nibbles, bytes, 16-bit
+//     halves. `float(v)` is f32-exact for an f32-exact integer input (reversal preserves the ≤24-bit span).
+function glslBitPrelude(kernel: UserFn): string[] {
+  const out: string[] = [];
+  if (bodyReferencesAny(kernel, COUNTONEBITS_NAME)) out.push([
+    'float _countOneBits(float x) {',
+    '  uint v = uint(int(x));',
+    '  v = v - ((v >> 1u) & 0x55555555u);',
+    '  v = (v & 0x33333333u) + ((v >> 2u) & 0x33333333u);',
+    '  v = (v + (v >> 4u)) & 0x0F0F0F0Fu;',
+    '  return float((v * 0x01010101u) >> 24u);',
+    '}',
+  ].join('\n'));
+  if (bodyReferencesAny(kernel, REVERSEBITS_NAME)) out.push([
+    'float _reverseBits(float x) {',
+    '  uint v = uint(int(x));',
+    '  v = ((v & 0xAAAAAAAAu) >> 1u) | ((v & 0x55555555u) << 1u);',
+    '  v = ((v & 0xCCCCCCCCu) >> 2u) | ((v & 0x33333333u) << 2u);',
+    '  v = ((v & 0xF0F0F0F0u) >> 4u) | ((v & 0x0F0F0F0Fu) << 4u);',
+    '  v = ((v & 0xFF00FF00u) >> 8u) | ((v & 0x00FF00FFu) << 8u);',
+    '  v = (v >> 16u) | (v << 16u);',
+    '  return float(v);',
+    '}',
+  ].join('\n'));
+  return out;
+}
+
 // A local-name → GLSL-type environment threaded through emission so a `const`/`let` can be declared with the
 // right type (float by default; vecN/matN for vec-bearing intermediates).
 type TypeEnv = Map<string, string>;
 
+/** Emit the GLSL-ES 3.0 compute-via-fragment shader for a map kernel: one sampler/texture per buffer input,
+ *  the packed uniforms, and the per-fragment coordinate decode are derived from `bindings`. `precision` maps
+ *  to the float qualifier (`highp` for f32, `mediump` for f16); `comps` sets the per-cell output width. Throws
+ *  (a loud gate↔emitter drift) if a gate-accepted construct has no GLSL lowering. */
 export function emitGlsl(kernel: UserFn, bindings: BindingTable, precision: 'f16' | 'f32', comps = 1): string {
   const fprec = precision === 'f16' ? 'mediump' : 'highp';
   const params = kernel.params.map((p) => (p.kind === 'name' ? p.name : ''));
@@ -88,6 +135,7 @@ export function emitGlsl(kernel: UserFn, bindings: BindingTable, precision: 'f16
   L.push('out vec4 _frag;');
   L.push('float _fetch(sampler2D t, int idx, int w) { return texelFetch(t, ivec2(idx % w, idx / w), 0).r; }');
   L.push(...glslQuatPrelude(kernel));
+  L.push(...glslBitPrelude(kernel));
   L.push('void main() {');
   L.push('  int _fx = int(gl_FragCoord.x); int _fy = int(gl_FragCoord.y);');
   if (rank === 3) {
@@ -244,6 +292,10 @@ function emitExpr(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       if (name === 'atan2') return `atan(${args})`;
       // faceforward has no registry lowerName (its WGSL name differs); GLSL spells it faceforward.
       if (name === 'faceforward') return `faceforward(${args})`;
+      // The 32-bit bit ops call the injected `_countOneBits`/`_reverseBits` prelude helpers (GLSL ES 3.00 has no
+      // bitCount/bitfieldReverse). The gate rejects a VEC arg, so `${args}` is a single scalar here.
+      if (name === 'countOneBits') return `_countOneBits(${args})`;
+      if (name === 'reverseBits') return `_reverseBits(${args})`;
       // ─── quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w; hand-emitted — GLSL has no quat type) ───
       // qconj negates the imaginary part; qinvert = conj / dot(q,q); qmul is the Hamilton product (see WGSL emitter).
       if (name === 'qconj') { const q = emitExpr(e.args[0]!, tenv, bindings); return `(${q} * vec4(-1.0, -1.0, -1.0, 1.0))`; }
@@ -265,8 +317,11 @@ function emitExpr(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       if (name === 'inverseSqrt') return `((${args}) <= 0.0 ? 0.0 : inversesqrt(${args}))`;
       if (spec?.lowerName) return `${spec.lowerName}(${args})`;
       if (GLSL_CORE_FN[name]) return `${GLSL_CORE_FN[name]}(${args})`;
-      // Unreachable for a gate-accepted kernel (every emittable head is handled above); a defensive placeholder.
-      return `/* unsupported call ${name} */ 0.0`;
+      // Unreachable for a gate-accepted kernel (the gate rejects every head with no shader lowering, so gate ↔
+      // emitter stay in lockstep). Fail LOUD if one ever reaches here anyway (a future gate↔emitter drift) —
+      // a thrown error the engine catches into a local diagnostic — rather than the old silent `0.0`
+      // placeholder, which compiled to a wrong-but-quiet 0 that diverged from the interpreter oracle unnoticed.
+      throw new Error(`metael-gpu: no GLSL lowering for builtin '${name}' — the gate should have rejected this kernel`);
     }
     default: return '0.0';
   }
@@ -339,6 +394,7 @@ export function emitReduceGlsl(reducer: UserFn, bindings: BindingTable): string 
   L.push(`const int TILE = ${REDUCE_TILE};`);   // a COMPILE-TIME constant loop bound (GLSL-ES-3.00 requires it)
   L.push('float _fetch(sampler2D t, int idx, int w) { return texelFetch(t, ivec2(idx % w, idx / w), 0).r; }');
   L.push(...glslQuatPrelude(reducer));
+  L.push(...glslBitPrelude(reducer));
   L.push(`float _reduce(float ${acc}, float ${x}) {`);
   L.push(body);
   L.push('}');
@@ -367,7 +423,16 @@ function glslType(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
   switch (e.kind) {
     case 'number': case 'bool': return 'float';
     case 'ident': return tenv.get(e.name) ?? 'float';
-    case 'index': return 'float';   // buffer[i] → float; a vec[i] → float
+    case 'index': {
+      // A matrix column read `m[i]` is a vec of the matrix's ROW count (native GLSL — indexing a mat yields a
+      // column vec), so a `const c = m[i];` must declare `vecR c`, not `float c` (a GLSL compile error). The
+      // object's GLSL type comes from `tenv` (a mat local) or a direct mat ctor: matN (N×N) → vecN; matCxR
+      // (C cols × R rows — GLSL's ColumnsxRows naming, matching metael's) → vecR. A BUFFER index stays float.
+      const ot = glslType(e.object, tenv, bindings);
+      const m = /^mat(\d)(?:x(\d))?$/.exec(ot);
+      if (m) return `vec${m[2] ?? m[1]}`;
+      return 'float';   // buffer[i] → float; a vec[i] → float
+    }
     case 'member': {
       const obj = e.object;
       if (obj.kind === 'ident' && bindings.byName.get(obj.name)?.role === 'buffer' && e.property === 'length') return 'float';

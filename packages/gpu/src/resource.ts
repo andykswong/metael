@@ -1,6 +1,7 @@
 import type { Diagnostic, ReactiveHost, UserFn, CellRef } from '@metael/lang';
-import { descriptorOf, generationOf, makeDiagnostic, makeTypedArray, markFrozen } from '@metael/lang';
-import { gateKernel, checkMultiOutputShape, synthOutputKernel } from './gate.ts';
+import { descriptorOf, generationOf, makeDiagnostic, markFrozen } from '@metael/lang';
+import { makeTypedArray } from '@metael/math/lang';
+import { gateKernel, checkMultiOutputShape, synthOutputKernel, normalizeImplicitReturn } from './gate.ts';
 import { gateReducer, cpuReduce } from './reduce.ts';
 import { gateBinMapper, cpuHistogram } from './histogram.ts';
 import { checkStaticBounds } from './bounds.ts';
@@ -17,9 +18,18 @@ import { selectBackend } from './device/index.ts';
 import { makeGpuBufferHandle, residentInfo, disposeHandle } from './handle.ts';
 import { compsOf, type OutputElement } from './output.ts';
 
+/** The configuration for a map `gpu(kernel, cfg)` dispatch: the output grid shape, the numeric precision +
+ *  target backend, opt-in verify/benchmark, and the output shape (per-cell element width, buffer/handle
+ *  wrapping, or a named multi-output set). Every field but `output` is optional with a documented default. */
 export interface GpuConfig {
+  /** The output GRID dimensions (`[W]`, `[W,H]`, or `[W,H,D]`). Each is the extent along a thread axis, so the
+   *  kernel's parameter count MUST equal `output.length` (the params ARE the thread coordinates). */
   readonly output: readonly number[];
+  /** The shader numeric precision. `'f32'` (default) runs everywhere; `'f16'` runs only on a shader-f16
+   *  WebGPU device with no scalar uniform, and otherwise cleanly downgrades to f32 with a `note`. */
   readonly precision?: 'f16' | 'f32';
+  /** Which backend to run on. `'auto'` (default) takes the best available (WebGPU → WebGL2 → CPU); an explicit
+   *  `'webgpu'`/`'webgl2'`/`'cpu'` pins it (still re-laddering DOWN on a runtime dispatch fault). */
   readonly backend?: 'auto' | BackendKind;
   /** Opt-in: after the GPU dispatch, re-run a SAMPLE of output cells through the interpreter and
    *  tolerance-check the GPU output against it (populates `match`). Off by default — a CPU-side interpreter
@@ -62,6 +72,7 @@ export interface GpuConfig {
  *  linear fold as the oracle floor. Only the SCALAR fold ships — `scan:true` (a prefix-scan buffer output) is
  *  a follow-on and is REJECTED (`MLGPU-NOT-LOWERABLE`), never silently folded to the scalar. */
 export interface ReduceConfig {
+  /** The values to fold: a typed-array custom value (an f32/i32/u32 buffer). */
   readonly input: unknown;   // a typed-array custom value (an f32 buffer) — the values to fold
   /** The fold seed. It MUST be the reducer's NEUTRAL element — the value `e` for which `reduce(e, x) === x`
    *  for every `x` (0 for a sum, 1 for a product, a very-negative sentinel like -1e30 / -Infinity for max, a
@@ -74,9 +85,16 @@ export interface ReduceConfig {
    *  adds 5 once, the GPU adds it once per tile per pass). `verify: true` catches such a divergence
    *  (`match.ok === false`); with verify off the wrong answer is silent — hence the contract. */
   readonly identity: number;
+  /** UNBUILT: a prefix-scan (a running-total BUFFER output) is a follow-on. `scan:true` is REJECTED loudly
+   *  (`MLGPU-NOT-LOWERABLE`), never silently folded to the scalar; only the scalar fold ships. */
   readonly scan?: boolean;   // UNBUILT: a prefix-scan (a buffer output) is a follow-on; `scan:true` is REJECTED (MLGPU-NOT-LOWERABLE) — only the scalar fold ships
+  /** Which backend to fold on (`'auto'` default). A real GPU rung runs the tree reduction; the CPU floor runs
+   *  the linear-fold oracle. Re-ladders DOWN on a dispatch fault or a rung lacking a reduction path. */
   readonly backend?: 'auto' | BackendKind;
+  /** Opt-in: check the settled scalar against the linear-fold oracle within the reduction tolerance (a tree
+   *  fold reorders operands → float-associativity ulps). Off by default. */
   readonly verify?: boolean;
+  /** Opt-in: also time a CPU-fold baseline to populate `cpuMs`/`speedup`. Off by default. */
   readonly benchmark?: boolean;
 }
 /** A HISTOGRAM config: a 1-arg bin-mapper maps each input element to a BIN INDEX; the result is a per-bin
@@ -87,23 +105,61 @@ export interface ReduceConfig {
  *  falls to the CPU oracle — settled `backend: 'cpu'` + a note). An out-of-range bin index (< 0 or >= bins) is
  *  DROPPED (not counted), the standard histogram bounds behavior; CPU + WGSL agree via a bounds guard. */
 export interface HistogramConfig {
+  /** The values to bin: a typed-array custom value (an f32/i32/u32 buffer). */
   readonly input: unknown;   // a typed-array custom value (an f32 buffer) — the values to bin
+  /** The number of buckets — the result `value` is a `number[]` of this length (the per-bin counts). */
   readonly bins: number;     // the number of buckets — the result `value` is a number[] of this length (the counts)
+  /** Which backend to scatter on (`'auto'` default). WebGPU does the real atomic scatter; the CPU floor and
+   *  the WebGL2 rung (no fragment atomics) both run the exact `cpuHistogram` oracle. */
   readonly backend?: 'auto' | BackendKind;
+  /** Opt-in: check the settled counts against the exact oracle (an exact integer match, no tolerance). Off
+   *  by default. */
   readonly verify?: boolean;
+  /** Opt-in: also time a CPU baseline to populate `cpuMs`/`speedup`. Off by default. */
   readonly benchmark?: boolean;
 }
+/** The reactive resource a `gpu`/`gpuReduce`/`gpuHistogram` head returns: a pure value in expression position
+ *  a program can read fields off. It starts `pending` (or already-settled with an `error` if non-lowerable),
+ *  then settles in place with the produced `value`/`outputs`, the backend that ran, and any timing/verify
+ *  data. All fields are readable from metael source (`r.core`, `r.wgsl`, `r.gpuMs`, …). */
 export interface GpuResource {
-  core: boolean; reasons: Diagnostic[]; wgsl: string; glsl: string; backend: BackendKind;
+  /** `true` iff the kernel was fully GPU-lowerable (nothing flagged by the gate / bounds / cost / rank
+   *  checks). When `false`, `reasons` explains why and no dispatch runs. */
+  core: boolean;
+  /** The MLGPU-* diagnostics explaining any non-lowerability (empty when `core`). */
+  reasons: Diagnostic[];
+  /** The WGSL compute shader the WebGPU leg runs (the shader that ACTUALLY ran once settled, reflecting the
+   *  effective precision); `''` when non-core or emit failed. */
+  wgsl: string;
+  /** The GLSL-ES compute-via-fragment shader the WebGL2 leg runs; `''` when non-core, emit failed, or the
+   *  kind has no GLSL path (e.g. a histogram). */
+  glsl: string;
+  /** The backend the run ACTUALLY settled on (`'cpu'` until settled, then the succeeding rung). */
+  backend: BackendKind;
+  /** `true` while the dispatch is in flight; `false` once settled (with `value`/`outputs`) or failed (with
+   *  `error`), or immediately for a non-core / cost-rejected / emit-failed resource. */
+  pending: boolean;
   /** The settled result. A map `gpu()` sets a `number[]` (default) or a typed-array/handle `object`; a
    *  multi-output run leaves it `null` (see `outputs`); a scalar `gpuReduce` sets a bare `number`. Widened to
    *  admit that scalar — additive + back-compat (every prior consumer read an array/object/null). */
-  pending: boolean; value: number[] | object | number | null; error: Diagnostic | null;
+  value: number[] | object | number | null;
+  /** The terminal diagnostic when the run failed (non-lowerable, over budget, an emit drift, an unavailable
+   *  input, or a dispatch fault); `null` on a successful or still-pending run. */
+  error: Diagnostic | null;
   /** MULTI-OUTPUT result: `{ <name>: number[] }` when `cfg.outputs` was used (with `value === null` — a
    *  multi-output run has no single primary value); `null` for a single-output run (back-compat — then
    *  `value` carries the single output as before). */
   outputs: Record<string, number[] | object> | null;
-  gpuMs: number | null; cpuMs: number | null; speedup: number | null; match: MatchVerdict | null;
+  /** The GPU dispatch time in milliseconds when a real GPU rung ran; `null` on the CPU floor or before
+   *  settling. */
+  gpuMs: number | null;
+  /** The CPU-baseline time in milliseconds when `benchmark` was requested; `null` otherwise. */
+  cpuMs: number | null;
+  /** The GPU-vs-CPU speedup (`cpuMs / gpuMs`) when benchmarking a real GPU run; `null` on CPU, without
+   *  `benchmark`, or when the GPU timer read zero. */
+  speedup: number | null;
+  /** The oracle verdict when `verify` was requested (a sampled tolerance check); `null` otherwise. */
+  match: MatchVerdict | null;
   /** A human-readable notice about the settled run, or `null`. Today it carries a PRECISION-FALLBACK notice:
    *  an `f16` request that ran at `f32` (because the acquired backend lacked shader-f16, or the kernel has a
    *  scalar uniform whose f16 uniform-packing path isn't supported yet) — the values are correct f32, and the
@@ -127,12 +183,20 @@ function rankGate(kernel: UserFn, dims: readonly number[]): Diagnostic[] {
   return reasons;
 }
 
+/** The device dependencies a {@link GpuEngine} acquires backends through — injected so headless/test runs can
+ *  stub out real device acquisition (a CPU-only engine passes deps that always return `null`). */
 export interface GpuEngineDeps {
+  /** Probe for a real WebGPU backend (verifying an actual adapter/device); resolves `null` when none. */
   tryWebGpu: () => Promise<Backend | null>;
+  /** Probe for a real WebGL2 backend; returns `null` when none (e.g. headless node). */
   tryWebGl2: () => Backend | null;
+  /** The device limits used by the cost gate BEFORE any backend is acquired (typically {@link CPU_LIMITS}). */
   limitsHint: DeviceLimits;
 }
 
+/** The compute engine: it turns a `gpu`/`gpuReduce`/`gpuHistogram` head call into a reactive {@link GpuResource}
+ *  — gating the kernel, emitting the three shaders, memoizing by kernel+config+input state, and dispatching on
+ *  the host-driven async queue down a WebGPU → WebGL2 → CPU device ladder. One engine per reactive host. */
 export class GpuEngine {
   private readonly host: ReactiveHost;
   private readonly deps: GpuEngineDeps;
@@ -149,13 +213,53 @@ export class GpuEngine {
   // f32 input stays on the generation path (back-compat), a gpu-buffer stays on the nonce path.
   private readonly outputIdentity = new WeakMap<object, number>();
   private outputNonce = 0;
+  // Coerce-once cache for a PLAIN metael array input (a `const x = [1, 2, 3]` literal — no typed-array
+  // descriptor, so it has no f32 store to hand the backend zero-copy). Keyed by the array's CONTENT
+  // fingerprint (NOT object identity): a plain array is rebuilt FRESH each reactive derive, so identity
+  // keying would miss every time → an O(n) `Float32Array.from` per dispatch, and worse, a fresh-identity
+  // dispatch key → an infinite re-dispatch loop. Content-fingerprint keying is convergent: identical content
+  // → the SAME key → a cache hit → the SAME coerced Float32Array is reused → a fixpoint. A typed-array buffer
+  // (which already has an f32 store or its own convert-once view) never enters this cache — only the plain
+  // no-descriptor array does. CAPPED at MAX_LIVE distinct contents with FIFO eviction (a Map iterates in
+  // insertion order, so the oldest content-key is dropped before a new one would exceed the cap — see
+  // resolveInputs) — this is a SEPARATE structure from the memo (which is LRU-capped to MAX_LIVE), so it
+  // needs its own bound: a component deriving a fresh plain array from CHANGING data each frame (distinct
+  // content every derive) would otherwise grow it without limit.
+  private readonly plainArrayCoerceCache = new Map<string, Float32Array>();
   private readonly queue: (() => Promise<void>)[] = [];
   private draining = false;
   private disposed = false;
 
+  /** Construct the engine over a reactive host (whose cells/generations drive the resource lifecycle) and the
+   *  device deps it acquires backends through. */
   constructor(host: ReactiveHost, deps: GpuEngineDeps) { this.host = host; this.deps = deps; }
 
-  gpu(kernel: UserFn, cfg: GpuConfig): GpuResource {
+  /** Run a SYNCHRONOUS shader emit, catching a loud emitter throw into a local diagnostic. The emitters throw
+   *  (rather than emitting a silent wrong-0 placeholder) if a gate-accepted head has no shader lowering — a
+   *  gate↔emitter drift. These synchronous emit sites run INSIDE the reader's derive (the interpreter's
+   *  resolveCall), which is not wrapped in a catch, so an uncaught throw would escape to the top-level catch →
+   *  ML-LANG-INTERNAL → the WHOLE component tree is lost. Failing closed to a local MLGPU-EMIT diagnostic keeps
+   *  the failure local to this node (the rest of the tree derives normally) and skips the dispatch. The async
+   *  re-emit sites already sit inside a dispatch try/catch (→ MLGPU-DISPATCH), so only the sync sites use this. */
+  private safeEmit<T>(fn: () => T): { value: T; error: null } | { value: null; error: Diagnostic } {
+    try { return { value: fn(), error: null }; }
+    catch (e) { return { value: null, error: makeDiagnostic('MLGPU-EMIT', String((e as Error)?.message ?? e)) }; }
+  }
+
+  /** Dispatch a MAP kernel (its params ARE the thread coordinates) over the `cfg.output` grid, returning a
+   *  reactive {@link GpuResource} synchronously (initially `pending`, then settled in place). Gates the kernel,
+   *  emits the shaders, memoizes by kernel+config+input state (a memo hit re-reads the existing cell), and
+   *  enqueues the async dispatch. Delegates to the multi-output path when `cfg.outputs` is set. Never throws:
+   *  a non-lowerable kernel or a failed input read settles with an `error`. */
+  gpu(rawKernel: UserFn, cfg: GpuConfig): GpuResource {
+    // Honor metael's implicit-last-expression return: rewrite a trailing bare `expr` in the kernel body to an
+    // explicit `return` BEFORE the gate + emit, so the emitters (which lower only an explicit `return`) agree
+    // with the interpreter oracle (which returns the body's last-expr value). Applied ONCE at the top so
+    // rankGate/gateKernel/emit AND the memo key (kernelHash) all operate on the normalized AST — an implicit-
+    // return kernel therefore hashes identically to its explicit-return equivalent (they are the same AST). The
+    // multi-output path (gpuMulti) receives this normalized kernel too, so `synthOutputKernel` operates on an
+    // already-normalized body — fixing the multi-output implicit-return form as well.
+    const kernel: UserFn = { ...rawKernel, body: normalizeImplicitReturn(rawKernel.body) };
     const precision = cfg.precision ?? 'f32';
     const requested: 'auto' | BackendKind = cfg.backend ?? 'auto';
     if (cfg.outputs !== undefined) return this.gpuMulti(kernel, cfg, precision, requested);
@@ -196,18 +300,24 @@ export class GpuEngine {
     const hit = this.memo.get(key);
     if (hit) return this.host.readCell(hit.cell) as GpuResource;
 
-    const wgsl = core ? emitWgsl(kernel, bindings, precision, comps) : '';
-    const glsl = core ? emitGlsl(kernel, bindings, precision, comps) : '';
+    // Emit through safeEmit: a loud emitter throw (a gate↔emitter drift — a gate-accepted head with no shader
+    // lowering) becomes a local MLGPU-EMIT diagnostic instead of escaping the reader's derive + collapsing the
+    // component tree. On an emit error the run is non-pending with that error (no dispatch attempted).
+    const wgslE = core ? this.safeEmit(() => emitWgsl(kernel, bindings, precision, comps)) : { value: '', error: null };
+    const glslE = core ? this.safeEmit(() => emitGlsl(kernel, bindings, precision, comps)) : { value: '', error: null };
+    const emitErr = wgslE.error ?? glslE.error;
+    const wgsl = wgslE.value ?? '';
+    const glsl = glslE.value ?? '';
     const outputBytes = cfg.output.reduce((a, b) => a * b, 1) * comps * 4;   // N values per cell for a vecN output
-    const costErr = core ? checkCost(outputBytes, inputBytes, cfg.output, this.deps.limitsHint) : null;
+    const costErr = core && !emitErr ? checkCost(outputBytes, inputBytes, cfg.output, this.deps.limitsHint) : null;
 
     const resource: GpuResource = {
-      core, reasons, wgsl, glsl, backend: 'cpu', pending: core && !costErr,
+      core, reasons, wgsl, glsl, backend: 'cpu', pending: core && !costErr && !emitErr,
       value: null, outputs: null,   // single-output: outputs is always null (value carries the one output)
-      error: costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'kernel is not GPU-lowerable')),
+      error: emitErr ?? costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'kernel is not GPU-lowerable')),
       gpuMs: null, cpuMs: null, speedup: null, match: null, note: null,
     };
-    if (!core || costErr) { resource.pending = false; }
+    if (!core || costErr || emitErr) { resource.pending = false; }
     const cell = this.host.allocateCell(resource);
     this.memo.set(key, { resource, cell });
     // A synchronous input-read failure (reading a resident-handle input whose producer was already freed —
@@ -358,7 +468,20 @@ export class GpuEngine {
   // work: they acquire a real device (via the same acquireBackend/dispatchReladder ladder the map path uses)
   // and verify their reordered tree fold against THIS linear fold. `scan` (a prefix-scan buffer output) is a
   // further follow-on; `scan:true` is rejected (MLGPU-NOT-LOWERABLE) — only the scalar reduce path ships here.
-  gpuReduce(reducer: UserFn, cfg: ReduceConfig): GpuResource {
+  /** Dispatch a REDUCTION: fold `cfg.input` to a single scalar with a 2-arg associative + commutative
+   *  `reducer`, seeded by `cfg.identity` (which must be the reducer's neutral element — a caller contract).
+   *  Returns a reactive {@link GpuResource} whose settled `value` is the bare scalar. Distinct from the map
+   *  path (a dedicated gate + tree-fold shaders + a linear-fold CPU oracle); `cfg.scan` is rejected. */
+  gpuReduce(rawReducer: UserFn, cfg: ReduceConfig): GpuResource {
+    // Honor metael's implicit-last-expression return, matching the map path (gpu()): rewrite a trailing bare
+    // `expr` in the reducer body to an explicit `return` BEFORE the gate + emit + hash, so the reduce emitters
+    // (which lower only an explicit `return`) agree with the interpreter oracle (cpuReduce, which returns the
+    // body's last-expr value). Without this an implicit-return reducer `component add(acc, x) { acc + x }` gates
+    // core:true + folds correctly on CPU, but emits a non-void `fn _reduce(acc, x) -> f32` with a bare
+    // `acc + x;` and NO return → an invalid shader on WebGPU/WebGL2 → a silent re-ladder to CPU (loss of GPU
+    // acceleration, no diagnostic). Applied ONCE here so gateReducer/emit AND the memo key (kernelHash below)
+    // all operate on the normalized AST — an implicit reducer therefore hashes identically to its explicit form.
+    const reducer: UserFn = { ...rawReducer, body: normalizeImplicitReturn(rawReducer.body) };
     const requested: 'auto' | BackendKind = cfg.backend ?? 'auto';
     const { reasons: gateReasons, bindings } = gateReducer(reducer, this.host);
     // Config validation: the input must be a foldable buffer (a typed-array custom value with `iterate`).
@@ -414,16 +537,20 @@ export class GpuEngine {
     // `_u_<name>` (GLSL) / `_p._u_<name>` (WGSL).
     const reduceScalars: { name: string; value: number }[] = [];
     for (const b of bindings.byName.values()) if (b.role === 'scalar') reduceScalars.push({ name: b.name, value: b.value });
-    const reduceGlsl = core ? emitReduceGlsl(reducer, bindings) : '';
-    const reduceWgsl = core ? emitReduceWgsl(reducer, bindings, cfg.identity) : '';
+    // safeEmit: a loud emitter throw (a gate↔emitter drift) → a local MLGPU-EMIT diagnostic, not a tree collapse.
+    const rGlslE = core ? this.safeEmit(() => emitReduceGlsl(reducer, bindings)) : { value: '', error: null };
+    const rWgslE = core ? this.safeEmit(() => emitReduceWgsl(reducer, bindings, cfg.identity)) : { value: '', error: null };
+    const emitErr = rGlslE.error ?? rWgslE.error;
+    const reduceGlsl = rGlslE.value ?? '';
+    const reduceWgsl = rWgslE.value ?? '';
 
     const resource: GpuResource = {
-      core, reasons, wgsl: reduceWgsl, glsl: reduceGlsl, backend: 'cpu', pending: core && !costErr,
+      core, reasons, wgsl: reduceWgsl, glsl: reduceGlsl, backend: 'cpu', pending: core && !costErr && !emitErr,
       value: null, outputs: null,
-      error: costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'reducer is not GPU-lowerable')),
+      error: emitErr ?? costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'reducer is not GPU-lowerable')),
       gpuMs: null, cpuMs: null, speedup: null, match: null, note: null,
     };
-    if (!core || costErr) resource.pending = false;
+    if (!core || costErr || emitErr) resource.pending = false;
     const cell = this.host.allocateCell(resource);
     this.memo.set(key, { resource, cell });
 
@@ -513,7 +640,19 @@ export class GpuEngine {
   // oracle — a documented per-backend difference). A webgl2 or auto-that-fell run therefore RUNS ON CPU and
   // settles `backend: 'cpu'` + a note explaining the fallback, so backend honesty holds (we never claim a
   // WebGL2 scatter it can't do).
-  gpuHistogram(binMapper: UserFn, cfg: HistogramConfig): GpuResource {
+  /** Dispatch a HISTOGRAM: map each `cfg.input` element to a bin index with a 1-arg `binMapper` and count per
+   *  bin, returning a reactive {@link GpuResource} whose settled `value` is a `number[]` of length `cfg.bins`.
+   *  A data-dependent atomic scatter: WebGPU does the real scatter; the CPU floor + WebGL2 (no fragment
+   *  atomics) run the exact CPU oracle. An out-of-range bin index is dropped (standard histogram behavior). */
+  gpuHistogram(rawBinMapper: UserFn, cfg: HistogramConfig): GpuResource {
+    // Honor metael's implicit-last-expression return, matching the map + reduce paths: rewrite a trailing bare
+    // `expr` in the bin-mapper body to an explicit `return` BEFORE the gate + emit + hash, so the histogram
+    // emitter (which lowers only an explicit `return`) agrees with the interpreter oracle (cpuHistogram). Without
+    // this an implicit-return bin-mapper `component bin(x) { x }` gates core:true + bins correctly on CPU, but
+    // emits a non-void `fn _binOf(x) -> f32` with a bare `x;` and NO return → an invalid WGSL scatter shader on
+    // WebGPU → a silent re-ladder to CPU. Applied ONCE here so gateBinMapper/emit AND the memo key (kernelHash
+    // below) all operate on the normalized AST — the implicit form hashes identically to its explicit form.
+    const binMapper: UserFn = { ...rawBinMapper, body: normalizeImplicitReturn(rawBinMapper.body) };
     const requested: 'auto' | BackendKind = cfg.backend ?? 'auto';
     const { reasons: gateReasons, bindings } = gateBinMapper(binMapper, this.host);
     // Config validation: the input must be a foldable buffer (a typed-array custom value with `iterate`), and
@@ -561,15 +700,18 @@ export class GpuEngine {
     // constants (role:'scalar') ride `_HParams` as `_u_<name>`.
     const histScalars: { name: string; value: number }[] = [];
     for (const b of bindings.byName.values()) if (b.role === 'scalar') histScalars.push({ name: b.name, value: b.value });
-    const histWgsl = core ? emitHistogramWgsl(binMapper, bindings, cfg.bins) : '';
+    // safeEmit: a loud emitter throw (a gate↔emitter drift) → a local MLGPU-EMIT diagnostic, not a tree collapse.
+    const histWgslE = core ? this.safeEmit(() => emitHistogramWgsl(binMapper, bindings, cfg.bins)) : { value: '', error: null };
+    const emitErr = histWgslE.error;
+    const histWgsl = histWgslE.value ?? '';
 
     const resource: GpuResource = {
-      core, reasons, wgsl: histWgsl, glsl: '', backend: 'cpu', pending: core && !costErr,
+      core, reasons, wgsl: histWgsl, glsl: '', backend: 'cpu', pending: core && !costErr && !emitErr,
       value: null, outputs: null,
-      error: costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'bin-mapper is not GPU-lowerable')),
+      error: emitErr ?? costErr ?? (core ? null : makeDiagnostic('MLGPU-NOT-LOWERABLE', 'bin-mapper is not GPU-lowerable')),
       gpuMs: null, cpuMs: null, speedup: null, match: null, note: null,
     };
-    if (!core || costErr) resource.pending = false;
+    if (!core || costErr || emitErr) resource.pending = false;
     const cell = this.host.allocateCell(resource);
     this.memo.set(key, { resource, cell });
 
@@ -680,6 +822,17 @@ export class GpuEngine {
   private bufferGenSegment(name: string, value: unknown): { seg: string; bytes: number } {
     const info = residentInfo(value);
     if (info !== null) return { seg: `${name}#H${info.nonce}:${info.length}`, bytes: info.length * 4 };
+    // A PLAIN metael array (no descriptor) keys off its LENGTH + a CONTENT fingerprint read DIRECTLY from its
+    // elements — the descriptor-based `lenOf`/`bufferView` path below would read length 0 + an empty
+    // fingerprint (no descriptor), colliding EVERY plain array onto one key (a consumer would alias another's
+    // stale result). No generation to subscribe to: a plain array is immutable/rebuilt-fresh each derive in
+    // metael, so the content fingerprint alone drives re-dispatch (changed content → different fp → re-run),
+    // and identical content converges to the SAME key (a memo hit → fixpoint, no infinite re-dispatch). This
+    // is the SAME content-fingerprint `resolveInputs`'s coerce cache keys off (both via `bufferFingerprint`).
+    if (Array.isArray(value)) {
+      const len = value.length;
+      return { seg: `${name}#P:${len}:${bufferFingerprint(value as number[])}`, bytes: len * 4 };
+    }
     // Null-safe length read: a real f32/i32/u32 buffer's getMember('length') returns a number; a
     // non-buffer custom value (a vec/mat) returns the NOT_HANDLED Symbol (NOT undefined, so `?? 0` won't
     // fire) → `Number(Symbol)` would THROW and escape gpuReduce()/gpu() into the reader's derive, collapsing
@@ -744,6 +897,25 @@ export class GpuEngine {
         // below (the cache was pre-filled before eviction by materializeResidentCaches), which is correct.
         const info = residentInfo(b.value);
         if (info !== null && info.gpuBuffer !== undefined && !info.disposed) residentInputs.set(b.name, info.gpuBuffer);
+        // A PLAIN metael array (no descriptor) has no f32 store — coerce it ONCE to Float32Array, cached by
+        // its CONTENT fingerprint (the SAME key `bufferGenSegment` uses), so a plain array rebuilt fresh each
+        // derive with identical content isn't re-coerced (an O(n) `Float32Array.from` per dispatch). On a hit
+        // the cached Float32Array is reused; on a miss it is coerced + stored. Content keying (never object
+        // identity) is what makes it convergent — see plainArrayCoerceCache.
+        if (Array.isArray(b.value)) {
+          const key = `${b.value.length}:${bufferFingerprint(b.value as number[])}`;
+          let data = this.plainArrayCoerceCache.get(key);
+          if (data === undefined) {
+            data = Float32Array.from(b.value as number[]);
+            // FIFO-cap the coerce cache at MAX_LIVE distinct contents (a Map iterates in insertion order, so
+            // deleting the first key drops the oldest content) — a component deriving a fresh plain array from
+            // CHANGING data each frame would otherwise grow it without bound.
+            if (this.plainArrayCoerceCache.size >= MAX_LIVE) this.plainArrayCoerceCache.delete(this.plainArrayCoerceCache.keys().next().value as string);
+            this.plainArrayCoerceCache.set(key, data);
+          }
+          inputs.push({ name: b.name, data });
+          continue;
+        }
         const desc = descriptorOf(b.value);
         const view = desc?.bufferView?.(b.value);
         // Zero-copy when the store is ALREADY a Float32Array (an f32 buffer); else convert once to f32.
@@ -806,6 +978,7 @@ export class GpuEngine {
     // first output's shaders represent the run — the panel shows one, all N run identically).
     const perOutput: { name: string; comps: number; synth: UserFn; synthBindings: BindingTable; wgsl: string; glsl: string }[] = [];
     const gateReasons: Diagnostic[] = [];
+    const emitReasons: Diagnostic[] = [];
     if (cfgReasons.length === 0 && structureReasons.length === 0) {
       for (const name of names) {
         const comps = compsByName[name]!;
@@ -815,12 +988,15 @@ export class GpuEngine {
         // The static bounds proof runs per synthesized single-output kernel (its OWN body + synthBindings),
         // bounded by the shared output dims — a provable-OOB index in that output's expression is rejected.
         checkStaticBounds(synth, v.bindings, cfg.output, gateReasons);
-        perOutput.push({ name, comps, synth, synthBindings: v.bindings,
-          wgsl: v.core ? emitWgsl(synth, v.bindings, precision, comps) : '',
-          glsl: v.core ? emitGlsl(synth, v.bindings, precision, comps) : '' });
+        // safeEmit each per-key shader: a loud emitter throw (a gate↔emitter drift) → a local MLGPU-EMIT
+        // reason (→ non-core → no dispatch) instead of escaping the reader's derive + collapsing the tree.
+        const w = v.core ? this.safeEmit(() => emitWgsl(synth, v.bindings, precision, comps)) : { value: '', error: null };
+        const g = v.core ? this.safeEmit(() => emitGlsl(synth, v.bindings, precision, comps)) : { value: '', error: null };
+        if (w.error) emitReasons.push(w.error); if (g.error) emitReasons.push(g.error);
+        perOutput.push({ name, comps, synth, synthBindings: v.bindings, wgsl: w.value ?? '', glsl: g.value ?? '' });
       }
     }
-    const reasons = [...cfgReasons, ...structureReasons, ...gateReasons, ...rankReasons];
+    const reasons = [...cfgReasons, ...structureReasons, ...gateReasons, ...rankReasons, ...emitReasons];
     const core = reasons.length === 0;
 
     // Memo key: the kernel + output dims + the outputs SPEC (names+elements) + input gens + flags + a `M`
@@ -1061,6 +1237,9 @@ export class GpuEngine {
     return false;
   }
 
+  /** Tear the engine down: drop pending work, free every resident GPU buffer, and dispose the pooled backend
+   *  devices exactly once. Idempotent, and race-safe against in-flight dispatches (they check `disposed` after
+   *  every await and bail). After disposal a fresh `gpu()` stays permanently pending. */
   [Symbol.dispose](): void {
     // Mark disposed FIRST so any queued/in-flight drained task bails instead of writing into the cleared memo.
     // Then drop pending work + free every resident handle + dispose the pooled backends exactly once.

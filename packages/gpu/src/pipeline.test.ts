@@ -1,5 +1,6 @@
 // packages/gpu/src/pipeline.test.ts — proves the wiring on the CPU floor (deterministic, no adapter).
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv, descriptorOf, type HostEnvironment, type Arg, type HostValue, type SourceSpan } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
@@ -7,7 +8,7 @@ import { GpuEngine } from './resource.ts';
 import type { Backend, DispatchInput } from './device/index.ts';
 
 function kernelOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('kernel'); return res.value;
 }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
@@ -113,7 +114,7 @@ describe('GPU-resident pipelining (CPU backend)', () => {
     expect(rB.error).not.toBeNull();
     expect(rB.error?.code).toBe('MLGPU-INPUT-UNAVAILABLE');
     // The failure is LOCAL: a program with a sibling node alongside a (hypothetical) gpu call still evaluates.
-    const sibling = evaluateProgram(`component sib() { return 42 }\nsib`, { host, env: new RecordingHostEnv() });
+    const sibling = evaluateProgram(`component sib() { return 42 }\nsib`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
     expect(isUserFn(sibling.value)).toBe(true);
   });
 

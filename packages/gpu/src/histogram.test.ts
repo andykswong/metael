@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
@@ -7,7 +8,7 @@ import { gateBinMapper, cpuHistogram } from './histogram.ts';
 import { emitHistogramWgsl } from './emit-wgsl.ts';
 
 function mapperOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('mapper: ' + JSON.stringify(res.diagnostics)); return res.value;
 }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
@@ -17,7 +18,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
     const host = new RuntimeReactiveHost();
     // bin = x % 4 → 4 bins; input [0..15] → each bin gets 4 elements.
     const binOf = mapperOf(`component binOf(x) { return x % 4 }\nbinOf`, host);
-    const xs = evaluateProgram(`f32(16, (i) => i)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(16, (i) => i)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     const cfg = { input: xs, bins: 4, backend: 'cpu' as const };
     change(() => { engine.gpuHistogram(binOf, cfg); });
@@ -29,7 +30,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
   it('drops out-of-range bin indices (not counted, no crash)', async () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x }\nbinOf`, host);   // bin = x directly
-    const xs = evaluateProgram(`f32([0, 1, 2, 99, -3, 1])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([0, 1, 2, 99, -3, 1])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     const cfg = { input: xs, bins: 3, backend: 'cpu' as const };
     change(() => { engine.gpuHistogram(binOf, cfg); });
@@ -41,7 +42,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
   it('rejects a bin-mapper with the wrong arity (not exactly 1 param)', async () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component bad(x, y) { return x }\nbad`, host);
-    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuHistogram']>;
     change(() => { s = engine.gpuHistogram(binOf, { input: xs, bins: 3, backend: 'cpu' }); });
@@ -50,7 +51,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
   it('a non-buffer input settles a LOCAL error, not a tree-collapsing throw (carry the Phase-4 fix)', async () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x }\nbinOf`, host);
-    const vecInput = evaluateProgram(`vec3(1, 2, 3)`, { host, env: new RecordingHostEnv() }).value as object;
+    const vecInput = evaluateProgram(`vec3(1, 2, 3)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuHistogram']>;
     expect(() => { change(() => { s = engine.gpuHistogram(binOf, { input: vecInput, bins: 3, backend: 'cpu' }); }); }).not.toThrow();
@@ -83,7 +84,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x % 4 }\nbinOf`, host);
     // HISTOGRAM_WORKGROUP is 64. 4096 elements → ceil(4096/64)=64 scatter groups; set maxWg=8 → 64>8 → reject.
-    const xs = evaluateProgram(`f32(4096, (i) => i)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(4096, (i) => i)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const tinyDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 8 } };
     const engine = new GpuEngine(host, tinyDeps);
     let s!: ReturnType<GpuEngine['gpuHistogram']>;
@@ -97,7 +98,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x % 4 }\nbinOf`, host);
     // 1000 elements → ceil(1000/64)=16 groups « the default 65535 limit → accepted (no over-rejection).
-    const xs = evaluateProgram(`f32(1000, (i) => i)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(1000, (i) => i)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     change(() => { engine.gpuHistogram(binOf, { input: xs, bins: 4, backend: 'cpu' }); });
     await new Promise((r) => setTimeout(r, 20));
@@ -109,7 +110,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
   it('rejects a bad bins count (0, negative, non-integer) with MLGPU-BAD-INPUT', async () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x }\nbinOf`, host);
-    const xs = evaluateProgram(`f32([0, 1, 2])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([0, 1, 2])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     for (const bins of [0, -3, 1.5]) {
       let s!: ReturnType<GpuEngine['gpuHistogram']>;
@@ -122,7 +123,7 @@ describe('histogram kernel kind (atomic scatter — CPU oracle floor)', () => {
   it('an empty input yields all-zero counts of length bins', async () => {
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x % 3 }\nbinOf`, host);
-    const xs = evaluateProgram(`f32([])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     change(() => { engine.gpuHistogram(binOf, { input: xs, bins: 3, backend: 'cpu' }); });
     await new Promise((r) => setTimeout(r, 20));
@@ -140,8 +141,8 @@ describe('histogram memo — content fingerprint (no same-length collision)', ()
     const host = new RuntimeReactiveHost();
     const binOf = mapperOf(`component binOf(x) { return x }\nbinOf`, host);   // bin = x
     // Both length 4. `a` puts all in bins 0..3 once each; `b` puts all in bin 0.
-    const a = evaluateProgram(`f32([0, 1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
-    const b = evaluateProgram(`f32([0, 0, 0, 0])`, { host, env: new RecordingHostEnv() }).value as object;
+    const a = evaluateProgram(`f32([0, 1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
+    const b = evaluateProgram(`f32([0, 0, 0, 0])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     change(() => { engine.gpuHistogram(binOf, { input: a, bins: 4, backend: 'cpu' }); });
     change(() => { engine.gpuHistogram(binOf, { input: b, bins: 4, backend: 'cpu' }); });

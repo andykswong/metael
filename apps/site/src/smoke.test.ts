@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import 'disposablestack/auto';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
 import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from '@metael/lang';
 
 it('workspace wiring: app can import and drive both metael targets', () => {
-  const h = mount('component Story() { span("hi") }', undefined, {});
+  const h = renderSource('component Story() { span("hi") }', undefined, {});
   expect(h.diagnostics).toEqual([]);
   expect(h.tree()).not.toBeNull();
 

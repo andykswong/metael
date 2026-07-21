@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 
-const mk = (src: string) => { const c = document.createElement('div'); document.body.appendChild(c); return { c, h: mount(src, c, {}) }; };
+const mk = (src: string) => { const c = document.createElement('div'); document.body.appendChild(c); return { c, h: renderSource(src, c, { builtins: [MATH_BUILTINS] }) }; };
 
 describe('in-place typed-array mutation is reactive through the UI', () => {
   it('element read buf[0] updates on an in-place write', () => {

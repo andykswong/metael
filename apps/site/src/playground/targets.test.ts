@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { GpuHostEnv } from '@metael/gpu';
+import { CPU_LIMITS } from '@metael/gpu';
+import { GpuHostEnv } from '@metael/gpu/lang';
+import { composeEnvs } from '@metael/runtime';
+import { VDomHostEnv } from '@metael/vdom/lang';
 import { runTarget, runComputeSettled } from './targets.ts';
 
 describe('runTarget', () => {
@@ -69,6 +72,18 @@ component Story() {
     // The gate reason for the non-lowerable stage-B kernel is surfaced (MLGPU-*), not swallowed.
     expect(run.diagnostics.some((d) => d.code.startsWith('MLGPU-'))).toBe(true);
     run.handle.unmount();
+  });
+
+  it('the gpu+vdom composite disposes the gpu child on [Symbol.dispose]', () => {
+    // The composite that backs GpuUiEnv: dispose must fan out to the Disposable gpu child (freeing its
+    // engine → any acquired device) while the non-Disposable VDomHostEnv is skipped. This guards the
+    // dispose-fan-out behavior GpuUiEnv now routes through composeEnvs.
+    const gpu = new GpuHostEnv({ tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: CPU_LIMITS });
+    const disposeSpy = vi.spyOn(GpuHostEnv.prototype, Symbol.dispose);
+    const composite = composeEnvs([gpu, new VDomHostEnv()]);
+    composite[Symbol.dispose]();
+    expect(disposeSpy).toHaveBeenCalledTimes(1);   // gpu (Disposable) disposed; VDomHostEnv (not Disposable) skipped
+    disposeSpy.mockRestore();
   });
 });
 

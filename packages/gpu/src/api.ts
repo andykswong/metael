@@ -1,26 +1,17 @@
 // packages/gpu/src/api.ts
-// The host-API façade: batteries-included helpers so host TypeScript drives the compute engine without
-// hand-wiring a host + engine + the change()/drain/re-read settle dance. The KERNEL is authored in metael
-// (its AST is what the emitters lower — there is no JS-closure kernel path), so compileKernel is the one
-// point that touches the language, and only as the kernel-authoring format. A kernel body has no head
-// calls, so RecordingHostEnv's resolveCall is never exercised (a stray head-in-expression fails closed).
-import { RuntimeReactiveHost, change, effect } from '@metael/runtime';   // value use (new RuntimeReactiveHost) → plain import
-import { evaluateProgram, isUserFn, RecordingHostEnv, type UserFn } from '@metael/lang';
-import { GpuEngine, type GpuConfig, type GpuResource, type GpuEngineDeps } from './resource.ts';
+// The host-API façade: batteries-included plumbing so host TypeScript drives the compute engine without
+// hand-wiring a host + engine + the change()/drain/re-read settle dance. This is the API-first CORE: it
+// carries no interpreter dependency. The metael-DSL binding — compiling a kernel from a source string
+// (compileKernel) + the head vocabulary (GpuHostEnv) — lives behind the ./lang subpath.
+import { RuntimeReactiveHost, change } from '@metael/runtime';   // value use (new RuntimeReactiveHost) → plain import
+import { type UserFn } from '@metael/lang';   // the kernel value shape the engine lowers (built via @metael/gpu/lang)
+import { GpuEngine, type GpuConfig, type ReduceConfig, type HistogramConfig, type GpuResource, type GpuEngineDeps } from './resource.ts';
 // The backends live in their own modules — device/index.ts exports only selectBackend + types.
 import { tryWebGpuBackend } from './device/webgpu.ts';
 import { tryWebGl2Backend } from './device/webgl2.ts';
 import { CPU_LIMITS } from './cost.ts';
 
-/** Compile a metael kernel snippet into the UserFn the engine lowers. Evaluate against `host` so the
- *  kernel's closure (its `const a = f32(...)` inputs, or a factory's captured params) lives on the same
- *  host the engine reads. Throws if the program's value is not a function/component. */
-export function compileKernel(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
-  if (!isUserFn(res.value)) throw new Error('kernel source must evaluate to a function or component');
-  return res.value;
-}
-
+/** Options for {@link createGpuEngine}: run CPU-only (headless/test), or inject fully custom device deps. */
 export interface CreateGpuEngineOptions {
   /** CPU-only (headless/test) deps: no WebGPU/WebGL2 acquisition. Default false → the real device ladder. */
   readonly cpuOnly?: boolean;
@@ -28,74 +19,62 @@ export interface CreateGpuEngineOptions {
   readonly deps?: GpuEngineDeps;
 }
 
+/** The discriminated dispatch config: `cfg.mode` selects the kernel kind. `'map'` (default, or omitted)
+ *  folds a {@link GpuConfig} through `engine.gpu`; `'reduce'` a {@link ReduceConfig} through `engine.gpuReduce`;
+ *  `'histogram'` a {@link HistogramConfig} through `engine.gpuHistogram`. The mode makes the caller's intent
+ *  explicit and picks the arity the engine's gate expects (N thread coords vs a 2-arg reducer vs a 1-arg
+ *  bin-mapper). */
+export type DispatchConfig =
+  | ({ mode?: 'map' } & GpuConfig)
+  | ({ mode: 'reduce' } & ReduceConfig)
+  | ({ mode: 'histogram' } & HistogramConfig);
+
+/** A thin façade over a {@link GpuEngine} + its reactive host: `dispatch` wires up the change() boundary so
+ *  host TypeScript can drive a compute kernel without hand-rolling the reactive plumbing. Await or subscribe
+ *  to a dispatch with the FREE `settle`/`subscribe` helpers over a `() => facade.dispatch(k, cfg)` thunk.
+ *  Dispose it to free the engine. */
 export interface GpuEngineFacade extends Disposable {
+  /** The reactive host the engine + every compiled kernel's closure live on. */
   readonly host: RuntimeReactiveHost;
+  /** The underlying engine, for direct access beyond the façade's helpers. */
   readonly engine: GpuEngine;
-  /** Compile a kernel snippet against this façade's host (so its closure shares the engine's host). */
-  compile(src: string): UserFn;
-  /** Dispatch inside the change() boundary; returns the (pending) resource synchronously. Throws after dispose. */
-  dispatch(kernel: UserFn, cfg: GpuConfig): GpuResource;
-  /** Await the settled resource (dispatch → drain macrotasks → re-read the memo until settled). Throws after dispose. */
-  settle(kernel: UserFn, cfg: GpuConfig): Promise<GpuResource>;
-  /** Subscribe to a resource's lifecycle for a fixed (kernel, cfg). `onValue` fires once with the PENDING
-   *  resource, then once with the SETTLED resource — guard `if (!r.pending)` for the value. `onValue` runs
-   *  inside the effect's reactive tracking scope, so it must sink to NON-reactive targets (a reactive read
-   *  inside onValue would subscribe and cause spurious re-fires). To rebind a REUSABLE kernel to a new
-   *  input, re-derive the kernel from a reactive signal and dispatch/settle inside your own effect — a
-   *  rebind is a new kernel value, not a re-fire of this subscription. Returns a stop() disposer. Throws
-   *  after dispose(). */
-  subscribe(kernel: UserFn, cfg: GpuConfig, onValue: (r: GpuResource) => void): () => void;
-  // [Symbol.dispose](): void — from Disposable: frees the engine (device + memo); dispatch/settle/subscribe throw afterward.
+  /** Dispatch inside the change() boundary; returns the (pending) resource synchronously. `cfg.mode` selects
+   *  the kind: `'map'` (default) folds to `engine.gpu`, `'reduce'` to `engine.gpuReduce`, `'histogram'` to
+   *  `engine.gpuHistogram`. Await it with the free `settle(() => facade.dispatch(k, cfg))`. Throws after
+   *  dispose. */
+  dispatch(kernel: UserFn, cfg: DispatchConfig): GpuResource;
+  // [Symbol.dispose](): void — from Disposable: frees the engine (device + memo); dispatch throws afterward.
 }
 
-// A macrotask-drain backstop against a never-settling dispatch (far above any real settle latency).
-const MAX_SETTLE_ITERS = 10_000;
 const cpuOnlyDeps: GpuEngineDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: CPU_LIMITS };
 const realDeps: GpuEngineDeps = { tryWebGpu: tryWebGpuBackend, tryWebGl2: tryWebGl2Backend, limitsHint: CPU_LIMITS };
 
+/** Create a ready-to-use {@link GpuEngineFacade}: a fresh reactive host + a {@link GpuEngine} over the real
+ *  device ladder (or CPU-only / custom deps per `opts`), with a mode-routing `dispatch`. Await or subscribe
+ *  to a dispatch with the free `settle`/`subscribe` helpers. The one-call entry point for driving compute
+ *  from host TypeScript. */
 export function createGpuEngine(opts: CreateGpuEngineOptions = {}): GpuEngineFacade {
   const host = new RuntimeReactiveHost();
   const deps = opts.deps ?? (opts.cpuOnly ? cpuOnlyDeps : realDeps);
   const engine = new GpuEngine(host, deps);
-  let disposed = false;   // guards settle from spinning: after dispose a fresh gpu() stays pending forever
+  let disposed = false;   // after dispose a fresh dispatch throws — this breaks the free settle's re-dispatch loop
 
-  const dispatch = (kernel: UserFn, cfg: GpuConfig): GpuResource => {
+  const dispatch = (kernel: UserFn, cfg: DispatchConfig): GpuResource => {
     if (disposed) throw new Error('gpu engine facade has been disposed');
     let r!: GpuResource;
-    change(() => { r = engine.gpu(kernel, cfg); });
-    return r;
-  };
-
-  const settle = async (kernel: UserFn, cfg: GpuConfig): Promise<GpuResource> => {
-    let r = dispatch(kernel, cfg);
-    let iters = 0;
-    while (r.pending && !r.error && !disposed) {
-      if (++iters > MAX_SETTLE_ITERS) throw new Error('gpu dispatch did not settle within the iteration bound');
-      await new Promise<void>((res) => setTimeout(res, 0));
-      if (disposed) break;
-      r = dispatch(kernel, cfg);
-    }
-    return r;
-  };
-
-  const subscribe = (kernel: UserFn, cfg: GpuConfig, onValue: (r: GpuResource) => void): () => void => {
-    if (disposed) throw new Error('gpu engine facade has been disposed');
-    // Reading engine.gpu inside a tracked effect subscribes to the resource cell (the engine reads the
-    // settled value through its cell so a reader re-runs on writeCell). change() is only a batch boundary,
-    // not a tracking boundary, so the cell read is still tracked. On the settle writeCell the effect
-    // re-fires; gpu() then hits the memo (now holding the settled resource) and early-returns BEFORE the
-    // pending branch → no re-enqueue → converges after one re-fire.
-    return effect(() => {
-      let r!: GpuResource;
-      change(() => { r = engine.gpu(kernel, cfg); });
-      onValue(r);
+    change(() => {
+      switch (cfg.mode) {
+        case 'reduce':    r = engine.gpuReduce(kernel, cfg); break;
+        case 'histogram': r = engine.gpuHistogram(kernel, cfg); break;
+        default:          r = engine.gpu(kernel, cfg); break;   // 'map' | undefined
+      }
     });
+    return r;
   };
 
   return {
     host, engine,
-    compile: (src) => compileKernel(src, host),
-    dispatch, settle, subscribe,
+    dispatch,
     [Symbol.dispose]: () => { disposed = true; engine[Symbol.dispose](); },
   };
 }

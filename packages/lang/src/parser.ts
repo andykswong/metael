@@ -4,12 +4,20 @@ import { makeDiagnostic } from './diagnostics.ts';
 import type { Expr, Stmt, BinOp, Pattern, Program, ArrayElement, ObjectEntry } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
 import { FORBIDDEN_KEYS } from './ast.ts';
 
-export interface ParseExprResult { readonly expr: Expr; readonly diagnostics: Diagnostic[] }
+/** The outcome of {@link parseExpr}: the parsed expression and every diagnostic collected while lexing
+ *  and parsing it, in order. */
+export interface ParseExprResult {
+  /** The parsed expression node. Best-effort on error — a `null` literal node when the source could
+   *  not be parsed as an expression at all. */
+  readonly expr: Expr;
+  /** Every diagnostic collected while lexing and parsing, in order. Empty on a clean parse. */
+  readonly diagnostics: Diagnostic[];
+}
 
-// Recursion-depth cap for the recursive-descent parser. Deeply-nested source (e.g. thousands of
-// `(` or a long unclosed chain) would otherwise overflow the JS call stack with an uncaught
-// RangeError. The parser is a TOTAL function (like the lexer/evaluator): past the cap it emits a
-// ML-LANG-PARSE diagnostic and fails closed, so the public parseProgram/parseExpr never throw.
+/** Recursion-depth cap for the recursive-descent parser. Deeply-nested source (e.g. thousands of `(`
+ *  or a long unclosed chain) would otherwise overflow the JS call stack with an uncaught `RangeError`.
+ *  The parser is a TOTAL function: past the cap it emits an `ML-LANG-PARSE` diagnostic and fails
+ *  closed, so the public {@link parseProgram} / {@link parseExpr} never throw. */
 export const MAX_PARSE_DEPTH = 512;
 /** Thrown internally when the nesting cap trips; caught by the public entrypoints → diagnostic. */
 class ParseDepthSignal extends Error {}
@@ -28,8 +36,25 @@ const BINARY_TIERS: Array<Partial<Record<TokenType, BinOp>>> = [
   { plus: '+', minus: '-' }, { star: '*', slash: '/', percent: '%' },
 ];
 
+/**
+ * The recursive-descent parser for the language surface: it lexes the source, then parses tokens into
+ * the {@link Expr} / {@link Stmt} AST.
+ *
+ * A TOTAL, non-throwing function of its input like the lexer and evaluator: malformed source yields
+ * {@link Diagnostic}s (never an exception) accumulated in {@link diagnostics}, and pathological nesting
+ * fails closed via {@link MAX_PARSE_DEPTH} rather than overflowing the JS stack. Prefer the free
+ * functions {@link parseExpr} / {@link parseProgram} for one-shot parses; the class is exposed for
+ * callers that need incremental access to its methods or wish to subclass it.
+ *
+ * @remarks Newline handling is context-sensitive: at statement/block level a newline before a postfix
+ * `(` / `[` or a wrap `{` starts a fresh statement, while inside an open grouping it never breaks — see
+ * {@link parseExpression} and the wrap rules.
+ */
 export class Parser {
+  /** The token stream produced by lexing the source, terminated by exactly one trailing `eof`. */
   protected toks: Token[];
+  /** The cursor: the index into {@link toks} of the next token to read. Clamped at the last token so a
+   *  read never runs past `eof`. */
   protected pos = 0;
   private depth = 0;
   // Open-grouping nesting depth: >0 while parsing INSIDE a `( … )` / `[ … ]` / `{ … }` / ternary
@@ -41,15 +66,27 @@ export class Parser {
   // (`handler || (() => x)`), so it is NOT flagged as a bare binary operand; only an un-parenthesized
   // arrow (`1 + x => 2`) is. Tracked by identity so the AST stays clean (no `parenthesized` field).
   private parenthesized = new WeakSet<object>();
+  /** Every diagnostic collected while lexing and parsing, in order. Seeded with the lexer's diagnostics
+   *  by the constructor, then appended to as parsing proceeds. */
   readonly diagnostics: Diagnostic[] = [];
+  /** Lex `src` and prime the parser: the resulting tokens become {@link toks} and the lexer's
+   *  diagnostics seed {@link diagnostics}.
+   *  @param src - the source text to lex and parse. */
   constructor(src: string) { const r = lex(src); this.toks = r.tokens; this.diagnostics.push(...r.diagnostics); }
 
+  /** Return the current token WITHOUT advancing the cursor. Always a real token (never `undefined`) —
+   *  the cursor is clamped at the trailing `eof`. */
   protected peek(): Token { return this.toks[this.pos]!; }
   /** Return the current token and advance — but NEVER past the trailing `eof` (lex always appends
    *  exactly one). Clamping the cursor at the last token guarantees `peek()` always reads a real
    *  token, so error-recovery paths (e.g. `parsePrimary` skipping a bad trailing token) can never
    *  read `undefined.type` and throw. Malformed input yields diagnostics, never a TypeError. */
   protected next(): Token { const t = this.peek(); if (this.pos < this.toks.length - 1) this.pos++; return t; }
+  /** Consume the current token if it matches `type` and return it; otherwise leave the cursor put, push
+   *  an `ML-LANG-PARSE` diagnostic, and return `undefined`. The fail-soft counterpart to {@link next}
+   *  used wherever a specific delimiter/keyword is required.
+   *  @param type - the token type the current token must have.
+   *  @returns the consumed token, or `undefined` if the current token did not match. */
   protected eat(type: TokenType): Token | undefined {
     if (this.peek().type === type) return this.next();
     this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', `expected ${type}, got ${this.peek().type}`, this.peek().span));
@@ -105,6 +142,13 @@ export class Parser {
     }
   }
 
+  /** Parse a single expression (the full precedence ladder down through the ternary, binary tiers,
+   *  unary, postfix, and primary forms) and return its AST node.
+   *  @returns the parsed {@link Expr}.
+   *  @remarks The entry point for every nested-expression recursion (parens, call args, ternary
+   *  branches, arrow bodies), so the {@link MAX_PARSE_DEPTH} guard is enforced here: pathological
+   *  nesting fails closed via an internally-thrown signal that the public {@link parseExpr} /
+   *  {@link parseProgram} catch, rather than overflowing the JS stack. */
   parseExpression(): Expr {
     // Depth guard: `parseExpression` is the entry for every nested-expression recursion (parens,
     // args, ternary branches, arrow bodies). Trip the cap here so pathological nesting fails closed
@@ -321,6 +365,10 @@ export class Parser {
   }
 
   // --- statement layer ---
+  /** Parse the top-level statement sequence until `eof` and return the list of statements. Also runs
+   *  the top-level redeclaration check, emitting `ML-LANG-REDECL` when a `const`/`let`/`function`/
+   *  `component` name is declared twice in this scope.
+   *  @returns the parsed top-level {@link Stmt} list (the body of the {@link Program}). */
   parseProgramBody(): Stmt[] {
     const stmts: Stmt[] = [];
     const declared = new Set<string>();
@@ -518,6 +566,16 @@ function isParseAbort(e: unknown): boolean {
   return e instanceof ParseDepthSignal || e instanceof RangeError;
 }
 
+/**
+ * Parse a single expression from source, returning its AST node and diagnostics.
+ *
+ * Total and non-throwing: a lex/parse error or nesting past {@link MAX_PARSE_DEPTH} surfaces as a
+ * diagnostic with a safe `null` literal node rather than an exception.
+ *
+ * @param src - the expression source text.
+ * @returns the parsed expression + the diagnostics collected while lexing and parsing
+ *          ({@link ParseExprResult}).
+ */
 export function parseExpr(src: string): ParseExprResult {
   const p = new Parser(src);
   try {
@@ -530,7 +588,26 @@ export function parseExpr(src: string): ParseExprResult {
   }
 }
 
-export interface ParseProgramResult { readonly program: Program; readonly diagnostics: Diagnostic[] }
+/** The outcome of {@link parseProgram}: the parsed program and every diagnostic collected while lexing
+ *  and parsing it, in order. */
+export interface ParseProgramResult {
+  /** The parsed program (its top-level statement list). Best-effort on error — an empty statement list
+   *  when the source could not be parsed (e.g. it nested past {@link MAX_PARSE_DEPTH}). */
+  readonly program: Program;
+  /** Every diagnostic collected while lexing and parsing, in order. Empty on a clean parse. */
+  readonly diagnostics: Diagnostic[];
+}
+/**
+ * Parse a whole program from source, returning its AST and diagnostics.
+ *
+ * The parsing entry point of the language kernel. Total and non-throwing: a lex/parse error or nesting
+ * past {@link MAX_PARSE_DEPTH} surfaces as a diagnostic with a safe empty program rather than an
+ * exception.
+ *
+ * @param src - the program source text.
+ * @returns the parsed program + the diagnostics collected while lexing and parsing
+ *          ({@link ParseProgramResult}).
+ */
 export function parseProgram(src: string): ParseProgramResult {
   const p = new Parser(src);
   try {

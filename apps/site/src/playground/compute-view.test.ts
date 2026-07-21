@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { prettyValue } from './compute-view.ts';
 import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 
 describe('prettyValue', () => {
   it('pretty-prints scalars', () => {
@@ -68,7 +69,7 @@ describe('prettyValue', () => {
   });
 
   it('renders a custom value (vec/typed array) as its display string, not {}', () => {
-    const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv() }).value;
+    const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value;
     expect(prettyValue(run('vec3(1, 2, 3)'))).toBe('vec3(1, 2, 3)');
     expect(prettyValue(run('f32([0, 1, 4])'))).toContain('f32[0, 1, 4]');
     // nested in a structure: a custom value inside an object still renders its display

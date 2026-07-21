@@ -85,26 +85,54 @@ still authored in metael source (the emitters lower its AST — there is no JS-c
 everything around it is a plain function call.
 
 ```ts
-import { createGpuEngine } from '@metael/gpu';
+import { createGpuEngine, settle } from '@metael/gpu';        // the API-first core — no interpreter dep
+import { compileKernel } from '@metael/gpu/lang';             // the DSL binding — this subpath pulls the interpreter
 
 const gpu = createGpuEngine();                       // real WebGPU→WebGL2→CPU ladder ({ cpuOnly: true } for tests)
-const kernel = gpu.compile(`
+const kernel = compileKernel(`
   const a = f32(1024, (i) => i)
   const b = f32(1024, (i) => i * 2)
   component add(i) { return a[i] + b[i] }
   add
-`);
-const r = await gpu.settle(kernel, { output: [1024], verify: true });
+`, gpu.host);
+const r = await settle(() => gpu.dispatch(kernel, { output: [1024], verify: true }));
 console.log(r.backend, r.value, r.wgsl, r.match?.ok);
 gpu[Symbol.dispose]();
 ```
 
-- `compile(src)` → the kernel `UserFn` (throws if the source isn't a function/component).
-- `dispatch(kernel, cfg)` → the pending `GpuResource` synchronously (`.wgsl`/`.glsl`/`.core`/`.reasons` filled; `.value` after settle).
-- `settle(kernel, cfg)` → awaits the settled resource.
-- `subscribe(kernel, cfg, onValue)` → fires on pending then settled (guard `if (!r.pending)`); returns a stop disposer.
-- `[Symbol.dispose]()` → frees the device + memo; `dispatch`/`settle`/`subscribe` throw afterward. The façade is a
-  native `Disposable`, so a `using gpu = createGpuEngine()` declaration frees it at scope exit.
+The core façade (`@metael/gpu`) is a thin, interpreter-free front door: one `dispatch` + the free settle helpers.
+Turning source text into a kernel is the DSL binding, so `compileKernel` lives on the `./lang` subpath.
+
+- `dispatch(kernel, cfg)` → the pending `GpuResource` synchronously; `cfg.mode` selects the kind (`'map'`
+  default → a map kernel, `'reduce'` → a fold, `'histogram'` → a scatter). `.wgsl`/`.glsl`/`.core`/`.reasons`
+  filled; `.value` after settle.
+- the FREE `settle(() => gpu.dispatch(k, cfg))` (from `@metael/gpu`) → awaits the settled resource; `settled(r)`
+  narrows `r.pending === false`; `subscribe(() => gpu.dispatch(k, cfg), onValue)` (also from `@metael/gpu`) → fires
+  on pending then settled (guard `if (!r.pending)`), returns a stop disposer.
+- `compileKernel(src, gpu.host)` (from `@metael/gpu/lang`) → the kernel `UserFn` (throws if the source isn't a
+  function/component). NOTE it is on the `./lang` subpath — the core façade carries no interpreter.
+- `gpuBuffer(data, gpu.host)` (from `@metael/gpu`) → wrap a plain `Float32Array | number[]` as a reduce/histogram
+  input buffer without hand-boxing.
+- `[Symbol.dispose]()` → frees the device + memo; `dispatch` throws afterward. The façade is a native
+  `Disposable`, so a `using gpu = createGpuEngine()` declaration frees it at scope exit.
+
+### Author a kernel in JS — `@metael/gpu/builder`
+
+A host that would rather not write DSL source text can build the kernel in JS instead. The `./builder` subpath is a
+TSL-style JS kernel builder — it authors the **same kernel AST the DSL parser produces** (proven AST-equivalent), so
+a builder-authored kernel inherits the identical gate / emit / oracle / dispatch path:
+
+```ts
+import { kernel, call } from '@metael/gpu/builder';
+
+const k = kernel((row, col) => row.add(col));        // the arrow-RETURN form: returns the per-cell value
+const r = await settle(() => gpu.dispatch(k, { output: [W, H] }));
+```
+
+For loops/branches, the statement helpers `letVar` / `set` / `forRange` / `ifThen` / `ret` trace a body — e.g.
+`kernel((n) => { const acc = letVar('acc', lit(0)); forRange(4, (i) => set(acc, acc.add(i))); ret(acc); })`.
+`call('dot', a, b)` invokes a builtin/component head. The idiomatic form is the arrow-return
+`kernel((row, col) => row.add(col))` — a returned `KNode` is the per-cell output write.
 
 ### Reading `r.value` — mind the pending window
 
@@ -113,7 +141,7 @@ resolves and writes the resource cell. So only read `r.value` at a point where t
 
 - **Host API:** `settle()` already awaited, so `r.value` is the array. Reduce it in plain JS:
   ```ts
-  const r = await gpu.settle(kernel, { output: [8] });   // kernel: x[i] * 2 over f32(8, i=>i)
+  const r = await settle(() => gpu.dispatch(kernel, { output: [8] }));   // kernel: x[i] * 2 over f32(8, i=>i)
   const sum = (r.value as number[]).reduce((a, b) => a + b, 0);   // 56
   ```
 - **In a metael program (the DSL / a compute story):** reducing over `r.value` works. The robust,
@@ -142,10 +170,10 @@ Author the kernel once as a **factory** that closes over its inputs, then bind d
 it again — the emitted shader is identical, so the pipeline cache reuses the compiled pipeline:
 
 ```ts
-const makeKernel = gpu.compile(`
+const makeKernel = compileKernel(`
   function makeKernel(a) { component ker(i) { return a[i] * 2 } return ker }
   makeKernel
-`);
+`, gpu.host);
 // makeKernel is a UserFn factory; curry it from host code with makeCallable (from @metael/lang), or from metael source.
 ```
 
@@ -245,7 +273,7 @@ npx vitest run packages/gpu       # the node suite
 npx vitest run --project browser packages/gpu   # the real-adapter WebGPU/WebGL2 proofs (Chromium)
 ```
 
-Imports **only** `@metael/lang` + `@metael/runtime` (enforced by a boundary test). The device backends emit
+Imports **only** `@metael/lang`, `@metael/math` (the numeric vocabulary it lowers), and `@metael/runtime` (enforced by a boundary test). The device backends emit
 shader strings for the GPU driver — they never `eval` a kernel-derived string in JS; the CPU emitter + the
 oracle run the eval-free interpreter. See [../../AGENTS.md](../../AGENTS.md) for the load-bearing invariants.
 

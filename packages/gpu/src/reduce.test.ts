@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
@@ -8,7 +9,7 @@ import { emitReduceWgsl } from './emit-wgsl.ts';
 import { checkReduceMatch } from './oracle.ts';
 
 function reducerOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('reducer'); return res.value;
 }
 const cpuDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
@@ -17,7 +18,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('sums a buffer via a binary associative reducer', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32(100, (i) => i + 1)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(100, (i) => i + 1)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     const cfg = { input: xs, identity: 0, backend: 'cpu' as const };
     change(() => { engine.gpuReduce(reducer, cfg); });
@@ -29,7 +30,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('folds a max via a comparison reducer + an identity', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component mx(a, b) { return a > b ? a : b }\nmx`, host);
-    const xs = evaluateProgram(`f32([3, 9, 2, 7, 5])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([3, 9, 2, 7, 5])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     const cfg = { input: xs, identity: -1e30, backend: 'cpu' as const };
     change(() => { engine.gpuReduce(reducer, cfg); });
@@ -42,7 +43,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
     // 4096 elements, ceil(4096/256)=16 first-pass groups; set the limit to 8 so 16 > 8 → reject up front.
-    const xs = evaluateProgram(`f32(4096, (i) => i)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(4096, (i) => i)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const tinyLimitDeps = { tryWebGpu: async () => null, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 8 } };
     const engine = new GpuEngine(host, tinyLimitDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
@@ -55,7 +56,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('ACCEPTS a normal-sized reduce (first-pass grid within the limit)', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32(1000, (i) => i + 1)`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32(1000, (i) => i + 1)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);   // default maxWG 65535 → ceil(1000/256)=4 groups « limit
     change(() => { engine.gpuReduce(reducer, { input: xs, identity: 0, backend: 'cpu' }); });
     await new Promise((r) => setTimeout(r, 20));
@@ -67,7 +68,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('rejects scan:true loudly (prefix-scan is unbuilt — do not silently return the scalar fold)', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     change(() => { s = engine.gpuReduce(reducer, { input: xs, identity: 0, backend: 'cpu', scan: true }); });
@@ -78,7 +79,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('rejects a reducer with the wrong arity (not exactly 2 params)', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component bad(a) { return a }\nbad`, host);
-    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     change(() => { s = engine.gpuReduce(reducer, { input: xs, identity: 0, backend: 'cpu' }); });
@@ -88,7 +89,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('rejects a reducer that indexes a scalar parameter (acc[x]) — a scalar cannot be indexed', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component r(acc, x) { return acc[x] }\nr`, host);
-    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     change(() => { s = engine.gpuReduce(reducer, { input: xs, identity: 0, backend: 'cpu' }); });
@@ -98,7 +99,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('a vec input to gpuReduce settles a LOCAL MLGPU-BAD-INPUT, not a tree-collapsing throw', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const vecInput = evaluateProgram(`vec3(1, 2, 3)`, { host, env: new RecordingHostEnv() }).value as object;
+    const vecInput = evaluateProgram(`vec3(1, 2, 3)`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     expect(() => { change(() => { s = engine.gpuReduce(reducer, { input: vecInput, identity: 0, backend: 'cpu' }); }); }).not.toThrow();
@@ -123,7 +124,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('accepts ±Infinity as a reduction identity (the true neutral for max/min) and keys them distinctly', async () => {
     const host = new RuntimeReactiveHost();
     const mx = reducerOf(`component mx(a, b) { return a > b ? a : b }\nmx`, host);
-    const xs = evaluateProgram(`f32([-5, -9, -2])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([-5, -9, -2])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     const cfg = { input: xs, identity: -Infinity, backend: 'cpu' as const };
     change(() => { engine.gpuReduce(mx, cfg); });
@@ -136,7 +137,7 @@ describe('reduction kernel kind (CPU fold — the oracle floor)', () => {
   it('still rejects NaN as an identity', async () => {
     const host = new RuntimeReactiveHost();
     const reducer = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const xs = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     change(() => { s = engine.gpuReduce(reducer, { input: xs, identity: NaN, backend: 'cpu' }); });
@@ -154,8 +155,8 @@ describe('reduction memo — content fingerprint (no same-length collision, stil
   it('two distinct same-length buffers do NOT collide in the memo (no stale result)', async () => {
     const host = new RuntimeReactiveHost();
     const add = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const a = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
-    const b = evaluateProgram(`f32([10, 20, 30])`, { host, env: new RecordingHostEnv() }).value as object;
+    const a = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
+    const b = evaluateProgram(`f32([10, 20, 30])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     change(() => { engine.gpuReduce(add, { input: a, identity: 0, backend: 'cpu' }); });
     change(() => { engine.gpuReduce(add, { input: b, identity: 0, backend: 'cpu' }); });
@@ -169,7 +170,7 @@ describe('reduction memo — content fingerprint (no same-length collision, stil
   it('the SAME buffer re-read hits the memo (no redundant re-dispatch — convergence)', async () => {
     const host = new RuntimeReactiveHost();
     const add = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
-    const a = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const a = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const engine = new GpuEngine(host, cpuDeps);
     change(() => { engine.gpuReduce(add, { input: a, identity: 0, backend: 'cpu' }); });
     await new Promise((r) => setTimeout(r, 20));
@@ -183,11 +184,11 @@ describe('reduction memo — content fingerprint (no same-length collision, stil
     const host = new RuntimeReactiveHost();
     const add = reducerOf(`component add(acc, x) { return acc + x }\nadd`, host);
     const engine = new GpuEngine(host, cpuDeps);
-    const a1 = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const a1 = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     change(() => { engine.gpuReduce(add, { input: a1, identity: 0, backend: 'cpu' }); });
     await new Promise((r) => setTimeout(r, 20));
     // a DISTINCT object with the SAME content → must be a memo hit (same fingerprint), NOT a re-dispatch.
-    const a2 = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv() }).value as object;
+    const a2 = evaluateProgram(`f32([1, 2, 3])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     let s!: ReturnType<GpuEngine['gpuReduce']>;
     change(() => { s = engine.gpuReduce(add, { input: a2, identity: 0, backend: 'cpu' }); });
     expect(s.value).toBe(6);   // hits the memo, correct value (no infinite loop, no stale)

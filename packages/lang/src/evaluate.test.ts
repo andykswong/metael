@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateProgram } from './evaluate.ts';
+import { evaluateProgram, Runner, BudgetSignal } from './evaluate.ts';
 import { makeSeededRng } from './determinism.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import type { Arg } from './ports.ts';
-import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
+import { BUILTINS, MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 
 const run = (src: string, data?: unknown) =>
-  evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
 
 describe('evaluator core + budgets', () => {
   it('evaluates arithmetic with precedence', () => {
@@ -61,6 +62,53 @@ describe('evaluator core + budgets', () => {
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);   // string-cap is treated as a BUDGET case
     expect(r.value).toBe(null);   // fails closed, does not build the oversized string
   });
+
+  describe('Runner.tick(steps) — multi-step budget charging', () => {
+    // A Runner with a fixed step cap and a deadline we control by construction.
+    const mkRunner = (maxSteps: number, maxTimeMs = 1_000_000) =>
+      new Runner({ host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps, maxTimeMs, maxDepth: 1000, maxStringLength: 1000 });
+
+    it('tick(n) charges n steps at once (equivalent to n single ticks)', () => {
+      const r = mkRunner(1000);
+      r.tick(10);
+      expect(r.steps).toBe(10);
+      r.tick();               // default is 1
+      expect(r.steps).toBe(11);
+    });
+
+    it('tick(n) trips the step cap when the increment crosses maxSteps (not only on an exact landing)', () => {
+      const r = mkRunner(100);
+      expect(() => r.tick(101)).toThrow(BudgetSignal);   // jumped straight past the cap
+      expect(r.steps).toBeGreaterThan(100);              // accounted the full charge, did not silently drop it
+    });
+
+    it('a non-positive / non-finite step count is clamped to 1 (cannot corrupt the count or skip the cap)', () => {
+      const r = mkRunner(1000);
+      r.tick(0);
+      r.tick(-5);
+      r.tick(NaN);
+      r.tick(Infinity);       // Infinity must NOT set steps to Infinity (that would fail the cap on garbage) — clamps to 1
+      expect(Number.isFinite(r.steps)).toBe(true);
+      expect(r.steps).toBe(4);   // four guarded charges, each clamped to a single step
+    });
+
+    it('a large tick that JUMPS PAST a TIME_CHECK_INTERVAL boundary still enforces the deadline', () => {
+      // Deadline already in the past → the very next boundary-crossing tick must fail closed on time.
+      // TIME_CHECK_INTERVAL is 1024; a single tick(2000) crosses boundary 1024 without landing on it.
+      const r = mkRunner(1_000_000, -1);   // maxTimeMs negative → deadline = now-1ms, already expired
+      let thrown: unknown;
+      try { r.tick(2000); } catch (e) { thrown = e; }
+      expect(thrown).toBeInstanceOf(BudgetSignal);
+      expect((thrown as BudgetSignal).reason).toBe('time');
+    });
+
+    it('single ticks below the first interval do NOT check the (expired) deadline — parity with pre-change behavior', () => {
+      const r = mkRunner(1_000_000, -1);   // deadline expired, but we stay within the first 1024-step window
+      expect(() => { for (let i = 0; i < 100; i++) r.tick(); }).not.toThrow();
+      expect(r.steps).toBe(100);
+    });
+  });
+
   it('an unbound callee dispatches to the HostEnvironment builtin (expression-position)', () => {
     // A recording env that answers `double` returns handled:true with a scalar.
     class BuiltinEnv extends RecordingHostEnv {
@@ -130,28 +178,31 @@ describe('reactive let routes through the ReactiveHost', () => {
   });
 });
 
-describe('seeded rand/range builtins (intrinsic, EvalOptions.seed)', () => {
+// `range` stays a language-kernel intrinsic (dispatched by lang, needs no injected module — it is the
+// compute-lowering gate's bounded-loop primitive). `rand` moved to the standard library's `random` module,
+// so a program using it must inject STD_BUILTINS (it is no longer privileged in lang). The seed itself is
+// still owned + threaded by lang, so determinism-with-randomness is unchanged. `random.test.ts` owns the
+// full rand suite; these keep the lang-level dispatch checks (range-stays-intrinsic; rand-not-via-resolveCall).
+describe('seeded rand/range builtins (range = kernel intrinsic; rand = std-injected; EvalOptions.seed)', () => {
+  const withStd = (src: string, seed = 0, env = new RecordingHostEnv()) =>
+    evaluateProgram(src, { host: new PlainStorageHost(), env, seed, builtins: [STD_BUILTINS] });
   it('rand() is deterministic for a fixed seed and matches makeSeededRng', () => {
-    const r1 = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
-    const r2 = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
     const expected = makeSeededRng(42)();
-    expect(r1.value).toBe(expected);
-    expect(r2.value).toBe(expected);
+    expect(withStd('rand()', 42).value).toBe(expected);
+    expect(withStd('rand()', 42).value).toBe(expected);
   });
   it('different seeds → different rand() values', () => {
-    const a = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 1 });
-    const b = evaluateProgram('rand()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 2 });
-    expect(a.value).not.toBe(b.value);
+    expect(withStd('rand()', 1).value).not.toBe(withStd('rand()', 2).value);
   });
-  it('range(n) returns [0..n) without touching the host', () => {
+  it('range(n) returns [0..n) without touching the host (range stays a kernel intrinsic)', () => {
     const env = new RecordingHostEnv();
     const res = evaluateProgram('range(3)', { host: new PlainStorageHost(), env, seed: 0 });
     expect(res.value).toEqual([0, 1, 2]);
     expect(env.calls.some((c) => c.head === 'range')).toBe(false);
   });
-  it('rand/range are NOT routed to resolveCall (intrinsic wins over the host)', () => {
+  it('rand/range are NOT routed to resolveCall (registry/intrinsic wins over the host)', () => {
     const env = new RecordingHostEnv();
-    evaluateProgram('rand()', { host: new PlainStorageHost(), env, seed: 7 });
+    withStd('rand()', 7, env);
     expect(env.calls.some((c) => c.head === 'rand')).toBe(false);
   });
   it('a domain can still shadow: a user function named rand is called first', () => {
@@ -159,7 +210,7 @@ describe('seeded rand/range builtins (intrinsic, EvalOptions.seed)', () => {
     expect(res.value).toBe(99);
   });
   it('rand() advances one shared per-run sequence (not re-seeded per call)', () => {
-    const res = evaluateProgram('[rand(), rand(), rand()]', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const res = withStd('[rand(), rand(), rand()]', 42);
     const rng = makeSeededRng(42);
     expect(res.value).toEqual([rng(), rng(), rng()]);   // three SUCCESSIVE draws, not three copies of the first
   });
@@ -177,7 +228,7 @@ describe('seeded rand/range builtins (intrinsic, EvalOptions.seed)', () => {
     expect(evaluateProgram('range(-1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0 }).value).toEqual([]);
   });
   it('rand() is budget-charged: an unbounded loop of rand() trips ML-LANG-BUDGET (does not hang)', () => {
-    const res = evaluateProgram('while (true) { rand() }', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0, maxSteps: 1000 });
+    const res = evaluateProgram('while (true) { rand() }', { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 0, maxSteps: 1000, builtins: [STD_BUILTINS] });
     expect(res.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
   });
 });
@@ -244,11 +295,11 @@ describe('pure collection builtins (intrinsic free functions)', () => {
     expect(run('values({ a: 1, b: 2 })').value).toEqual([1, 2]);
     expect(run('entries({ a: 1, b: 2 })').value).toEqual([['a', 1], ['b', 2]]);
   });
-  it('fromEntries builds an object from pairs', () => {
-    expect(run('fromEntries([["a", 1], ["b", 2]])').value).toEqual({ a: 1, b: 2 });
+  it('object builds an object from pairs', () => {
+    expect(run('object([["a", 1], ["b", 2]])').value).toEqual({ a: 1, b: 2 });
   });
-  it('round-trips: fromEntries(entries(o)) == o', () => {
-    expect(run('const o = { a: 1, b: 2 }; fromEntries(entries(o))').value).toEqual({ a: 1, b: 2 });
+  it('round-trips: object(entries(o)) == o', () => {
+    expect(run('const o = { a: 1, b: 2 }; object(entries(o))').value).toEqual({ a: 1, b: 2 });
   });
   it('a builtin result is frozen (immutable)', () => {
     const r = run('const m = map([1], (x) => x); m[0] = 9; m');
@@ -266,13 +317,13 @@ describe('pure collection builtins (intrinsic free functions)', () => {
     expect(run('function dbl(x) { x * 2 } map([1, 2, 3], dbl)').value).toEqual([2, 4, 6]);
     expect(run('function even(x) { x % 2 == 0 } filter([1, 2, 3, 4], even)').value).toEqual([2, 4]);
   });
-  it('fromEntries ignores a forbidden key (FORBIDDEN_KEYS-guarded)', () => {
-    const r = run('fromEntries([["__proto__", 1], ["a", 2]])');
+  it('object ignores a forbidden key (FORBIDDEN_KEYS-guarded)', () => {
+    const r = run('object([["__proto__", 1], ["a", 2]])');
     expect((r.value as Record<string, unknown>).a).toBe(2);
     expect(Object.getOwnPropertyNames(r.value as object)).not.toContain('__proto__');
   });
   it('map budget: a large mapped array fails closed via per-element ticks, never hangs', () => {
-    const r = evaluateProgram('map(range(2000), (x) => x + 1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps: 500 });
+    const r = evaluateProgram('map(range(2000), (x) => x + 1)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxSteps: 500, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
   });
 });
@@ -280,16 +331,16 @@ describe('pure collection builtins (intrinsic free functions)', () => {
 describe('collections increment preserves the invariants', () => {
   it('DETERMINISM: same source + seed → identical result for a spread + builtins + rand mix', () => {
     const src = 'map(range(3), (i) => ({ r: rand(), i: i }))';
-    const a = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
-    const b = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42 });
+    const a = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42, builtins: [MATH_BUILTINS, STD_BUILTINS] });
+    const b = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 42, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(a.value).toEqual(b.value);
-    const c = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 43 });
+    const c = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), seed: 43, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(a.value).not.toEqual(c.value);   // the seed genuinely drives the result
   });
   it('NEVER-THROWS: a builtin callback that recurses infinitely fails closed (ML-LANG-BUDGET), no host throw', () => {
     const src = 'function loop(x) { loop(x) } map([1], (x) => loop(x))';
     let r: ReturnType<typeof evaluateProgram>;
-    expect(() => { r = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxDepth: 20 }); }).not.toThrow();
+    expect(() => { r = evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxDepth: 20, builtins: [MATH_BUILTINS, STD_BUILTINS] }); }).not.toThrow();
     expect(r!.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);   // did not escape into the host
   });
   it('FREEZE does not break equality / serialization of results', () => {
@@ -298,7 +349,7 @@ describe('collections increment preserves the invariants', () => {
     expect(r.value).toEqual([1, 2, 3]);                 // and compare structurally
   });
   it('FREEZE is deep + a nested frozen result still serializes', () => {
-    const r = evaluateProgram('map([1, 2], (x) => ({ v: x }))', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('map([1, 2], (x) => ({ v: x }))', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(JSON.stringify(r.value)).toBe('[{"v":1},{"v":2}]');
   });
 });
@@ -400,7 +451,7 @@ describe('string-bridge builtins', () => {
   it('join fails CLOSED with ML-LANG-BUDGET when the result would exceed the string cap (never a raw RangeError)', () => {
     // A collection of large strings could otherwise build a string past the engine limit and throw a
     // RangeError caught only as the internal-error code. join mirrors the `+` operator's cap.
-    const r = evaluateProgram('join(map(range(50), (i) => "x"), "y");', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxStringLength: 20 });
+    const r = evaluateProgram('join(map(range(50), (i) => "x"), "y");', { host: new PlainStorageHost(), env: new RecordingHostEnv(), maxStringLength: 20, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUDGET')).toBe(true);
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-INTERNAL')).toBe(false);
     expect(r.value).toBe(null);
@@ -444,6 +495,10 @@ describe('numeric core builtins', () => {
     expect(run('round(3.5);').value).toBe(4);   // half-to-even
     expect(run('round(2.4);').value).toBe(2);
     expect(run('round(-2.5);').value).toBe(-2); // half-to-even
+    // A negative value rounding toward zero yields -0, matching Math.round (and the shader round/roundEven
+    // the GPU oracle checks against) — the language `round` builtin delegates to the math core's single
+    // roundHalfEven, so there is exactly ONE half-to-even implementation, not a lang-local duplicate.
+    expect(Object.is(run('round(-0.4);').value, -0)).toBe(true);
   });
   it('sqrt/pow', () => {
     expect(run('sqrt(9);').value).toBe(3);
@@ -461,14 +516,14 @@ describe('numeric core builtins', () => {
     expect(run('function min(a, b) { 999 } min(1, 2);').value).toBe(999);
   });
   it('min/abs/clamp/pow apply componentwise to vec args (GLSL semantics)', () => {
-    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(evaluateProgram('min(vec2(1,5), vec2(3,2)).x', h()).value).toBe(1);
     expect(evaluateProgram('min(vec2(1,5), vec2(3,2)).y', h()).value).toBe(2);
     expect(evaluateProgram('abs(vec2(-1, 2)).x', h()).value).toBe(1);
     expect(evaluateProgram('clamp(vec2(-1, 5), 0, 1).y', h()).value).toBe(1); // scalar bounds broadcast
   });
   it('mismatched-width vec args are a builtin-arg error (not a silent truncation)', () => {
-    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     const r = evaluateProgram('min(vec2(1,5), vec3(3,2,9)).x', h());
     expect(r.diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
     // a beyond-arity vec arg does not promote a scalar call to a vec
@@ -477,7 +532,7 @@ describe('numeric core builtins', () => {
 });
 
 describe('trig / hyperbolic / exponential math builtins', () => {
-  const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
   it('tan/sinh/cosh/tanh evaluate', () => {
     expect(evaluateProgram('tan(0)', h()).value as number).toBeCloseTo(0);
     expect(evaluateProgram('sinh(0)', h()).value as number).toBeCloseTo(0);
@@ -528,11 +583,13 @@ describe('format (number formatting)', () => {
 });
 
 describe('registry ↔ dispatch cross-check', () => {
-  it('every IMPLEMENTED builtin is OWNED by dispatch (never falls through to a host unknown-call)', () => {
+  it('every catalog builtin is OWNED by dispatch (never falls through to a host unknown-call)', () => {
     // Any implemented builtin, called with junk args, must return a value or ML-LANG-BUILTIN-ARG —
-    // NEVER ML-LANG-UNKNOWN-CALL (which would mean the registry advertises a name dispatch doesn't own,
-    // or a case exists without a registry row). rand/range are handled before the collection block.
-    for (const name of IMPLEMENTED_BUILTINS) {
+    // NEVER ML-LANG-UNKNOWN-CALL (which would mean the catalog advertises a name dispatch doesn't own,
+    // or a case exists without a catalog row). rand/range are seeded intrinsics handled before the
+    // collection block; the rest resolve either in the collection cascade or via the injected numeric
+    // module (MATH_BUILTINS is wired into `run`).
+    for (const name of Object.keys(BUILTINS)) {
       if (name === 'rand' || name === 'range') continue;
       const codes = run(`${name}(5, 5, 5);`).diagnostics.map((d) => d.code);
       expect(codes, `builtin '${name}' fell through to UNKNOWN-CALL`).not.toContain('ML-LANG-UNKNOWN-CALL');
@@ -574,22 +631,22 @@ describe('extension seam — kind:value discriminant', () => {
 
 describe('vec/mat constructors — column-major', () => {
   it('mat2 identity and mat2(4 nums) construct column-major via the interpreter', () => {
-    const idn = evaluateProgram('mat2()', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const idn = evaluateProgram('mat2()', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(idn.diagnostics).toEqual([]);   // identity constructs without error
-    const prod = evaluateProgram('(mat2(1,2,3,4) * vec2(5,6)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const prod = evaluateProgram('(mat2(1,2,3,4) * vec2(5,6)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(prod.diagnostics).toEqual([]);
     expect(prod.value).toBe(23);   // column-major: 1*5 + 3*6 (row-major would be 17)
   });
   it('normalize of a zero vector is a NaN vector (matches native shader normalize(0))', () => {
-    const r = evaluateProgram('normalize(vec3(0,0,0)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('normalize(vec3(0,0,0)).x', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(Number.isNaN(r.value as number)).toBe(true);
   });
   it('normalize of a NONZERO vector still yields a unit vector (unchanged)', () => {
-    const r = evaluateProgram('length(normalize(vec3(3,4,0)))', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('length(normalize(vec3(3,4,0)))', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(r.value as number).toBeCloseTo(1, 6);
   });
   it('a bad mat2 arg-count error names the column-major layout', () => {
-    const r = evaluateProgram('mat2(1,2,3)', { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+    const r = evaluateProgram('mat2(1,2,3)', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
     const d = r.diagnostics.find((x) => x.code === 'ML-LANG-BUILTIN-ARG');
     expect(d?.message).toContain('column-major');
     expect(d?.message).not.toContain('row-major');

@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { evaluateProgram } from './evaluate.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import { isTypedArray, descriptorOf } from './custom-types.ts';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 
 const run = (src: string, opts?: { insideComponent?: boolean; maxSteps?: number }) =>
-  evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), ...opts });
+  evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS], ...opts });
 
 describe('typed-array constructors', () => {
   it('f32(n) allocates a zeroed buffer with .length', () => {
@@ -80,17 +82,17 @@ describe('typed-array mutation + coercion', () => {
 
 describe('typed-array lowering + helpers', () => {
   it('isTypedArray recognises a buffer; a plain array is not one', () => {
-    expect(isTypedArray(evaluateProgram('f32([1])', { host: new PlainStorageHost(), env: new RecordingHostEnv() }).value)).toBe(true);
+    expect(isTypedArray(evaluateProgram('f32([1])', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] }).value)).toBe(true);
   });
   it('the descriptor exposes a linear-buffer lowering', () => {
-    const buf = evaluateProgram('f32([1, 2])', { host: new PlainStorageHost(), env: new RecordingHostEnv() }).value;
+    const buf = evaluateProgram('f32([1, 2])', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] }).value;
     const low = descriptorOf(buf)?.lower;
     expect(low?.access).toBe('linear-buffer');
     expect(low?.element).toBe('f32');
     expect(low?.gpuStorable).toBe(true);
   });
   it('f64 is NOT gpu-storable', () => {
-    const buf = evaluateProgram('f64([1])', { host: new PlainStorageHost(), env: new RecordingHostEnv() }).value;
+    const buf = evaluateProgram('f64([1])', { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] }).value;
     expect(descriptorOf(buf)?.lower?.gpuStorable).toBe(false);
   });
 });

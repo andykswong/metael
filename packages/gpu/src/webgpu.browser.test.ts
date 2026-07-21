@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
@@ -10,10 +11,12 @@ import { gateReducer } from './reduce.ts';
 import { gateBinMapper } from './histogram.ts';
 import { emitWgsl, emitReduceWgsl, emitHistogramWgsl } from './emit-wgsl.ts';
 import { createGpuEngine } from './api.ts';
+import { settle } from './settle.ts';
+import { compileKernel } from './lang/compile-kernel.ts';
 
-function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
-function reducerOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('reducer'); return res.value; }
-function mapperOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv() }); if (!isUserFn(res.value)) throw new Error('mapper'); return res.value; }
+function kernelOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('kernel'); return res.value; }
+function reducerOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('reducer'); return res.value; }
+function mapperOf(src: string, host: RuntimeReactiveHost): UserFn { const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }); if (!isUserFn(res.value)) throw new Error('mapper'); return res.value; }
 const deps = { tryWebGpu: tryWebGpuBackend, tryWebGl2: () => null, limitsHint: { maxStorageBufferBindingSize: 1 << 28, maxComputeWorkgroupsPerDimension: 65535 } };
 
 describe('@metael/gpu — real WebGPU dispatch (Chromium)', () => {
@@ -116,8 +119,8 @@ describe('@metael/gpu — real WebGPU dispatch (Chromium)', () => {
   // interpreter oracle MISMATCHES. So this is RED before the 3D grid fix and GREEN after — on a real adapter.
   it('a 3D kernel dispatches over a multi-workgroup z-axis and matches the oracle (real adapter)', async () => {
     const gpu = createGpuEngine();
-    const k = gpu.compile('component k(x, y, z) { return x * 100 + y * 10 + z } k');
-    const r = await gpu.settle(k, { output: [2, 2, 8], verify: true });
+    const k = compileKernel('component k(x, y, z) { return x * 100 + y * 10 + z } k', gpu.host);
+    const r = await settle(() => gpu.dispatch(k, { output: [2, 2, 8], verify: true }));
     expect(r.backend).not.toBe('cpu');   // a real GPU path ran — not the CPU fallback (which proves nothing)
     expect(r.match?.ok).toBe(true);      // verify cross-checks EVERY cell (incl. z=4..7) vs the interpreter oracle
     gpu[Symbol.dispose]();

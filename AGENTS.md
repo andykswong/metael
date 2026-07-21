@@ -20,37 +20,75 @@ The same eval-free reactive-DSL kernel — lexer → parser → tree-walking int
 
 ## Repo Structure
 
-This is an npm **workspaces monorepo**. All four packages are built + green.
+This is an npm **workspaces monorepo**. The `@metael/{lang,runtime,vdom,gpu}` packages are built + green on `main`; the two standard-library packages `@metael/{math,std}` are built + green **held on `feat-metael-std-math`** (not yet merged/published).
 
 ```
 packages/
 ├── lang/     @metael/lang    — [BUILT + GREEN] the eval-free, port-injected JS/ES interpreter kernel:
 │                               lexer → recursive-descent parser → discriminated-union AST →
 │                               eval-free tree-walking evaluator (fuel/time/depth budgets + FORBIDDEN_KEYS)
-│                               + the generic child-collection walk (lowerEntry) + intrinsic seeded rand/range
-│                               + the host-injection port INTERFACES (HostEnvironment/ReactiveHost/KeyMinter)
-│                               + test doubles (PlainStorageHost/RecordingHostEnv/PathKeyMinter).
-│                               Zero runtime deps; imports NOTHING domain-specific (self-contained).
+│                               + the generic child-collection walk (lowerEntry) + the intrinsic seeded rand
+│                               + the `range` loop primitive (the kernel's ONLY intrinsic builtin — the
+│                               bounded-loop primitive the compute-lowering gate + oracle depend on; all
+│                               other vocabulary is INJECTED via a BuiltinModule, dispatched through the
+│                               registry seam, not privileged by lang) + the host-injection port INTERFACES
+│                               (HostEnvironment/ReactiveHost/KeyMinter) + test doubles (PlainStorageHost/
+│                               RecordingHostEnv/PathKeyMinter). Zero runtime deps; imports NOTHING
+│                               domain-specific (self-contained).
+├── math/     @metael/math    — [BUILT + GREEN — held on feat-metael-std-math] the numeric standard library,
+│                               in TWO layers via subpath exports. `@metael/math` (the CORE): a zero-dependency
+│                               plain numeric library — scalar math, vec/mat (column-major, out-param
+│                               `out = op(a,b,out?)`, aliasing-safe), quaternions (vec4 xyzw), transform/camera
+│                               (TRS + decompose, perspective/ortho/lookAt — RH, Y-up, [-1,1] clip-z), 32-bit
+│                               bit ops; operates over Float32Array|Float64Array|number[] (precision follows
+│                               the store); usable WITHOUT the language, imports NOTHING (a 3D/scene-graph engine
+│                               can adopt it as its transform-math library). `@metael/math/lang` (the BINDING):
+│                               wraps the same core in the boxed/immutable/reactive custom-value protocol (vec/
+│                               mat/buffer instances) + MATH_BUILTINS (the numeric BuiltinModule a consumer
+│                               injects) + the BUILTINS lowering-metadata catalog + the classifyProfile
+│                               capability classifier. src/core imports NOTHING; src/lang imports ONLY
+│                               @metael/lang + @metael/math (both enforced by boundary tests).
+├── std/      @metael/std     — [BUILT + GREEN — held on feat-metael-std-math] the general standard library:
+│                               STD_BUILTINS — collections (map/filter/reduce/some/every/find/findIndex/
+│                               includes/sort/slice/reverse), string (split/join/chars/codePointAt/
+│                               toUpperCase/toLowerCase/trim/format), structural (keys/values/entries/object/
+│                               has, FORBIDDEN_KEYS-guarded), random (rand — reads the kernel's seeded PRNG),
+│                               datetime (now/monotonic — read the host's INJECTED clock capability, never an
+│                               ambient Date.now/performance.now; ML-LANG-NO-CLOCK when absent). Each builtin is
+│                               pure, returns a NEW frozen value, ticks the budget, and fails loud on a bad arg.
+│                               Imports ONLY @metael/lang (enforced by a boundary test).
 ├── runtime/  @metael/runtime — [BUILT + GREEN] the reactive runtime + the real port implementations:
 │                               reactive core (signal/memo/effect + synchronous change() + converge guard,
 │                               over vendored @vue/reactivity) + the generic keyed-list diff (add/remove/move
 │                               + teardown-by-identity on remove) + RuntimeReactiveHost (native-Disposable
 │                               runLeafEffect + DisposableStack scope() + cellKey latch + cell-freeing) + the
-│                               one-shot derive() composition root (ML-RT-CONVERGE). Imports ONLY @metael/lang
+│                               one-shot derive() composition root (ML-RT-CONVERGE) + composeEnvs (merges N
+│                               single-vocabulary HostEnvironments into one bindable/disposable composite:
+│                               first-handled resolveCall, fanned-out bindHost/[Symbol.dispose], unioned
+│                               knownHeads + surfaced collisions) + a re-export of the BindableHostEnv type
+│                               (= HostEnvironment + bindHost) named in @metael/lang. Imports ONLY @metael/lang
 │                               + @vue/reactivity (enforced by an automated boundary test).
 ├── vdom/     @metael/vdom    — [BUILT + GREEN] a Preact-signals-style virtual DOM built ENTIRELY on the
 │                               kernel — the generality showcase AND the vehicle that hardens the runtime's
-│                               keyed-list diff under full add/remove/reorder. A thin domain layer: a vnode
+│                               keyed-list diff under full add/remove/reorder. Split across TWO subpaths via
+│                               package exports: `@metael/vdom` (the API-first CORE — the `render` loop over a
+│                               host-authored VNode producer + the `h`/`Fragment` hyperscript builder + the
+│                               `VNode` type + `normalizeNodes` + the output sanitizer; NO interpreter
+│                               dependency) and `@metael/vdom/lang` (the metael-DSL BINDING — `renderSource`
+│                               = `render` driven by `compileToProducer`, + `VDomHostEnv`/`materialize`; this
+│                               is the subpath that pulls the interpreter). The domain layer: a vnode
 │                               HostEnvironment (lowercase head → element vnode; Capitalized → decline →
-│                               transparent fragment) + materialize/reconcile/DOM-patcher + an output
-│                               sanitizer. Two update paths, automatic: a reactive `let` read by ONE
-│                               attribute/text position patches only that DOM node in place (a leaf effect,
-│                               no re-render); a change to the tree's SHAPE re-derives + reconciles by key
-│                               (DOM identity + focus + selection survive). On reconcile, a matched node's
-│                               live DOM node is re-registered onto the fresh pass's vnode, so a preserved
-│                               node's reactive leaf effect keeps patching after a structural re-derive
-│                               (the fine-grained path never goes dead). Imports ONLY @metael/lang +
-│                               @metael/runtime (enforced by an automated import-boundary test).
+│                               transparent fragment) + materialize/reconcile/DOM-patcher + the sanitizer.
+│                               Two update paths, automatic: a reactive `let` read by ONE attribute/text
+│                               position patches only that DOM node in place (a leaf effect, no re-render);
+│                               a change to the tree's SHAPE re-derives + reconciles by key (DOM identity +
+│                               focus + selection survive). On reconcile, a matched node's live DOM node is
+│                               re-registered onto the fresh pass's vnode, so a preserved node's reactive leaf
+│                               effect keeps patching after a structural re-derive (the fine-grained path
+│                               never goes dead). Imports ONLY @metael/lang + @metael/runtime (enforced by an
+│                               automated import-boundary test); the core subpath carries no interpreter dep.
+│                               NOTE the old `mount()` was renamed `renderSource()` and moved to the `./lang`
+│                               subpath; `render()` is the API-first host-authored-VNode path on the barrel.
 └── gpu/      @metael/gpu     — [BUILT + GREEN] an eval-free, verifiable GPU-COMPUTE engine — a domain
                                consumer like @metael/vdom. A map kernel is authored as a metael `component`
                                (a `let` accumulator works vs the interpreter); the `gpu(kernel, cfg)` head
@@ -64,10 +102,20 @@ packages/
                                generation breaks the loop + triggers re-dispatch on in-place mutation). The
                                shipped interpreter is the correctness ORACLE (opt-in `verify` samples cells +
                                ULP-checks; opt-in `benchmark` times a CPU baseline). Emits MLGPU-* diagnostics.
-                               Imports ONLY @metael/lang + @metael/runtime (enforced by a boundary test);
-                               NEVER @metael/vdom — the app composes gpu + vdom in apps/site. A host-API façade
-                               (createGpuEngine → compile/dispatch/settle/subscribe, all exported from the barrel)
-                               drives the change()/drain/re-read settle dance for host TS, backed by a per-backend
+                               Imports ONLY @metael/{lang,math,runtime} (the numeric vocabulary it lowers
+                               comes from @metael/math; enforced by a boundary test); NEVER @metael/vdom —
+                               the app composes gpu + vdom in apps/site. Split across THREE subpaths via
+                               package exports: `@metael/gpu` (the API-first CORE — `createGpuEngine` → a thin
+                               façade with ONE `dispatch(kernel, cfg)` routing on `cfg.mode` ('map' default |
+                               'reduce' | 'histogram') + the FREE `settle`/`subscribe`/`settled` helpers over a
+                               `() => gpu.dispatch(k, cfg)` thunk + `gpuBuffer` + `GpuEngine` + the device seam;
+                               NO interpreter dependency), `@metael/gpu/lang` (the metael-DSL BINDING —
+                               `GpuHostEnv` + `compileKernel`; the subpath that pulls the interpreter), and
+                               `@metael/gpu/builder` (a TSL-style JS kernel builder — `kernel(...)`/`KNode`/
+                               `lit`/`param`/`call` + `letVar`/`set`/`forRange`/`ifThen`/`ret`; authors the SAME
+                               kernel AST the DSL parser produces, proven AST-equivalent + dispatch-parity-proven,
+                               and imports @metael/lang ONLY — no runtime/evaluator). The façade drives the
+                               change()/drain/re-read settle dance for host TS, backed by a per-backend
                                shader-source pipeline cache.
 ```
 
@@ -93,12 +141,12 @@ npx vitest run packages/lang        # the @metael/lang suite specifically
 npm run test:coverage               # node suite with v8 coverage → coverage/lcov.info (Codecov)
 ```
 
-### Publishing (`@metael/{lang,runtime,vdom}` → npm)
+### Publishing (`@metael/{lang,math,std,runtime,vdom}` → npm)
 
-The three packages are **public, versioned in lockstep** (changesets `fixed`) and published with npm
+The public packages are **versioned in lockstep** (changesets `fixed`) and published with npm
 **provenance via Trusted Publishing (OIDC)** — no npm token; `@metael/site` is private (never published).
 Flow: add a changeset for any change (`npm run changeset`); the `release` workflow opens a "Version
-Packages" PR, and merging it bumps all three versions + changelogs and `changeset publish`es to npm.
+Packages" PR, and merging it bumps all versions + changelogs and `changeset publish`es to npm.
 The registry exchanges the workflow's OIDC id-token for a short-lived publish credential (needs npm CLI
 ≥ 11.5.1, which the workflow installs), so `id-token: write` is the only auth the publish step needs.
 CI (`build` workflow) runs build → typecheck → lint → test → coverage → Codecov on every push/PR to
@@ -106,9 +154,10 @@ CI (`build` workflow) runs build → typecheck → lint → test → coverage �
 
 **One-time setup before the first release:** (1) a trusted publisher can only be configured on a package
 that already exists, so the **first `0.1.0` publish is a manual bootstrap** — `npm login`, then from a
-clean build `npm publish -w @metael/lang && npm publish -w @metael/runtime && npm publish -w @metael/vdom`
+clean build publish in **dependency order** (each package before its dependents):
+`npm publish -w @metael/lang && npm publish -w @metael/math && npm publish -w @metael/std && npm publish -w @metael/runtime && npm publish -w @metael/vdom`
 (each has `publishConfig.access=public`; `npm publish --provenance` locally if you want provenance on the
-bootstrap). (2) On npmjs.com, for **each** of the three packages, add a GitHub Actions trusted publisher:
+bootstrap). (2) On npmjs.com, for **each** public package, add a GitHub Actions trusted publisher:
 org `andykswong`, repo `metael`, workflow filename `release.yaml`. (3) Add the `CODECOV_TOKEN` repo secret.
 After that, every release is tokenless OIDC — no `NPM_TOKEN` ever.
 
@@ -122,9 +171,10 @@ The browser project launches Chromium with WebGPU flags (`--enable-unsafe-webgpu
 - **Dependency discipline per package.** `@metael/lang` is a pure, self-contained kernel with **zero runtime dependencies** — do not add one (a signal library like `@vue/reactivity` is a `@metael/runtime` concern, not `lang`). `@metael/runtime` may import **only** `@metael/lang` + `@vue/reactivity` — nothing domain-specific, no other package.
 - **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). A `safety.test.ts` source-scan asserts this; do not defeat it.
 - **Vocabulary-agnostic core.** The grammar/reactivity/composition/registry hardcode **no** concrete heads. A domain's vocabulary change needs **zero** grammar/AST change. Do not add domain keywords — vocabulary is identifiers resolved through `HostEnvironment.resolveCall`.
+- **Call resolution has a fixed order — two name axes over one capability substrate.** A call head resolves: (1) an **Environment binding** (a user `let`/`function`/`component` in call position — shadows everything below) → (2) the injected **`BuiltinRegistry`** (`buildRegistry` over the modules; produces a pure, deep-frozen value) → (3) the **`range`** intrinsic (the only privileged control-flow head) → (4) **`HostEnvironment.resolveCall`** (the domain vocabulary; a node by default, or a pure value with `kind:'value'`) → (5) fail closed `ML-LANG-UNKNOWN-CALL`. The registry and the host are **two distinct name→behavior mechanisms on purpose**: the registry is for *stateless pure functions over values* (unevaluated args, rich `BuiltinSpec` lowering metadata, flat N-way `buildRegistry` merge, resolved first); the host is for a *stateful vocabulary that builds output nodes and owns reactive resources* (`bindHost`-held state, `Region`-tagged reactive args, resolved last). Both reach reactivity/budget/determinism only through the **one** `ReactiveHost` the evaluator/derive owns — a builtin via the narrowed `BuiltinCtx`, a host via `bindHost`. Preserve this ordering and this split; do not add a third dispatch mechanism, and keep a stateless pure builtin in the registry (not behind `resolveCall`).
 - **Immutable collections.** DSL-created arrays/objects (literals + builtin results) are **deep-frozen** at eval — immutable by construction. A member/index write (`o.a = 2`, `a[0] = 9`) is a fail-loud `ML-LANG-IMMUTABLE`; the update path is reassignment + spread/builtins. An **identifier**-LHS assign (a reactive `let` write / `ML-LANG-CONST`) is unaffected — only member/index LHS writes are rejected (a computed forbidden key still surfaces `ML-LANG-FORBIDDEN`). **Injected `data` is deep-frozen at the boundary** (a shallow walk, not a copy) so a builtin result aliasing `data`'s own objects never silently freezes a live host object — do not revert to binding it un-frozen, and do not reintroduce an in-place member/index write.
 - **Spread is supported in literals** (`[...a, x]`, `{ ...o, k: v }`) via the `ellipsis` token — array + object literals only, not call args. A spread of a non-array/non-object is a fail-loud `ML-LANG-SPREAD` + a safe skip.
-- **The pure builtin set** — collection (`map`/`filter`/`reduce`), query (`some`/`every`/`find`/`findIndex`/`includes`), ordering (`sort`/`slice`/`reverse`), object⇄array (`keys`/`values`/`entries`/`fromEntries`), string bridge (`split`/`join`/`chars`/`toUpperCase`/`toLowerCase`/`trim`), numeric — the exact/algebraic `min`/`max`/`abs`/`sign`/`floor`/`ceil`/`round`/`clamp`/`trunc`/`degrees`/`radians` + the `gpu-tolerant` transcendentals `sqrt`/`pow`/`exp`/`exp2`/`log`/`log2`/`inverseSqrt`/`fract`/`step`/`mix`/`smoothstep`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh` (each applies componentwise to a `vec` arg) + `format` — the vec/mat `core` set (`vec2/3/4`, square `mat2/3/4` + the six non-square `matCxR`, column-major; `dot`/`cross`/`normalize`/`length`, `transpose`/`determinant`/`inverse`/`distance`/`reflect`/`refract`/`faceforward`, and the `vec4` quaternion family `qmul`/`qconj`/`qinvert`/`qaxisangle`/`qrotate`/`qslerp`/`qmat`), plus seeded `rand`/`range` — is bound **intrinsically** (unbound-head-only: a user `function` of the same name shadows). Each ticks the budget per call + per element (a large collection/comparison fails closed with `ML-LANG-BUDGET`); each collection-returning builtin returns a **new frozen** value and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` (never a throw); callbacks may be an arrow OR a user `function`. New builtins go in the registry (`builtins-registry.ts`) with a profile/portability tag; a cross-check test binds the registry to real dispatch. `sort` has a total/stable/deterministic order (`sort.ts`, NaN pinned). `round` is round-half-to-even. Collection builtins are **array-only**; strings bridge via `split`/`join`/`chars`. `for-of` iterates arrays + strings (code points).
+- **The pure builtin set** — collection (`map`/`filter`/`reduce`), query (`some`/`every`/`find`/`findIndex`/`includes`), ordering (`sort`/`slice`/`reverse`), object⇄array (`keys`/`values`/`entries`/`object`/`has`), string bridge (`split`/`join`/`chars`/`toUpperCase`/`toLowerCase`/`trim`/`codePointAt`), numeric — the exact/algebraic `min`/`max`/`abs`/`sign`/`floor`/`ceil`/`round`/`clamp`/`trunc`/`degrees`/`radians` + the `gpu-tolerant` transcendentals `sqrt`/`pow`/`exp`/`exp2`/`log`/`log2`/`inverseSqrt`/`fract`/`step`/`mix`/`smoothstep`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh` (each applies componentwise to a `vec` arg) + `format` — the vec/mat `core` set (`vec2/3/4`, square `mat2/3/4` + the six non-square `matCxR`, column-major; `dot`/`cross`/`normalize`/`length`, `transpose`/`determinant`/`inverse`/`distance`/`reflect`/`refract`/`faceforward`, and the `vec4` quaternion family `qmul`/`qconj`/`qinvert`/`qaxisangle`/`qrotate`/`qslerp`/`qmat`), plus seeded `rand`/`range` — is bound **intrinsically** (unbound-head-only: a user `function` of the same name shadows). Each ticks the budget per call + per element (a large collection/comparison fails closed with `ML-LANG-BUDGET`); each collection-returning builtin returns a **new frozen** value and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` (never a throw); callbacks may be an arrow OR a user `function`. New builtins go in the registry (`builtins-registry.ts`) with a profile/portability tag; a cross-check test binds the registry to real dispatch. `sort` has a total/stable/deterministic order (`sort.ts`, NaN pinned). `round` is round-half-to-even. Collection builtins are **array-only**; strings bridge via `split`/`join`/`chars`. `for-of` iterates arrays + strings (code points).
 - **Capability profiles.** Each builtin is tagged `core` (closure-free/scalar — restricted-target-lowerable) vs `host` (closure/heap — interpreter-backed), with a numeric portability class (`exact`/`gpu-tolerant`/`cpu-only`). `classifyProfile(fn)` decides a function's core-compliance from its AST. This is metadata + a pure classifier only — no codegen/dispatch engine is built. Do not add domain-flavored builtins to the core; niche/domain ops belong behind `resolveCall` (which may return `kind: 'value'` for a pure, deep-frozen value in expression position).
 - **`head { … }` wrap shorthand.** A bare identifier followed by a **same-line** `{` is a zero-arg wrapping call (`group { … }` ≡ `group() { … }`) — the parser synthesizes the `call` node. A next-line `{` after a bare ident stays two statements (the newline guard); a `{` after a *call* wraps on either line (unchanged).
 - **Custom value types dispatch through a non-forgeable descriptor.** A value may carry a Symbol-keyed `TypeDescriptor` (`custom-types.ts`) redefining its operators/accessors/iteration/truthiness/display/lowering; the evaluator dispatches through it at 8 sites — **always after a number/primitive fast path** (do not regress it: a scalar op must never do a descriptor lookup) and **after `FORBIDDEN_KEYS`** (a descriptor is never reachable via a forbidden key). An undefined operator → `ML-LANG-OP-UNSUPPORTED`; an undefined member/swizzle → `ML-LANG-UNKNOWN-MEMBER`; `==`/`!=` with no handler → reference identity (never fail-loud). **Typed arrays** (`f32`/`f64`/`i32`/`u32`) are the only in-place-mutable values: a `let` buffer is writable + reactive via the `ReactiveHost` generation signal, a `const` buffer is frozen (`ML-LANG-IMMUTABLE`, enforced by the interpreter's own frozen box — aliasing-proof), OOB is `ML-LANG-INDEX-RANGE`, a non-number element is `ML-LANG-BUILTIN-ARG`, construction is capped by `MAX_BUFFER_LENGTH`. **`vec`/`mat`** are immutable value types. `deepFreeze` **exempts** a tagged value (an opaque leaf — never `Object.freeze` a typed array, which would throw); do not remove that exemption.

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { PlainStorageHost, RecordingHostEnv, PathKeyMinter, didYouMean } from './ports.ts';
-import type { Arg } from './ports.ts';
+import { PlainStorageHost, RecordingHostEnv, PathKeyMinter, didYouMean, frozenClock } from './ports.ts';
+import type { Arg, ReactiveHost, HostEnvironment, HostValue, SourceSpan } from './ports.ts';
+import type { BindableHostEnv } from './index.ts';
 
 describe('injection ports (test doubles)', () => {
   it('PlainStorageHost stores + reads a cell value (tracking elided, value present)', () => {
@@ -35,6 +36,30 @@ describe('injection ports (test doubles)', () => {
   it('PathKeyMinter mints a structural path key from parent + kind + ordinal', () => {
     const m = new PathKeyMinter();
     expect(m.structural('Story#0', 'layout', 0)).toBe('Story#0/layout#0');
+  });
+});
+
+// --- The optional host clock capability (replayable time source) ---
+describe('ReactiveHost clock capability', () => {
+  it('PlainStorageHost exposes a default real clock (now/monotonic are numbers)', () => {
+    const h = new PlainStorageHost();
+    const clk = h.clock();
+    expect(typeof clk.now()).toBe('number');
+    expect(typeof clk.monotonic()).toBe('number');
+    expect(clk.now()).toBeGreaterThan(0);   // wall-clock ms since epoch
+  });
+
+  it('an injected clock overrides the default (replayable time)', () => {
+    const h = new PlainStorageHost(() => frozenClock(1234));
+    expect(h.clock().now()).toBe(1234);
+    expect(h.clock().monotonic()).toBe(1234);
+  });
+
+  it('frozenClock(t) reports the same now + monotonic on every read', () => {
+    const clk = frozenClock(9000);
+    expect(clk.now()).toBe(9000);
+    expect(clk.now()).toBe(9000);         // stable across reads (deterministic)
+    expect(clk.monotonic()).toBe(9000);
   });
 });
 
@@ -157,5 +182,20 @@ describe('knownHeads / did-you-mean (review fix)', () => {
     // 'abcd' and 'xbc' are both distance 1 from 'abc'; the first in insertion order wins.
     expect(didYouMean('abc', new Set(['abcd', 'xbc']))).toBe('abcd');
     expect(didYouMean('abc', new Set(['xbc', 'abcd']))).toBe('xbc');
+  });
+});
+
+// --- BindableHostEnv: a HostEnvironment plus bindHost port ---
+describe('BindableHostEnv', () => {
+  it('is a HostEnvironment plus a bindHost(host) method (structural)', () => {
+    // A concrete env that satisfies the interface compiles + runs.
+    const env: BindableHostEnv = {
+      resolveCall(_h: string, _k: string, _a: Arg[], _c: HostValue[], _s: SourceSpan) { return { handled: false as const }; },
+      bindHost(_host: ReactiveHost) { /* no-op */ },
+    };
+    expect(typeof env.bindHost).toBe('function');
+    // It is assignable to a plain HostEnvironment (extends relationship).
+    const asHost: HostEnvironment = env;
+    expect(typeof asHost.resolveCall).toBe('function');
   });
 });

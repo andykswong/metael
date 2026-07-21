@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, RecordingHostEnv, makeCallable } from '@metael/lang';
 import { RuntimeReactiveHost } from '@metael/runtime';
 import { gateKernel } from './gate.ts';
@@ -6,7 +7,7 @@ import { emitCpu } from './emit-cpu.ts';
 
 function assertParity(src: string, dims: number[], comps = 1): void {
   const host = new RuntimeReactiveHost();
-  const fn = evaluateProgram(src, { host, env: new RecordingHostEnv() }).value as never;
+  const fn = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as never;
   const { bindings, core } = gateKernel(fn, host, comps);
   expect(core).toBe(true);
   const cpu = emitCpu(fn, bindings, host, comps);
@@ -21,7 +22,7 @@ function assertParity(src: string, dims: number[], comps = 1): void {
       for (let d = dims.length - 1; d >= 0; d--) { c[d] = rem % dims[d]!; rem = Math.floor(rem / dims[d]!); }
       return c;
     })();
-    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 1_000_000 });
+    const call = makeCallable(fn, { host, env: { resolveCall: () => ({ handled: false }) }, maxSteps: 1_000_000, builtins: [MATH_BUILTINS] });
     const ref = call(...coords);
     const got = cpu(coords);
     const refComps = comps === 1 ? [Number(ref)] : Array.from({ length: comps }, (_, k) => Number((ref as { [k: string]: unknown })['xyzw'[k] as string] ?? 0));
@@ -53,6 +54,24 @@ describe('parity: interpreter == CPU-emit (the gate⇒parity net)', () => {
   it('math builtins vec parity', () => {
     assertParity('component k(i) { return sin(vec2(0.5, 1.0)).x } k', [4]);
     assertParity('component k(i) { return tan(vec2(0.2, 0.3)).y } k', [4]);
+  });
+  // The 32-bit bit ops: the CPU hand-walk delegates to core.countOneBits/core.reverseBits (== the interpreter),
+  // so this proves the gate accepts them AND the CPU cell == the oracle. countOneBits is a 0..32 count (always
+  // f32-exact); reverseBits produces a LARGE value (e.g. reverseBits(3)=0xC0000000) that is nonetheless f32-exact
+  // for f32-exact inputs (reversal preserves the bit-span) — so this row also guards the large-output case.
+  it('bit-op scalar parity (countOneBits / reverseBits, incl. a large reverseBits output)', () => {
+    assertParity('const a = f32(4, (i) => 2*i + 1) component k(i) { return countOneBits(a[i]) } k', [4]);
+    assertParity('const a = f32(4, (i) => i + 1) component k(i) { return reverseBits(a[i]) } k', [4]);
+  });
+  // A FRACTIONAL f32 input to the bit ops: the interpreter (and thus the CPU hand-walk) coerces the arg via
+  // `>>>0` = ToUint32 = TRUNCATE toward zero, then wrap mod 2^32 — so countOneBits(3.9) counts bits of 3, NOT
+  // 4 (a round would give 4 and diverge). The CPU cell delegates to core.countOneBits/core.reverseBits, so it
+  // already truncates; this row locks that in (the matching shader-side truncation is proven on a real adapter
+  // in parity.browser.test.ts, and the emit-string tests assert the shaders truncate rather than round).
+  it('bit-op parity with FRACTIONAL inputs — truncate toward zero like `>>>0`, not round', () => {
+    assertParity('const a = f32(4, (i) => i + 0.7) component k(i) { return countOneBits(a[i]) } k', [4]);
+    assertParity('const a = f32(4, (i) => i + 0.7) component k(i) { return reverseBits(a[i]) } k', [4]);
+    assertParity('const a = f32(4, (i) => 2*i + 1.9) component k(i) { return countOneBits(a[i]) } k', [4]);
   });
   // P4 vec/mat ops: distance/reflect (vec geometry), determinant (square mat) and inverse (square-ctor).
   // The `inverse(M) * M ≈ I` identity is the strongest of the four — it exercises the full square-matrix

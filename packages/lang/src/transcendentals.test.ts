@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateProgram, IMPLEMENTED_BUILTINS, BUILTINS } from './index.ts';
+import { evaluateProgram } from './index.ts';
+import { BUILTINS, isBuiltin, MATH_BUILTINS } from '@metael/math/lang';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 
-const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv() });
+const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
 
 describe('transcendental builtins (implemented + f64-exact reference)', () => {
   it('sin / cos', () => {
@@ -28,9 +29,9 @@ describe('transcendental builtins (implemented + f64-exact reference)', () => {
   it('a non-numeric arg is fail-loud ML-LANG-BUILTIN-ARG', () => {
     expect(run('sin("x")').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
   });
-  it('they are now dispatched (not future) — in IMPLEMENTED_BUILTINS + carry a lowerName', () => {
+  it('they are dispatched (not future) — in the catalog + carry a lowerName', () => {
     for (const name of ['sin', 'cos', 'exp', 'log', 'fract', 'step', 'mix', 'smoothstep']) {
-      expect(IMPLEMENTED_BUILTINS.has(name)).toBe(true);
+      expect(isBuiltin(name)).toBe(true);
       expect(BUILTINS[name]!.future).toBeFalsy();
       expect(BUILTINS[name]!.lowerName).toBeTruthy();
     }

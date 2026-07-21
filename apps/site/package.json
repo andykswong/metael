@@ -14,7 +14,9 @@
   "dependencies": {
     "@metael/gpu": "*",
     "@metael/lang": "*",
+    "@metael/math": "*",
     "@metael/runtime": "*",
+    "@metael/std": "*",
     "@metael/vdom": "*",
     "disposablestack": "^1.1.8"
   },

@@ -10,7 +10,7 @@ describe('render() — real DOM (Chromium)', () => {
   it('builds the DOM and reflects a value-only signal write in place (no rebuild)', () => {
     const c = container();
     const label = signal('one');
-    const handle = render(() => h('span', {}, () => label.get()), c, {});
+    const handle = render(() => h('span', {}, () => label.get()), c);
     expect(c.querySelector('span')!.textContent).toBe('one');
     const spanBefore = c.querySelector('span');
     handle.setState(() => label.set('two'));
@@ -23,7 +23,7 @@ describe('render() — real DOM (Chromium)', () => {
   it('reconciles a structural change (element swap)', () => {
     const c = container();
     const show = signal(true);
-    const handle = render(() => (show.get() ? h('div', {}, 'A') : h('p', {}, 'B')), c, {});
+    const handle = render(() => (show.get() ? h('div', {}, 'A') : h('p', {}, 'B')), c);
     expect(c.querySelector('div')!.textContent).toBe('A');
     handle.setState(() => show.set(false));
     expect(c.querySelector('div')).toBeNull();
@@ -37,7 +37,7 @@ describe('render() — real DOM (Chromium)', () => {
     const items = signal([{ id: 'a', n: 1 }, { id: 'b', n: 2 }, { id: 'c', n: 3 }]);
     const handle = render(
       () => h('ul', {}, ...items.get().map((it) => h('li', { key: it.id }, String(it.n)))),
-      c, {},
+      c,
     );
     const first = c.querySelectorAll('li')[0]! as HTMLElement;
     first.setAttribute('data-probe', 'yes');           // tag the DOM node for "a"
@@ -54,7 +54,7 @@ describe('render() — real DOM (Chromium)', () => {
     const count = signal(0);
     const handle = render(
       () => h('button', { onClick: () => count.set(count.get() + 1) }, () => `count: ${count.get()}`),
-      c, {},
+      c,
     );
     const btn = c.querySelector('button')! as HTMLButtonElement;
     expect(btn.textContent).toBe('count: 0');
@@ -75,7 +75,7 @@ describe('render() — real DOM (Chromium)', () => {
       () => (show.get()
         ? h('div', {}, h('span', {}, () => { runs++; return inner.get(); }))
         : h('div', {}, 'gone')),
-      c, {},
+      c,
     );
     expect(c.querySelector('span')!.textContent).toBe('live');
     const runsAfterBuild = runs;
@@ -103,7 +103,7 @@ describe('render() — real DOM (Chromium)', () => {
         show.get() ? h('p', {}, 'banner') : null,
         h('span', {}, () => label.get()),
       ),
-      c, {},
+      c,
     );
     expect(c.querySelector('p')!.textContent).toBe('banner');
     expect(c.querySelector('span')!.textContent).toBe('hi');
@@ -125,7 +125,7 @@ describe('render() — real DOM (Chromium)', () => {
     // '/div#0/0' → patchNode(prevTEXT, nextElement) takes the text branch and never builds the span.
     const handle = render(
       () => h('div', {}, asText.get() ? 'x' : h('span', {}, 'y')),
-      c, {},
+      c,
     );
     expect(c.querySelector('div')!.textContent).toBe('x');
     expect(c.querySelector('span')).toBeNull();
@@ -146,7 +146,7 @@ describe('render() — real DOM (Chromium)', () => {
       () => mode.get() === 'view'
         ? h('div', { id: 'x', class: 'v' }, () => 'V=' + mode.get())
         : h('div', { id: 'x', class: 'e' }, () => 'E=' + mode.get()),
-      c, {},
+      c,
     );
     expect(c.querySelector('#x')!.textContent).toBe('V=view');
     expect(c.querySelector('#x')!.getAttribute('class')).toBe('v');
@@ -166,7 +166,7 @@ describe('render() — real DOM (Chromium)', () => {
       () => mode.get() === 'view'
         ? h('div', { id: 'x', title: () => 'V=' + mode.get() }, 'body')
         : h('div', { id: 'x', title: () => 'E=' + mode.get() }, 'body'),
-      c, {},
+      c,
     );
     expect(c.querySelector('#x')!.getAttribute('title')).toBe('V=view');
     handle.setState(() => mode.set('edit'));
@@ -179,7 +179,7 @@ describe('render() — real DOM (Chromium)', () => {
     // are not indexed as elements, so teardown must resolve their live Text node to detach it.
     const c = container();
     const items = signal(['a', 'b', 'c']);
-    const handle = render(() => h('div', {}, ...items.get()), c, {});
+    const handle = render(() => h('div', {}, ...items.get()), c);
     expect(c.querySelector('div')!.textContent).toBe('abc');
     handle.setState(() => items.set(['a']));
     expect(c.querySelector('div')!.textContent).toBe('a');    // 'b' and 'c' Text nodes detached, not left as 'abc'
@@ -194,7 +194,7 @@ describe('render() — real DOM (Chromium)', () => {
     const label = signal('hi');
     const handle = render(
       () => h('div', {}, () => label.get(), show.get() ? h('span', {}, 'tail') : null),
-      c, {},
+      c,
     );
     expect(c.querySelector('div')!.textContent).toBe('hitail');
     handle.setState(() => show.set(false));

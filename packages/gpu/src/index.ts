@@ -1,30 +1,27 @@
-// @metael/gpu public barrel — the gpu head factory + the reactive-resource types + the diagnostics.
-// Populated as the engine lands (gate → emitters → device backends → resource → head).
-export { gateKernel } from './gate.ts';
-export type { GateVerdict } from './gate.ts';
-export { checkStaticBounds, intervalOf } from './bounds.ts';
-export type { Interval } from './bounds.ts';
-export { buildBindingTable, collectFreeNames } from './binding.ts';
-export type { Binding, BindingTable } from './binding.ts';
-export { checkCost, MAX_GPU_ALLOC, CPU_LIMITS } from './cost.ts';
-export type { DeviceLimits } from './cost.ts';
-export { emitCpu } from './emit-cpu.ts';
-export { checkMatch } from './oracle.ts';
-export type { MatchVerdict, OracleInput } from './oracle.ts';
-export { GpuHostEnv } from './host-env.ts';
+// @metael/gpu public barrel — the API-first compute core: the batteries-included host-TS engine facade
+// (createGpuEngine → dispatch) + the free settle/subscribe/settled helpers + gpuBuffer, the engine, and the
+// device-acquisition seam. The metael-DSL binding (GpuHostEnv + compileKernel) lives in the ./lang subpath
+// (@metael/gpu/lang) — importing it, not this barrel, is what pulls the interpreter (evaluateProgram). The
+// gate/bounds/binding/emitter/oracle/hash pieces are IMPLEMENTATION DETAIL — the tests reach them by
+// relative path (./gate.ts, ./emit-wgsl.ts, …), not through this barrel, so they carry no public stability
+// contract and are deliberately NOT re-exported here.
+
+// The host-TS façade — the one-call front door for driving compute from TypeScript.
+export { createGpuEngine } from './api.ts';
+export type { CreateGpuEngineOptions, GpuEngineFacade, DispatchConfig } from './api.ts';
+// The free helpers over a `() => facade.dispatch(k, cfg)` thunk: await/subscribe/narrow a dispatch.
+export { settle, subscribe, settled } from './settle.ts';
+// Wrap plain host data (Float32Array | number[]) into a reduce/histogram input buffer without hand-boxing.
+export { gpuBuffer } from './buffer.ts';
+
+// The engine the vocabulary drives (a host may construct + drive it directly, beyond the façade).
 export { GpuEngine } from './resource.ts';
 export type { GpuConfig, ReduceConfig, HistogramConfig, GpuResource, GpuEngineDeps } from './resource.ts';
-export { gateReducer, cpuReduce } from './reduce.ts';
-export { gateBinMapper, cpuHistogram } from './histogram.ts';
-export type { Backend, BackendKind, DispatchInput, DispatchResult } from './device/index.ts';
-export { selectBackend } from './device/index.ts';
-export { makeCpuBackend } from './device/cpu.ts';
+
+// The device-acquisition seam: an embedder building custom GpuEngineDeps needs the backend probes, the
+// pre-acquisition device-limits hint, and the Backend/BackendKind/DeviceLimits types the deps reference.
+export { CPU_LIMITS } from './cost.ts';
+export type { DeviceLimits } from './cost.ts';
 export { tryWebGpuBackend } from './device/webgpu.ts';
 export { tryWebGl2Backend } from './device/webgl2.ts';
-export { emitWgsl, emitReduceWgsl, emitHistogramWgsl } from './emit-wgsl.ts';
-export { emitGlsl } from './emit-glsl.ts';
-export { compsOf } from './output.ts';
-export type { OutputElement } from './output.ts';
-export { kernelHash } from './hash.ts';
-export { createGpuEngine, compileKernel } from './api.ts';
-export type { CreateGpuEngineOptions, GpuEngineFacade } from './api.ts';
+export type { Backend, BackendKind } from './device/index.ts';

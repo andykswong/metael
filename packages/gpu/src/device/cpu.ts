@@ -3,6 +3,9 @@
 import type { Backend, DispatchInput, DispatchResult } from './index.ts';
 import { CPU_LIMITS } from '../cost.ts';
 
+/** Create the CPU backend: it runs the eval-free CPU emitter over every output cell. Always available (no GPU
+ *  needed), it is the device ladder's floor + the benchmark baseline, and — being the interpreter oracle by
+ *  construction — the correctness reference every GPU leg is checked against. */
 export function makeCpuBackend(): Backend {
   return {
     kind: 'cpu',

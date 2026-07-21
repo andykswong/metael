@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn, HostEnvironment, Arg, HostValue, SourceSpan } from '@metael/lang';
@@ -7,7 +8,7 @@ import { GpuEngine } from './resource.ts';
 import type { Backend, DispatchInput } from './device/index.ts';
 
 function kernelOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('expected kernel');
   return res.value;
 }
@@ -254,8 +255,8 @@ describe('gpu reactive resource (CPU backend, node)', () => {
     // dispatch returned the first's cached output (a silent stale result). The content fingerprint splits them.
     const host = new RuntimeReactiveHost();
     const engine = new GpuEngine(host, cpuOnlyDeps);
-    const bufA = evaluateProgram(`f32([1, 2, 3, 4])`, { host, env: new RecordingHostEnv() }).value as object;
-    const bufB = evaluateProgram(`f32([10, 20, 30, 40])`, { host, env: new RecordingHostEnv() }).value as object;
+    const bufA = evaluateProgram(`f32([1, 2, 3, 4])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
+    const bufB = evaluateProgram(`f32([10, 20, 30, 40])`, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] }).value as object;
     const mkK = (buf: object): UserFn => {
       const env: HostEnvironment = {
         resolveCall(head: string, _k: string, _a: Arg[], _c: HostValue[], _s: SourceSpan) {
@@ -328,6 +329,23 @@ describe('gpu reactive resource (CPU backend, node)', () => {
     expect(s.error).toBeNull();              // NOT terminal — fell through to cpu
     expect(s.backend).toBe('cpu');
     expect(s.value).toEqual([0, 2, 4, 6]);
+    engine[Symbol.dispose]();
+  });
+
+  it('a gate-accepted-but-un-emittable head fails closed to a local MLGPU-EMIT diagnostic (no tree collapse)', () => {
+    // `perspective` builds a mat4 and has NO shader lowering, yet passes the (shape-only) gate — so the
+    // synchronous emit throws the loud no-lowering error. The engine's safeEmit must catch it into a local
+    // MLGPU-EMIT diagnostic (non-core-like: non-pending + an error) rather than letting the throw escape the
+    // reader's derive and collapse the whole component tree. This is the defense-in-depth for a gate↔emitter
+    // drift: a wrong-but-quiet 0 (the old silent placeholder) is upgraded to a caught, visible error.
+    const host = new RuntimeReactiveHost();
+    const kernel = kernelOf('component k(i) { return (perspective(1, 1, 1, 2) * vec4(1, 0, 0, 0)).x } k', host);
+    const engine = new GpuEngine(host, cpuOnlyDeps);
+    let r!: ReturnType<GpuEngine['gpu']>;
+    // gpu() must NOT throw (would escape into the reader's derive); it returns a settled-with-error resource.
+    expect(() => { change(() => { r = engine.gpu(kernel, { output: [4], backend: 'cpu' }); }); }).not.toThrow();
+    expect(r.pending).toBe(false);
+    expect(r.error?.code).toBe('MLGPU-EMIT');
     engine[Symbol.dispose]();
   });
 });

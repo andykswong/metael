@@ -5,9 +5,20 @@
 import type { Diagnostic } from '@metael/lang';
 import { makeDiagnostic } from '@metael/lang';
 
+/** The device-independent ceiling (512 MiB) on a dispatch's TOTAL allocation (Σ input + output bytes). A
+ *  dispatch exceeding it is rejected with an `MLGPU-ALLOC` diagnostic before any device is touched. */
 export const MAX_GPU_ALLOC = 512 * 1024 * 1024;   // 512 MiB total-allocation ceiling (independent of device)
 
-export interface DeviceLimits { readonly maxStorageBufferBindingSize: number; readonly maxComputeWorkgroupsPerDimension: number }
+/** The per-device limits the cost gate needs: the largest single storage buffer and the maximum dispatch
+ *  grid extent per dimension. A real backend reports its adapter's values; {@link CPU_LIMITS} is the fallback. */
+export interface DeviceLimits {
+  /** The largest a single storage buffer (e.g. the output) may be, in bytes. */
+  readonly maxStorageBufferBindingSize: number;
+  /** The maximum number of workgroups dispatchable along one grid dimension. */
+  readonly maxComputeWorkgroupsPerDimension: number;
+}
+/** The limits assumed for the CPU backend (and used as the pre-acquisition hint): storage capped at
+ *  {@link MAX_GPU_ALLOC}, and the standard 65535 workgroups-per-dimension the WebGPU spec floor guarantees. */
 export const CPU_LIMITS: DeviceLimits = { maxStorageBufferBindingSize: MAX_GPU_ALLOC, maxComputeWorkgroupsPerDimension: 65535 };
 
 /** Bound the allocation for a dispatch. Returns null if within limits, else an MLGPU-ALLOC diagnostic.

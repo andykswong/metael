@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
+import { STD_BUILTINS } from '@metael/std';
 import { exampleById } from './examples.ts';
 
 let container: HTMLElement;
@@ -11,7 +13,7 @@ const footerBtn = (t: string) => Array.from(container.querySelectorAll('.footer 
 
 describe('flagship TodoMVC example — interactive', () => {
   it('mounts clean with two rows and a live count', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     expect(h.diagnostics).toEqual([]);
     expect(rows().length).toBe(2);
     expect(container.querySelector('.footer .count')!.textContent).toBe('2 left');
@@ -19,7 +21,7 @@ describe('flagship TodoMVC example — interactive', () => {
   });
 
   it('ADD via Enter appends a row', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     const input = container.querySelector('input.new') as HTMLInputElement;
     input.value = 'third'; input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -29,7 +31,7 @@ describe('flagship TodoMVC example — interactive', () => {
   });
 
   it('TOGGLE marks done + updates the count + the row class', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     (rows()[0]!.querySelector('button.toggle') as HTMLButtonElement).click();
     expect(container.querySelector('.footer .count')!.textContent).toBe('1 left');
     expect(rows()[0]!.className).toBe('done');
@@ -37,14 +39,14 @@ describe('flagship TodoMVC example — interactive', () => {
   });
 
   it('DELETE removes a row', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     (rows()[1]!.querySelector('button.del') as HTMLButtonElement).click();
     expect(rows().length).toBe(1);
     h.unmount();
   });
 
   it('FILTER tabs narrow the visible list', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     (rows()[0]!.querySelector('button.toggle') as HTMLButtonElement).click();
     footerBtn('done').click();
     expect(rows().length).toBe(1);
@@ -58,7 +60,7 @@ describe('flagship TodoMVC example — interactive', () => {
   });
 
   it('EDIT-IN-PLACE: click label → input → Enter renames', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     (rows()[0]!.querySelector('span.label') as HTMLElement).click();
     const input = rows()[0]!.querySelector('input.edit') as HTMLInputElement;
     expect(input).not.toBeNull();
@@ -69,7 +71,7 @@ describe('flagship TodoMVC example — interactive', () => {
   });
 
   it('CLEAR DONE removes completed rows', () => {
-    const h = mount(TODO, container, {});
+    const h = renderSource(TODO, container, { builtins: [MATH_BUILTINS, STD_BUILTINS] });
     (rows()[0]!.querySelector('button.toggle') as HTMLButtonElement).click();
     footerBtn('clear done').click();
     expect(rows().length).toBe(1);

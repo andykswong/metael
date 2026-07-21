@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { exampleById } from './examples.ts';
 
 describe('the interactive buffer example is reactive in the browser', () => {
   it('clicking +1 mutates cell 0 in place; both the cells and the whole-buffer display update', () => {
     const ex = exampleById('buffer')!;
     const c = document.createElement('div'); document.body.appendChild(c);
-    const h = mount(ex.source, c, {});
+    const h = renderSource(ex.source, c, { builtins: [MATH_BUILTINS] });
     const cell0 = () => c.querySelectorAll('.cell')[0]?.textContent;
     const disp = () => c.querySelector('.disp')?.textContent;
     const beforeCell = cell0();

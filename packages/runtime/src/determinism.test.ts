@@ -1,15 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { derive } from './derive.ts';
 import { RecordingHostEnv, PathKeyMinter } from '@metael/lang';
+import { STD_BUILTINS } from '@metael/std';
 
 // Determinism conformance: the AST + injected (data, seed) + settled state fully determine the
 // host-value trace. Same source → same trace, INCLUDING seeded rand(). Exercised under the test
-// doubles (no domain present).
+// doubles (no domain present). `rand` is a standard-library builtin (dispatched via STD_BUILTINS);
+// the seed is still owned + threaded by the language kernel, so determinism is unchanged.
 
 describe('determinism conformance', () => {
   const run = (source: string, seed: number, data?: unknown) => {
     const env = new RecordingHostEnv();
-    derive(source, { env, minter: new PathKeyMinter(), seed, ...(data !== undefined ? { data } : {}) });
+    derive(source, { env, minter: new PathKeyMinter(), seed, builtins: [STD_BUILTINS], ...(data !== undefined ? { data } : {}) });
     // The host-value trace = the ordered (head, key, resolved-arg-values) the host observed.
     return env.calls.map((c) => ({ head: c.head, key: c.key, args: c.args.map((a) => a.value) }));
   };

@@ -15,6 +15,7 @@
 // exact for integer sums. The canonical examples (sum, product, min, max) are all associative AND commutative.
 import type { UserFn, Diagnostic, ReactiveHost, HostEnvironment, Expr, Stmt } from '@metael/lang';
 import { makeDiagnostic, makeCallable } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { gateKernel, type GateVerdict } from './gate.ts';
 
 /** Gate a REDUCER for lowerability. A reducer is DISTINCT from a map kernel: exactly 2 scalar params
@@ -125,7 +126,7 @@ export function cpuReduce(reducer: UserFn, inputValues: readonly number[], ident
   const declineEnv: HostEnvironment = { resolveCall: () => ({ handled: false }) };
   let acc = identity;
   for (const x of inputValues) {
-    const call = makeCallable(reducer, { host, env: declineEnv });   // fresh budget per fold step
+    const call = makeCallable(reducer, { host, env: declineEnv, builtins: [MATH_BUILTINS] });   // fresh budget per fold step
     acc = Number(call(acc, x));
   }
   return acc;

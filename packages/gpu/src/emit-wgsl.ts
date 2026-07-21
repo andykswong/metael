@@ -7,7 +7,7 @@
 // computed straight from gid, never from an f32 coord copy) and a BUFFER INDEX (cast u32(round(<f32>)) at
 // the access site — f32-exact for an in-bounds index since MAX_BUFFER_LENGTH = 2^24 ≤ f32's exact range).
 import type { UserFn, Expr, Stmt } from '@metael/lang';
-import { BUILTINS } from '@metael/lang';
+import { BUILTINS } from '@metael/math/lang';
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
 import { REDUCE_TILE } from './emit-glsl.ts';
@@ -25,9 +25,12 @@ type Shape = { kind: 'scalar' } | { kind: 'vec'; n: number } | { kind: 'mat'; ro
 function shapeOf(e: Expr, bindings: BindingTable, localShapes: LocalShapes): Shape {
   const ls = shapeOfExpr(e, localShapes);
   // cols===1 is a vec of width rows; a defensive rows===1 (never emitted — min vec is 2) reads as scalar.
+  // `shapeOfExpr` resolves a mat COLUMN read `m[i]` (→ a column vec), a mat/vec ctor, and a local — so the
+  // divide-guard/mat-negate see the right shape for a column read. The `returnVecWidth` fallback also gets
+  // `localShapes` so a nested `m[i]` inside an expr shapeOfExpr can't resolve still reads as its column vec.
   if (ls) return ls.cols === 1 ? (ls.rows >= 2 ? { kind: 'vec', n: ls.rows } : { kind: 'scalar' }) : { kind: 'mat', rows: ls.rows, cols: ls.cols };
   const m = matShapeOf(e); if (m) return { kind: 'mat', rows: m.rows, cols: m.cols };
-  const w = returnVecWidth(e, bindings, new Map());
+  const w = returnVecWidth(e, bindings, new Map(), localShapes);
   return w >= 2 ? { kind: 'vec', n: w } : { kind: 'scalar' };
 }
 
@@ -226,6 +229,11 @@ function isBoolExpr(e: Expr): boolean {
   return false;
 }
 
+/** Emit the WGSL `@compute` shader for a map kernel: storage bindings (one per buffer input), the `_out`
+ *  buffer, the `_Params` uniform, and the workgroup/bounds prologue are all derived from `bindings`. The body
+ *  is emitted in the scalar type set by `precision` (f32, or f16 on a shader-f16 device); `comps` sets the
+ *  per-cell output width (1 = scalar, 2/3/4 = a vecN). Throws (a loud gate↔emitter drift) if a gate-accepted
+ *  construct has no WGSL lowering. */
 export function emitWgsl(kernel: UserFn, bindings: BindingTable, precision: 'f16' | 'f32', comps = 1): string {
   const S = wgslScalar(precision);
   const params = kernel.params.map((p) => (p.kind === 'name' ? p.name : ''));
@@ -406,6 +414,23 @@ function emitExpr(e: Expr, S: string, bindings: BindingTable, locals: LocalShape
       if (name === 'asin' || name === 'acos') return `select(${name}(${args}), ${S}(0), abs(${args}) > ${S}(1))`;
       // atan2(y, x) has a per-target native name (no registry lowerName): WGSL spells it atan2.
       if (name === 'atan2') return `atan2(${args})`;
+      // mod(x, y) is FLOORED modulo (sign follows the divisor). WGSL `%` is a TRUNCATED remainder (sign of the
+      // dividend) — wrong for negatives — so emit the floored form `x - y*floor(x/y)` explicitly. This is
+      // componentwise for a vec x (WGSL `floor`/`*`/`-` are all componentwise), matching the interpreter's
+      // GLSL-style vec promotion. The args are emitted ONCE each (kernels are pure → re-referencing is safe).
+      if (name === 'mod') { const x = emitExpr(e.args[0]!, S, bindings, locals); const y = emitExpr(e.args[1]!, S, bindings, locals); return `((${x}) - (${y}) * floor((${x}) / (${y})))`; }
+      // The 32-bit bit ops: WGSL has NATIVE countOneBits/reverseBits, but they operate on u32 (not f32). The
+      // scalar body is f32, so reinterpret x as a 32-bit unsigned integer via `bitcast<u32>(i32(x))` — TRUNCATE
+      // toward zero (matching the interpreter's ToUint32 / `x >>> 0` coercion), NOT round. `i32(f)` truncates
+      // toward zero (defined for the f32-exact-integer range), and `bitcast<u32>` reinterprets the two's-complement
+      // bits — so this reproduces `>>>0` for BOTH positive and negative inputs (e.g. bitcast<u32>(i32(-1.0)) =
+      // 0xFFFFFFFF, matching `-1 >>> 0`). A direct `u32(negativeFloat)` is out-of-range/implementation-defined and
+      // would NOT wrap like `>>>0`, hence the i32 + bitcast round-trip. Then cast the u32 result back to f32. A
+      // popcount is 0..32 → always f32-exact; a reversed value is f32-exact too (reversal preserves the ≤24-bit
+      // significant span of any f32-exact integer input). The gate rejects a VEC arg (this scalar form can't express
+      // a vec cast).
+      if (name === 'countOneBits') return `f32(countOneBits(bitcast<u32>(i32(${args}))))`;
+      if (name === 'reverseBits') return `f32(reverseBits(bitcast<u32>(i32(${args}))))`;
       // faceforward has a per-target native name (no registry lowerName): WGSL spells it faceForward.
       if (name === 'faceforward') return `faceForward(${args})`;
       // ─── quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w; hand-emitted — WGSL has no quat type) ───
@@ -443,8 +468,11 @@ function emitExpr(e: Expr, S: string, bindings: BindingTable, locals: LocalShape
       if (name === 'inverseSqrt') return `select(inverseSqrt(${args}), ${S}(0), (${args}) <= ${S}(0))`;
       if (spec?.lowerName) return `${spec.lowerName}(${args})`;
       if (WGSL_CORE_FN[name]) return `${WGSL_CORE_FN[name]}(${args})`;   // core-exact builtins (abs/clamp/round/…)
-      // Unreachable for a gate-accepted kernel (every emittable head is handled above); a defensive placeholder.
-      return `/* unsupported call ${name} */ ${S}(0)`;
+      // Unreachable for a gate-accepted kernel (the gate rejects every head with no shader lowering, so gate ↔
+      // emitter stay in lockstep). Fail LOUD if one ever reaches here anyway (a future gate↔emitter drift) —
+      // a thrown error the engine catches into a local diagnostic — rather than the old silent `${S}(0)`
+      // placeholder, which compiled to a wrong-but-quiet 0 that diverged from the interpreter oracle unnoticed.
+      throw new Error(`metael-gpu: no WGSL lowering for builtin '${name}' — the gate should have rejected this kernel`);
     }
     default: return `${S}(0)`;
   }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { STD_BUILTINS } from '@metael/std';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import { makeCallable, readClosureValue, isUserFn, evaluateProgram } from './evaluate.ts';
 import type { UserFn } from './evaluate.ts';
@@ -22,7 +23,7 @@ describe('makeCallable — invoke a UserFn from the host with a fresh Runner', (
     // A `let` inside a plain `function` would trip ML-LANG-LET-SCOPE (a function body runs pure,
     // insideComponent=false), so the large computation is expressed with reduce over range instead.
     const fn = getUserFn('function sum(n) { reduce(range(n), (a, i) => a + i, 0) }', 'sum');
-    const call = makeCallable(fn, { host, env: new RecordingHostEnv(), maxSteps: 1_000_000 });
+    const call = makeCallable(fn, { host, env: new RecordingHostEnv(), maxSteps: 1_000_000, builtins: [STD_BUILTINS] });
     expect(call(1000)).toBe(499500);
   });
 });

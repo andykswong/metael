@@ -1,13 +1,14 @@
 // packages/gpu/src/zero-copy-input.test.ts
 import { describe, it, expect } from 'vitest';
 import { RuntimeReactiveHost, change } from '@metael/runtime';
-import { evaluateProgram, isUserFn, RecordingHostEnv, makeTypedArray } from '@metael/lang';
+import { evaluateProgram, isUserFn, RecordingHostEnv } from '@metael/lang';
+import { makeTypedArray, MATH_BUILTINS } from '@metael/math/lang';
 import type { UserFn, HostEnvironment, Arg, HostValue, SourceSpan } from '@metael/lang';
 import { GpuEngine } from './resource.ts';
 import type { Backend, DispatchInput } from './device/index.ts';
 
 function kernelOf(src: string, host: RuntimeReactiveHost): UserFn {
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('kernel'); return res.value;
 }
 

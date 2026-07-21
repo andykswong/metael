@@ -3,13 +3,36 @@
 // proof — a sampled differential check (systematic emitter bugs caught with high probability).
 import type { UserFn, ReactiveHost, HostEnvironment } from '@metael/lang';
 import { makeCallable, descriptorOf, NOT_HANDLED, DEFAULT_MAX_STEPS, MAX_RANGE } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import type { BindingTable } from './binding.ts';
 
-export interface MatchVerdict { readonly ok: boolean; readonly kind: 'exact' | 'ulp'; readonly maxUlp: number }
+/** The result of tolerance-checking a GPU output against the interpreter oracle. */
+export interface MatchVerdict {
+  /** `true` iff every sampled cell matched within the precision's ulp tolerance. */
+  readonly ok: boolean;
+  /** `'exact'` when every sampled cell was bit-identical to the oracle; `'ulp'` when they matched only
+   *  within tolerance. */
+  readonly kind: 'exact' | 'ulp';
+  /** The largest ulp distance observed across the sampled cells (0 for an exact match). */
+  readonly maxUlp: number;
+}
+/** The inputs to {@link checkMatch}: the kernel + host to re-run on the CPU, its resolved bindings, the GPU
+ *  output to check, the dispatch shape, the precision (sets the ulp tolerance), and how many cells to sample. */
 export interface OracleInput {
-  readonly fn: UserFn; readonly host: ReactiveHost; readonly bindings: BindingTable;
-  readonly output: ArrayLike<number>; readonly dims: readonly number[];
-  readonly precision: 'f16' | 'f32'; readonly sampleCount: number;
+  /** The kernel to re-run on the interpreter as the reference. */
+  readonly fn: UserFn;
+  /** The reactive host the kernel's closure lives on (for reading closed-over inputs). */
+  readonly host: ReactiveHost;
+  /** The kernel's resolved bindings (the SAME table the emitters used). */
+  readonly bindings: BindingTable;
+  /** The GPU-produced output to check, in the flat-interleaved layout (`output[flat * comps + k]`). */
+  readonly output: ArrayLike<number>;
+  /** The dispatch's output dimensions — used to reconstruct each sampled cell's coordinates. */
+  readonly dims: readonly number[];
+  /** The precision the dispatch ran at; sets the ulp tolerance (tighter for `f32`, looser for `f16`). */
+  readonly precision: 'f16' | 'f32';
+  /** How many cells to sample across the output grid (a differential check, not an exhaustive proof). */
+  readonly sampleCount: number;
   /** The output element's component width (default 1). For a vecN output the interpreter returns a vec
    *  value per cell; each of its `comps` components is compared to output[flat*comps + k]. */
   readonly comps?: number;
@@ -49,6 +72,10 @@ export function checkReduceMatch(gpu: number, oracle: number): MatchVerdict {
   return { ok, kind: ulp === 0 ? 'exact' : 'ulp', maxUlp: Number.isFinite(ulp) ? ulp : Number.MAX_SAFE_INTEGER };
 }
 
+/** Re-run a SAMPLE of `sampleCount` output cells through the shipped interpreter and tolerance-check the GPU
+ *  {@link OracleInput.output} against that reference, returning a {@link MatchVerdict}. A sampled differential
+ *  check (not a proof): it catches a systematic emitter bug with high probability. A dispatch that sampled
+ *  zero cells (a degenerate/empty output) fails the verdict loud rather than rubber-stamping `ok`. */
 export function checkMatch(input: OracleInput): MatchVerdict {
   const { fn, host, dims, output, precision, sampleCount } = input;
   const comps = input.comps ?? 1;
@@ -74,7 +101,7 @@ export function checkMatch(input: OracleInput): MatchVerdict {
   let exact = true; let maxUlp = 0; let sampled = 0;
   const step = Math.max(1, Math.floor(total / Math.max(1, sampleCount)));
   for (let flat = 0; flat < total; flat += step) {
-    const call = makeCallable(fn, { host, env: declineEnv, maxSteps: perCellSteps });   // fresh budget per cell
+    const call = makeCallable(fn, { host, env: declineEnv, maxSteps: perCellSteps, builtins: [MATH_BUILTINS] });   // fresh budget per cell
     const refComps = extractComps(call(...coordsOf(flat)), comps);   // the interpreter's cell (scalar or vecN)
     for (let k = 0; k < comps; k++) {
       const ref = refComps[k]!;

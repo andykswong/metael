@@ -203,14 +203,15 @@ sort([2, "a", null, true, 1])       // → [null, true, 1, 2, "a"]
 keys({ a: 1, b: 2 })                // → ["a", "b"]
 values({ a: 1, b: 2 })              // → [1, 2]
 entries({ a: 1, b: 2 })             // → [["a", 1], ["b", 2]]
-fromEntries([["a", 1], ["b", 2]])   // → { a: 1, b: 2 }
+object([["a", 1], ["b", 2]])        // → { a: 1, b: 2 }
+has({ a: 1 }, "a")                  // → true    (own-property presence)
 ```
 
 A common idiom — transform a lookup table immutably:
 
 ```js
-// Double every price. entries → map → fromEntries.
-fromEntries(map(entries({ apple: 3, pear: 5 }), (kv) => [kv[0], kv[1] * 2]))
+// Double every price. entries → map → object.
+object(map(entries({ apple: 3, pear: 5 }), (kv) => [kv[0], kv[1] * 2]))
 // → { apple: 6, pear: 10 }
 ```
 
@@ -222,6 +223,8 @@ Strings are indexable (`s[0]`), have `.length`, and are `for-of`-iterable. The c
 split("a,b,c", ",")                 // → ["a", "b", "c"]   (split("abc", "") → per character)
 join(["a", "b", "c"], "-")          // → "a-b-c"
 chars("hi")                         // → ["h", "i"]
+slice("hello", 1, 3)                // → "el"    (substring; negatives count from the end)
+codePointAt("ABC", 0)               // → 65      (Unicode code point at an index)
 toUpperCase("hi")                   // → "HI"    (locale-independent)
 toLowerCase("HI")                   // → "hi"
 trim("  x  ")                       // → "x"

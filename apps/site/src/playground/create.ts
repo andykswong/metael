@@ -3,7 +3,7 @@
 // UI-target PREVIEW is a real @metael/vdom mount (the dogfood). Policy pinned by the design: keep the
 // last-good preview on any diagnostic (never blank mid-keystroke) — only swap the preview when a run is
 // diagnostic-free.
-import type { VDomHandle } from '@metael/vdom';
+import type { VDomHandle } from '@metael/vdom/lang';
 import type { Diagnostic } from '@metael/lang';
 import { el, clear } from '../ui.ts';
 import { createEditor } from './editor.ts';

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
 import { LANDING_SOURCE, HEADER_SOURCE } from './landing-source.ts';
 
 let container: HTMLElement;
@@ -7,7 +7,7 @@ beforeEach(() => { container = document.createElement('div'); document.body.appe
 
 describe('landing metael sources render cleanly', () => {
   it('LANDING_SOURCE derives with zero diagnostics and exposes a fillable #hero-slot', () => {
-    const h = mount(LANDING_SOURCE, container, {});
+    const h = renderSource(LANDING_SOURCE, container, {});
     expect(h.diagnostics).toEqual([]);
     expect(container.querySelector('header.ln-header')).not.toBeNull();
     expect(container.querySelector('main.ln-root')).not.toBeNull();
@@ -21,7 +21,7 @@ describe('landing metael sources render cleanly', () => {
   });
 
   it('HEADER_SOURCE (used on the playground page) renders the shared nav', () => {
-    const h = mount(HEADER_SOURCE, container, {});
+    const h = renderSource(HEADER_SOURCE, container, {});
     expect(h.diagnostics).toEqual([]);
     const links = Array.from(container.querySelectorAll('.ln-nav-link')).map((a) => a.textContent);
     expect(links).toEqual(['Playground', 'GitHub ↗', 'API docs ↗']);

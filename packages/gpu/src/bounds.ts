@@ -13,7 +13,12 @@ import { descriptorOf, makeDiagnostic } from '@metael/lang';
 import type { BindingTable } from './binding.ts';
 
 /** A proven range for an integer/real quantity, or `null` = ⊤ (unprovable / data-dependent — pass). */
-export interface Interval { readonly lo: number; readonly hi: number }
+export interface Interval {
+  /** The inclusive lower bound of the quantity's proven range. */
+  readonly lo: number;
+  /** The inclusive upper bound of the quantity's proven range. */
+  readonly hi: number;
+}
 type Iv = Interval | null;
 
 // Interval arithmetic. `+`/`-` are the obvious bounds; `*` is the min/max of the four corner products
@@ -107,6 +112,10 @@ export function checkStaticBounds(kernel: UserFn, bindings: BindingTable, dims: 
   const bufLen = (name: string): number | null => {
     const b = bindings.byName.get(name);
     if (!b || b.role !== 'buffer') return null;
+    // A PLAIN metael array buffer input (no descriptor) exposes its element count directly — so a provable
+    // OOB on a plain array is caught statically exactly like a typed-array buffer (a missing plain-array
+    // length would leave it unprovable → an OOB slips to the oracle; equal treatment is the consistent call).
+    if (Array.isArray(b.value)) return b.value.length > 0 ? b.value.length : null;
     const len = Number(descriptorOf(b.value)?.getMember?.(b.value, 'length'));
     return Number.isFinite(len) && len > 0 ? len : null;
   };

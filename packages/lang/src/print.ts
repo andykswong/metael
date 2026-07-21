@@ -7,19 +7,26 @@ import type { Expr, Stmt, Program, Pattern, ArrayElement, ObjectEntry } from './
 
 const INDENT = '  ';
 
-// The printer recurses structurally over the AST. The parser accepts UNBOUNDED left-spine chains
-// (member/index/call/binary) because its depth guard counts only nested-expression recursion, not its
-// iterative postfix/binary loops — so a valid parser AST can be arbitrarily deep. Bound the printer's
-// own recursion and fail CLOSED with a typed, catchable error rather than letting a raw RangeError
-// (stack overflow) escape into the host — mirroring the parser's fail-closed depth guard. The cap is
-// far above any realistic nesting (the parser bounds nested expressions at 512; only degenerate chains
-// exceed it) and comfortably below the native stack limit, so a pathological AST fails loud, not ugly.
+/**
+ * The upper bound on the printer's own recursion depth. The printer recurses structurally over the AST,
+ * but the parser accepts UNBOUNDED left-spine chains (member/index/call/binary) because its depth guard
+ * counts only nested-expression recursion, not its iterative postfix/binary loops — so a valid parser AST
+ * can be arbitrarily deep. {@link printExpr} and {@link stripSpans} bound their recursion at this cap and
+ * fail CLOSED with a typed, catchable {@link PrintDepthError} rather than letting a raw `RangeError` (stack
+ * overflow) escape into the host, mirroring the parser's own fail-closed depth guard.
+ *
+ * @remarks The cap sits far above any realistic nesting (the parser bounds nested expressions at 512; only
+ *          degenerate chains exceed it) and comfortably below the native stack limit, so a pathological AST
+ *          fails loud, not ugly.
+ */
 export const MAX_PRINT_DEPTH = 1500;
 let printDepth = 0;
 
 /** Thrown (and catchable) when an AST nests past {@link MAX_PRINT_DEPTH} — a controlled, documented
- *  failure in place of an uncontrolled stack-overflow RangeError, so the printer stays a total function. */
+ *  failure in place of an uncontrolled stack-overflow `RangeError`, so the printer stays a total function. */
 export class PrintDepthError extends Error {
+  /** Construct the error with the fixed message `'AST too deeply nested to print'` and a `name` of
+   *  `'PrintDepthError'`, so a caller can distinguish it from a generic `Error` when catching. */
   constructor() { super('AST too deeply nested to print'); this.name = 'PrintDepthError'; }
 }
 
@@ -90,6 +97,17 @@ function printKey(key: string): string {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : printString(key);
 }
 
+/**
+ * Print a single expression node to its canonical DSL surface syntax.
+ *
+ * @param expr - the expression AST node to render.
+ * @param depth - the current indentation depth, applied when the expression contains a `{ … }` block (an
+ *                arrow/function body or a call's trailing block). Defaults to `0` (top level).
+ * @returns the source text for `expr`. Defensive parentheses may be added around operator/ternary
+ *          children; they reparse away, so the text still round-trips through the parser.
+ * @throws {@link PrintDepthError} when the expression nests past {@link MAX_PRINT_DEPTH}, so a degenerate
+ *         chain fails closed with a catchable error instead of overflowing the native stack.
+ */
 export function printExpr(expr: Expr, depth = 0): string {
   if (++printDepth > MAX_PRINT_DEPTH) { printDepth--; throw new PrintDepthError(); }
   try {
@@ -197,6 +215,15 @@ export function printBlock(body: readonly Stmt[], depth: number): string {
   return `{\n${inner}\n${INDENT.repeat(depth)}}`;
 }
 
+/**
+ * Print a single statement node to its canonical DSL surface syntax.
+ *
+ * @param stmt - the statement AST node to render (a declaration, assignment, control-flow form, or a
+ *               bare expression statement).
+ * @param depth - the current indentation depth; nested `{ … }` blocks (via {@link printBlock}) indent
+ *                one level deeper than this.
+ * @returns the source text for `stmt`, without a trailing newline.
+ */
 export function printStmt(stmt: Stmt, depth: number): string {
   switch (stmt.kind) {
     case 'const': return `const ${stmt.name} = ${printExpr(stmt.init, depth)}`;
@@ -215,6 +242,16 @@ export function printStmt(stmt: Stmt, depth: number): string {
   }
 }
 
+/**
+ * Print a whole program back to canonical DSL surface syntax — the inverse of parsing.
+ *
+ * @param program - the parsed program whose top-level statements are rendered.
+ * @returns the program source: each top-level statement printed at depth `0`, joined by newlines.
+ * @remarks Round-trips through the parser up to spans: `stripSpans(parseProgram(printProgram(ast)).program)`
+ *          deep-equals `stripSpans(ast)`. Reprinting shifts byte offsets, so the equivalence is checked
+ *          with {@link stripSpans}; defensive parentheses the printer adds reparse away.
+ * @throws {@link PrintDepthError} when the AST nests past {@link MAX_PRINT_DEPTH}.
+ */
 export function printProgram(program: Program): string {
   return program.stmts.map((st) => printStmt(st, 0)).join('\n');
 }

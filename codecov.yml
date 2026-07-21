@@ -7,6 +7,12 @@ component_management:
     - component_id: "@metael/lang"
       paths:
         - "packages/lang/src/**"
+    - component_id: "@metael/math"
+      paths:
+        - "packages/math/src/**"
+    - component_id: "@metael/std"
+      paths:
+        - "packages/std/src/**"
     - component_id: "@metael/runtime"
       paths:
         - "packages/runtime/src/**"

@@ -12,8 +12,9 @@ There are **two front doors** onto the same rendering machinery — pick whichev
 
 - **Host API** — build the tree in TypeScript with the `h()` hyperscript builder and mount it with
   `render()`. No language, no compiler; just functions and signals.
-- **metael DSL** — write a `component` in metael source and mount it with `mount()`. The eval-free
-  interpreter builds the same tree, so untrusted source is *data*, never executed as host code.
+- **metael DSL** — write a `component` in metael source and render it with `renderSource()` (from
+  `@metael/vdom/lang`). The eval-free interpreter builds the same tree, so untrusted source is *data*,
+  never executed as host code.
 
 Both produce the identical vnode tree and share one build/reconcile/delegation path, so their runtime
 behaviour is the same.
@@ -106,14 +107,14 @@ const handle = render(
 > **Tree depth is host-bounded.** The tree walks recurse per level with no depth cap — a host mapping
 > *untrusted* deeply-nested data to nested `h()` calls must cap the nesting itself.
 
-## metael DSL — `mount()`
+## metael DSL — `renderSource()`
 
-Write a `component` in metael source and mount it. The interpreter builds the same vnode tree; a reactive
+Write a `component` in metael source and render it. The interpreter builds the same vnode tree; a reactive
 `let` read by one position takes the fine-grained leaf path, and a `let` whose identity is reassigned (a
 list rebuilt via spread/`filter`) takes the structural keyed path.
 
 ```ts
-import { mount } from '@metael/vdom';
+import { renderSource } from '@metael/vdom/lang';
 
 const source = `
 component Story() {
@@ -124,7 +125,7 @@ component Story() {
   }
 }`;
 
-const handle = mount(source, document.getElementById('app')!, {});
+const handle = renderSource(source, document.getElementById('app')!, {});
 // handle: tree() / invokeHandler() / updateData() / unmount() (see VDomHandle)
 ```
 
@@ -149,10 +150,10 @@ component Story() {
   }
 }`;
 
-mount(source, document.getElementById('app')!, {});
+renderSource(source, document.getElementById('app')!, {});
 ```
 
-`mount(source, container, opts)` takes `MountOptions` (`data`, `seed`, `entry`, `reactiveData`, and the
+`renderSource(source, container, opts)` takes `RenderSourceOptions` (`data`, `seed`, `entry`, `reactiveData`, and the
 interpreter budgets `maxSteps` / `maxTimeMs` / `maxDepth` / `maxStringLength`) and returns a `VDomHandle`
 (`tree()` / `invokeHandler()` / `updateData()` / `unmount()` / `passCount()`).
 
@@ -160,7 +161,7 @@ interpreter budgets `maxSteps` / `maxTimeMs` / `maxDepth` / `maxStringLength`) a
 
 - **Host API (`h`/`render`)** — you are writing TypeScript, want type-checked construction, and control the
   source yourself. No compiler on the path.
-- **DSL (`mount`)** — you want to render source authored elsewhere (a playground, a saved document,
+- **DSL (`renderSource`)** — you want to render source authored elsewhere (a playground, a saved document,
   user/LLM-provided content). Because the language is eval-free, running arbitrary source inline is safe:
   it is parsed and interpreted, never executed as host code, and is budgeted (fuel/deadline/recursion).
 

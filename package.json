@@ -4,7 +4,9 @@
   "private": true,
   "description": "A generic, eval-free, reactive scripting-language kernel — the monorepo for @metael/{lang,runtime,vdom}.",
   "type": "module",
-  "engines": { "node": ">=24.0" },
+  "engines": {
+    "node": ">=24.0"
+  },
   "scripts": {
     "prepublishOnly": "npm run clean && npm run build:packages && npm test && npm run docs:api",
     "build:packages": "npm run build --ws --if-present",
@@ -18,7 +20,8 @@
     "test:coverage": "vitest run --coverage",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "npm run build:packages && changeset publish"
+    "release": "npm run build:packages && changeset publish",
+    "docs:api:check": "bash scripts/typedoc-check.sh"
   },
   "repository": {
     "type": "git",
@@ -37,7 +40,9 @@
   ],
   "author": "Andy K.S. Wong <andykswong@outlook.com>",
   "license": "MIT",
-  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "bugs": {
+    "url": "https://github.com/andykswong/metael/issues"
+  },
   "homepage": "https://github.com/andykswong/metael#readme",
   "devDependencies": {
     "@changesets/cli": "^2.27",
@@ -61,6 +66,8 @@
     "./packages/runtime",
     "./packages/vdom",
     "./packages/gpu",
+    "./packages/math",
+    "./packages/std",
     "./apps/site"
   ]
 }

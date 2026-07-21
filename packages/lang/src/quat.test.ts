@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram, RecordingHostEnv, PlainStorageHost } from '@metael/lang';
-import { vecStoreOf } from './custom-types.ts';
+import { vecStoreOf, MATH_BUILTINS } from '@metael/math/lang';
 
 // Quaternions carry a vec4 layout `(x, y, z, w)` = imaginary xyz + real w. There is no distinct quat value
 // type: every q* builtin consumes and produces a plain vecN (a vec4, or a vec3 for the rotated vector).
 describe('quaternions (vec4 convention)', () => {
-  const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
+  const h = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
 
   it('qmul identity: q * (0,0,0,1) === q', () => {
     const s = vecStoreOf(evaluateProgram('qmul(vec4(1,2,3,4), vec4(0,0,0,1))', h()).value);

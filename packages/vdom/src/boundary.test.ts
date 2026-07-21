@@ -2,30 +2,46 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import * as vdom from './index.ts';
 
-describe('@metael/vdom public surface', () => {
-  it('exports mount + the vnode helpers + the sanitizer', () => {
-    for (const name of ['mount', 'isVNode', 'textVNode', 'FRAGMENT', 'TEXT', 'escapeText', 'safeAttrName', 'safeAttrValue']) {
-      expect(vdom[name as keyof typeof vdom]).toBeDefined();
-    }
-  });
-  it('does NOT export the example fixtures (a library stays app-free)', () => {
-    expect((vdom as Record<string, unknown>).COUNTER).toBeUndefined();
-  });
-});
-
-describe('@metael/vdom import boundary (self-containment invariant)', () => {
-  it('non-test src imports only @metael/lang, @metael/runtime, and relative paths', () => {
-    const srcDir = dirname(fileURLToPath(import.meta.url));
-    const files = readdirSync(srcDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('.browser.test.ts'));
+describe('@metael/vdom core import boundary', () => {
+  it('src/*.ts (core, non-lang) never imports the lang/ subdir or evaluateProgram/derive', () => {
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const files = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.ts') && !e.name.endsWith('.test.ts') && !e.name.endsWith('.browser.test.ts'))
+      .map((e) => join(dir, e.name));
+    expect(files.length).toBeGreaterThan(0);
+    const langRe = /\bfrom\s+['"]\.\/lang\//;
+    const deriveRe = /\bfrom\s+['"]@metael\/runtime['"][^;]*\bderive\b/;                     // `... derive` after `from '@metael/runtime'`
+    const deriveImportRe = /\bimport\b[^;]*\bderive\b[^;]*\bfrom\s+['"]@metael\/runtime['"]/; // `import { derive } from '@metael/runtime'` (clause before from)
+    const evalRe = /\bevaluateProgram\b/;
     const offenders: string[] = [];
-    const importRe = /\bfrom\s+['"]([^'".][^'"]*)['"]/g;
     for (const f of files) {
-      const text = readFileSync(join(srcDir, f), 'utf8');
-      for (const m of text.matchAll(importRe)) {
+      const t = readFileSync(f, 'utf8');
+      if (langRe.test(t)) offenders.push(`${f}: imports ./lang/`);
+      if (deriveRe.test(t) || deriveImportRe.test(t) || evalRe.test(t)) offenders.push(`${f}: pulls the interpreter (derive/evaluateProgram)`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('src/*.ts (core, non-lang) imports only @metael/{lang,runtime} + relative paths', () => {
+    // The self-containment invariant: vdom core depends ONLY on the kernel (@metael/lang) and the reactive
+    // runtime (@metael/runtime) — NEVER @metael/gpu (nor @metael/math / @metael/std, which are dev-only
+    // test deps). This bare-import allowlist catches a future `import … from '@metael/gpu'` slipping into a
+    // core file. Relative imports (core/lang siblings) are skipped. Mirrors the gpu core boundary guard.
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const files = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.ts') && !e.name.endsWith('.test.ts') && !e.name.endsWith('.browser.test.ts'))
+      .map((e) => join(dir, e.name));
+    expect(files.length).toBeGreaterThan(0);
+    const allowed = new Set(['@metael/lang', '@metael/runtime']);
+    const importRe = /\bfrom\s+['"]([^'"]+)['"]/g;
+    const offenders: string[] = [];
+    for (const f of files) {
+      const t = readFileSync(f, 'utf8');
+      for (const m of t.matchAll(importRe)) {
         const spec = m[1]!;
-        if (spec === '@metael/lang' || spec === '@metael/runtime') continue;
+        if (spec.startsWith('.')) continue;   // relative core/lang sibling
+        if (allowed.has(spec)) continue;
         offenders.push(`${f}: ${spec}`);
       }
     }

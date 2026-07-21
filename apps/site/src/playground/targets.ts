@@ -3,12 +3,15 @@
 // its pretty-printed string. Both return the diagnostics they produced so the caller can drive the shared
 // diagnostics UI. The caller owns the "only swap the preview when diagnostics are empty" policy (see
 // create.ts); a run always reports what it found.
-import { mount, VDomHostEnv } from '@metael/vdom';
-import type { VDomHandle } from '@metael/vdom';
+import { renderSource, VDomHostEnv } from '@metael/vdom/lang';
+import type { VDomHandle } from '@metael/vdom/lang';
 import { evaluateProgram, PlainStorageHost, RecordingHostEnv } from '@metael/lang';
-import type { Diagnostic, HostEnvironment, ReactiveHost, Arg, HostValue, SourceSpan } from '@metael/lang';
-import { GpuHostEnv, tryWebGpuBackend, tryWebGl2Backend, CPU_LIMITS } from '@metael/gpu';
-import { RuntimeReactiveHost, change } from '@metael/runtime';
+import type { Diagnostic, BindableHostEnv, ReactiveHost, Arg, HostValue, SourceSpan } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';   // the numeric builtins the gallery examples use (vec/mat/f32/dot/…)
+import { STD_BUILTINS } from '@metael/std';   // the collection/string/structural builtins (map/filter/object/…)
+import { tryWebGpuBackend, tryWebGl2Backend, CPU_LIMITS } from '@metael/gpu';
+import { GpuHostEnv } from '@metael/gpu/lang';
+import { RuntimeReactiveHost, change, composeEnvs } from '@metael/runtime';
 import { prettyValue } from './compute-view.ts';
 import type { Target } from './examples.ts';
 
@@ -33,9 +36,13 @@ export interface RunOptions {
 // so it must persist across the mount's re-derive passes. The vdom env is re-bound each pass (its leaf
 // effects belong to that pass's fresh host). The backend ladder is the full WebGPU→WebGL2→CPU: a browser
 // without WebGPU still gets a real GPU dispatch via WebGL2 (compute-via-fragment), the CPU floor otherwise.
-export class GpuUiEnv implements HostEnvironment {
+export class GpuUiEnv implements BindableHostEnv, Disposable {
   private readonly gpu = new GpuHostEnv({ tryWebGpu: tryWebGpuBackend, tryWebGl2: tryWebGl2Backend, limitsHint: CPU_LIMITS });
   private readonly vdom = new VDomHostEnv();
+  // The composition seam: resolveCall tries gpu first, then vdom (array order = priority), and dispose fans
+  // out to the Disposable gpu child (vdom is not Disposable → skipped). bindHost does NOT route here — see
+  // below. Declared AFTER gpu/vdom so those fields initialize before the composite captures them.
+  private readonly composite = composeEnvs([this.gpu, this.vdom]);
   private gpuBound = false;
   // A gpu resource that fails the lowerability/cost gate (core===false) or carries a dispatch error reports
   // its reason ON THE RESOURCE (r.reasons / r.error), NOT in the walk's diagnostics — the resource is a pure
@@ -54,17 +61,21 @@ export class GpuUiEnv implements HostEnvironment {
     if (!this.gpuBound) { this.gpu.bindHost(host); this.gpuBound = true; }   // bind the engine ONCE (memo persists)
     this.vdom.bindHost(host);
   }
-  // Free the gpu engine (→ destroys any acquired WebGPU device) when the mount is torn down. mount()'s
+  // Free the gpu engine (→ destroys any acquired WebGPU device) when the mount is torn down. renderSource()'s
   // unmount() calls this via the env's optional dispose; without it a real adapter leaks a GPUDevice per
-  // re-mount (invisible on the CPU floor, where dispose is a no-op).
-  [Symbol.dispose](): void { this.gpu[Symbol.dispose](); }
+  // re-mount (invisible on the CPU floor, where dispose is a no-op). The composite fans dispose to the
+  // Disposable gpu child; VDomHostEnv is not Disposable, so it is skipped.
+  [Symbol.dispose](): void { this.composite[Symbol.dispose](); }
   /** The distinct gate/dispatch reasons of every non-lowerable or errored gpu resource seen so far. */
   gpuDiagnostics(): Diagnostic[] { return [...this.gpuIssues.values()]; }
   resolveCall(head: string, key: string, args: Arg[], children: HostValue[], span: SourceSpan):
     { handled: true; value: HostValue; kind?: 'value' } | { handled: false } {
-    const g = this.gpu.resolveCall(head, key, args, children, span);
-    if (g.handled) { this.recordGpuIssue(g.value); return g; }
-    return this.vdom.resolveCall(head, key, args, children, span);
+    // The composite tries gpu first, then vdom (array order). recordGpuIssue runs on any handled result;
+    // its `typeof r.core === 'boolean'` guard deterministically skips vdom VNodes (no `core` field), so
+    // recording on a vdom-handled result is a harmless no-op — only real GpuResources are recorded.
+    const r = this.composite.resolveCall(head, key, args, children, span);
+    if (r.handled) this.recordGpuIssue(r.value);
+    return r;
   }
   private recordGpuIssue(value: HostValue): void {
     const r = value as { core?: unknown; reasons?: Diagnostic[]; error?: Diagnostic | null } | null;
@@ -85,7 +96,7 @@ export type TargetRun = UiRun | ComputeRun;
 /** Run `source` against `target`. For 'ui', `container` receives the live mount; for 'compute' it is unused. */
 export function runTarget(target: Target, source: string, container: Element | undefined, opts: RunOptions): TargetRun {
   if (target === 'ui') {
-    const handle = mount(source, container, { data: opts.data, seed: opts.seed });
+    const handle = renderSource(source, container, { data: opts.data, seed: opts.seed, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     return { kind: 'ui', handle, diagnostics: handle.diagnostics };
   }
   if (target === 'gpu') {
@@ -97,7 +108,7 @@ export function runTarget(target: Target, source: string, container: Element | u
     // created only after an async-settled resource (`if (rA.value == null) … else gpu(b, …)`) is derived
     // once stage A settles, AFTER this function returns; a mount-time snapshot alone would miss it.
     const env = new GpuUiEnv(opts.onGpuIssues);
-    const handle = mount(source, container, { data: opts.data, seed: opts.seed, envFactory: () => env });
+    const handle = renderSource(source, container, { data: opts.data, seed: opts.seed, envFactory: () => env, builtins: [MATH_BUILTINS, STD_BUILTINS] });
     // Also fold the reasons seen during the SYNCHRONOUS derive into the returned diagnostics — a non-core
     // resource read on the first frame surfaces immediately (dedup: a reason already in the walk isn't
     // repeated). Late reasons arrive via onGpuIssues.
@@ -106,14 +117,14 @@ export function runTarget(target: Target, source: string, container: Element | u
     return { kind: 'ui', handle, diagnostics: [...handle.diagnostics, ...gpuDiags] };
   }
   const res = evaluateProgram(source, {
-    host: new PlainStorageHost(), env: new RecordingHostEnv(), data: opts.data, seed: opts.seed,
+    host: new PlainStorageHost(), env: new RecordingHostEnv(), data: opts.data, seed: opts.seed, builtins: [MATH_BUILTINS, STD_BUILTINS],
   });
   return { kind: 'compute', text: prettyValue(res.value), value: res.value, diagnostics: res.diagnostics };
 }
 
 // A DOM-FREE env for the compute path: the gpu/gpuReduce/gpuHistogram heads resolve to a GpuResource
 // value; every other head is declined (a pure compute program renders no display nodes). No vdom, no DOM.
-class GpuComputeEnv implements HostEnvironment, Disposable {
+class GpuComputeEnv implements BindableHostEnv, Disposable {
   private readonly gpu = new GpuHostEnv({ tryWebGpu: tryWebGpuBackend, tryWebGl2: tryWebGl2Backend, limitsHint: CPU_LIMITS });
   bindHost(host: ReactiveHost): void { this.gpu.bindHost(host); }
   /** True while any gpu resource declared in the program is still pending (see GpuHostEnv.anyPending). */
@@ -150,7 +161,7 @@ export async function runComputeSettled(source: string, opts: RunOptions): Promi
   try {
     for (;;) {
       let res!: { value: unknown; diagnostics: Diagnostic[] };
-      change(() => { res = evaluateProgram(source, { host, env, data: opts.data, seed: opts.seed }); });
+      change(() => { res = evaluateProgram(source, { host, env, data: opts.data, seed: opts.seed, builtins: [MATH_BUILTINS, STD_BUILTINS] }); });
       value = res.value; diagnostics = res.diagnostics;
       if ((!hasPendingResource(value) && !env.anyPending()) || ++iters > 1000) break;
       await new Promise<void>((r) => setTimeout(r, 0));

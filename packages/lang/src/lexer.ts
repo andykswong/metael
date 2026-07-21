@@ -1,6 +1,14 @@
 import type { Diagnostic, SourceSpan } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
 
+/**
+ * The discriminant tag of a {@link Token}: the closed set of lexical categories the lexer emits —
+ * the literal/word classes (`ident`/`number`/`string`), the reserved keywords, the
+ * bracket/punctuation delimiters, the operators, and the terminal `eof`.
+ *
+ * @remarks A keyword tag (`component`/`if`/`return`/…) is produced only when a word exactly matches a
+ * reserved word; every other identifier-shaped word lexes as `ident`.
+ */
 export type TokenType =
   | 'ident' | 'number' | 'string'
   | 'component' | 'function' | 'const' | 'let' | 'if' | 'else' | 'for' | 'of' | 'while' | 'return'
@@ -10,17 +18,52 @@ export type TokenType =
   | 'eq' | 'neq' | 'lt' | 'le' | 'gt' | 'ge' | 'plus' | 'minus' | 'star' | 'slash' | 'percent'
   | 'and' | 'or' | 'not' | 'eof';
 
-// `newlineBefore` = a newline occurred in the whitespace/comments preceding this token. The
-// parser uses it to make the brace-less single-trailing-statement wrap fire ONLY on the same
-// logical line (the sibling-vs-nest guard).
-export interface Token { readonly type: TokenType; readonly value: string; readonly span: SourceSpan; readonly newlineBefore: boolean }
-export interface LexResult { readonly tokens: Token[]; readonly diagnostics: Diagnostic[] }
+/** One lexical token: its category, its source text, its source span, and whether a line break
+ *  preceded it. */
+export interface Token {
+  /** The lexical category of the token — see {@link TokenType}. */
+  readonly type: TokenType;
+  /** The token's source text: the identifier/keyword word, the decoded string body (escape sequences
+   *  resolved), the raw digit run for a number, or the operator/delimiter characters. Empty for `eof`. */
+  readonly value: string;
+  /** The half-open `[start, end)` character-offset range of the token within the source, used to
+   *  anchor diagnostics. */
+  readonly span: SourceSpan;
+  /** Whether a newline occurred in the whitespace/comments immediately preceding this token. The
+   *  parser uses it to make the brace-less single-trailing-statement wrap fire ONLY on the same
+   *  logical line (the sibling-vs-nest guard). */
+  readonly newlineBefore: boolean;
+}
+/** The outcome of {@link lex}: the emitted token stream plus any diagnostics collected while scanning. */
+export interface LexResult {
+  /** The tokens in source order, always terminated by a single `eof` token. */
+  readonly tokens: Token[];
+  /** Every diagnostic collected while scanning — a malformed number, an unterminated string, or an
+   *  unexpected character, each an `ML-LANG-LEX`. Empty on a clean scan. */
+  readonly diagnostics: Diagnostic[];
+}
 
 const KEYWORDS: Record<string, TokenType> = {
   component: 'component', function: 'function', const: 'const', let: 'let', if: 'if', else: 'else',
   for: 'for', of: 'of', while: 'while', return: 'return', true: 'true', false: 'false', null: 'null',
 };
 
+/**
+ * Scan source text into a token stream for the parser.
+ *
+ * Total and non-throwing: a malformed number, an unterminated string, or an unexpected character each
+ * become an `ML-LANG-LEX` diagnostic and scanning recovers, so the returned {@link LexResult} always
+ * carries a complete token list (terminated by `eof`) alongside any diagnostics.
+ *
+ * @param src - the program source text.
+ * @returns the tokens plus the diagnostics collected during scanning ({@link LexResult}).
+ * @remarks Whitespace and `//` line comments are skipped but tracked: a skipped run containing a
+ *          newline sets {@link Token.newlineBefore} on the following token. Numbers are `[0-9][0-9.]*`
+ *          with at most one `.`; a second dot or an abutting identifier char makes the run a fail-loud
+ *          malformed number rather than silently producing `NaN` or an orphan identifier. A word is
+ *          classified as a keyword only on an exact reserved-word match (via an own-property lookup, so
+ *          inherited names like `toString` stay plain identifiers).
+ */
 export function lex(src: string): LexResult {
   const tokens: Token[] = [];
   const diagnostics: Diagnostic[] = [];

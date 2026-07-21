@@ -4,6 +4,9 @@ import type { UserFn } from '@metael/lang';
 import { stripSpans } from '@metael/lang';
 import type { BindingTable } from './binding.ts';
 
+/** A structural hash of a kernel for the dispatch memo key: its span-stripped params + body, combined with
+ *  the resolved values of its closed-over scalar constants (a uniform like `N` is baked into the compiled
+ *  shader, so it belongs in the key). Two kernels with the same shape + constants produce the same hash. */
 export function kernelHash(kernel: UserFn, bindings: BindingTable): string {
   const shape = JSON.stringify(stripSpans({ params: kernel.params, body: kernel.body }));
   const consts: Record<string, number> = {};

@@ -11,30 +11,75 @@ import { FORBIDDEN_KEYS } from './ast.ts';
 import { parseProgram } from './parser.ts';
 import { Environment } from './environment.ts';
 import { makeSeededRng, range as seededRange } from './determinism.ts';
-import { IMPLEMENTED_BUILTINS } from './builtins-registry.ts';
-import { defaultCompare, stableSort } from './sort.ts';
 import type { HostEnvironment, ReactiveHost, CellRef } from './ports.ts';
-import { descriptorOf, isCustomType, generationOf, isFrozenCustom, markFrozen, NOT_HANDLED, makeTypedArray, BUFFER_KINDS, BufferError, makeVec, makeMat, identityMat, vecStoreOf } from './custom-types.ts';
+import { descriptorOf, isCustomType, generationOf, isFrozenCustom, markFrozen, NOT_HANDLED, BufferError } from './custom-types.ts';
+import type { BuiltinCtx, BuiltinModule, BuiltinRegistry } from './registry.ts';
+import { buildRegistry, EMPTY_REGISTRY } from './registry.ts';
 
+/** Default fuel budget: the maximum number of evaluation steps before an {@link EvalOptions.maxSteps}
+ *  override, after which evaluation fails closed with an `ML-LANG-BUDGET` diagnostic. */
 export const DEFAULT_MAX_STEPS = 100_000;
+/** Default deadline budget in milliseconds (checked periodically), overridable via
+ *  {@link EvalOptions.maxTimeMs}. Exceeding it fails closed with an `ML-LANG-BUDGET` diagnostic. */
 export const DEFAULT_MAX_TIME_MS = 1000;
+/** Default recursion-depth budget for nested calls/blocks, overridable via {@link EvalOptions.maxDepth}.
+ *  Exceeding it fails closed with an `ML-LANG-BUDGET` diagnostic rather than overflowing the JS stack. */
 export const DEFAULT_MAX_DEPTH = 64;
+/** Default cap on the length a string may grow to via `+` concatenation, overridable via
+ *  {@link EvalOptions.maxStringLength}. A result that would exceed it fails closed with `ML-LANG-BUDGET`. */
 export const MAX_STRING_LENGTH = 10_000_000;
 export const MAX_BUFFER_LENGTH = 16_777_216;   // 2^24 elements — a typed-array construction cap (ML-LANG-BUDGET over)
 const TIME_CHECK_INTERVAL = 1024;
 
+/**
+ * The inputs to {@link evaluateProgram}: the host capabilities a run needs plus the optional
+ * determinism seed, injected data, and budget overrides.
+ *
+ * The run is a pure function of these: `result = f(source, data, seed, host-state)` — the same source
+ * with the same `data`/`seed` and an equivalently-seeded host reproduces the same result and the same
+ * `rand()`/`range()` sequence.
+ */
 export interface EvalOptions {
+  /** Data made available to the program as the `data` binding. Deep-frozen at the boundary, so the
+   *  program cannot mutate anything the host passes in. */
   data?: unknown;
+  /** Seed for the intrinsic `rand()`/`range()` PRNG. The same seed yields the same sequence; omitted
+   *  defaults to `0`. */
   seed?: number;
+  /** The reactive host: cells/effects, per-value generation signals, and the optional clock capability
+   *  ({@link ReactiveHost}). */
   host: ReactiveHost;
+  /** The host environment that resolves an unbound call head to a host value ({@link HostEnvironment}). */
   env: HostEnvironment;
+  /** Fuel budget override — max evaluation steps before failing closed with `ML-LANG-BUDGET`. Defaults
+   *  to {@link DEFAULT_MAX_STEPS}. */
   maxSteps?: number;
+  /** Deadline budget override in milliseconds. Defaults to {@link DEFAULT_MAX_TIME_MS}. */
   maxTimeMs?: number;
+  /** Recursion-depth budget override. Defaults to {@link DEFAULT_MAX_DEPTH}. */
   maxDepth?: number;
-  maxStringLength?: number;    // string-growth cap on `+` (default MAX_STRING_LENGTH) — testable small
-  insideComponent?: boolean;   // gates reactive `let`
+  /** Cap on the length a string may grow to via `+`. Defaults to {@link MAX_STRING_LENGTH} (a small
+   *  value is useful in tests). */
+  maxStringLength?: number;
+  /** Whether the top level is evaluated as a component body — gates reactive `let`. Defaults to `false`
+   *  (the program root is not a component). */
+  insideComponent?: boolean;
+  /** Standard-library modules whose builtins the evaluator resolves an unbound call head against (e.g.
+   *  a numeric library so `vec3(...)`/`sqrt(...)` dispatch). The language kernel registers none itself;
+   *  omit for a builtin-free run. */
+  builtins?: readonly BuiltinModule[];
 }
-export interface EvalResult { value: unknown; diagnostics: Diagnostic[] }
+
+/** The outcome of {@link evaluateProgram}: the produced value and the diagnostics collected during the
+ *  run. `evaluateProgram` never throws — an author error, a budget/recursion limit, an unknown call, or
+ *  a forbidden-key access all surface here as a diagnostic with `value` set to a safe `null`. */
+export interface EvalResult {
+  /** The value the program evaluated to (its last top-level expression or a top-level `return`), or
+   *  `null` if the run failed closed. */
+  value: unknown;
+  /** Every diagnostic collected during parsing + evaluation, in order. Empty on a fully-successful run. */
+  diagnostics: Diagnostic[];
+}
 
 /** Thrown INTERNALLY only, never escapes evaluateProgram; carries a `return` value up the stack.
  *  EXPORTED for the runtime derive so its top-level catch can recognize a bubbled `return`. */
@@ -49,13 +94,21 @@ export class BudgetSignal extends Error { constructor(readonly reason: string) {
  *  callUserFn (implicit-last-expr return; depth cap). Arrows are real JS closures instead.
  *  EXPORTED for the runtime derive — it introspects a `component` UserFn to child-collect its body. */
 export interface UserFn {
+  /** Brand marking this object as a metael user function (vs a plain JS closure). Always `true`. */
   readonly __mlFn: true;
-  readonly name: string;         // the declared name — lowering uses it as the node head (e.g. 'KPI')
+  /** The declared name — lowering uses it as the node head (e.g. `'KPI'`). */
+  readonly name: string;
+  /** The declared parameter patterns. */
   readonly params: Pattern[];
+  /** The function body statements. */
   readonly body: Stmt[];
+  /** The lexical environment captured at declaration. */
   readonly closure: Environment;
+  /** `true` for a `component` (stateful; runs with reactive `let`), `false` for a pure `function`. */
   readonly isComponent: boolean;
 }
+/** Type guard: is `v` a metael {@link UserFn} (a declared `function`/`component`), as opposed to a plain
+ *  JS value or an arrow closure? */
 export function isUserFn(v: unknown): v is UserFn {
   return typeof v === 'object' && v !== null && (v as { __mlFn?: unknown }).__mlFn === true;
 }
@@ -74,13 +127,39 @@ export function resolveOptions(options: EvalOptions): Required<Pick<EvalOptions,
   return { maxSteps: DEFAULT_MAX_STEPS, maxTimeMs: DEFAULT_MAX_TIME_MS, maxDepth: DEFAULT_MAX_DEPTH, maxStringLength: MAX_STRING_LENGTH, ...options };
 }
 
+/** Options for {@link makeCallable}: the host capabilities + optional seed and budget overrides the
+ *  fresh evaluation context needs. */
 export interface MakeCallableOpts {
-  host: ReactiveHost; env: HostEnvironment;
-  maxSteps?: number; maxTimeMs?: number; maxDepth?: number; maxStringLength?: number; seed?: number;
+  /** The reactive host ({@link ReactiveHost}). */
+  host: ReactiveHost;
+  /** The host environment that resolves an unbound call head ({@link HostEnvironment}). */
+  env: HostEnvironment;
+  /** Fuel budget override. A raised value sizes the context for a large loop bound. Defaults to
+   *  {@link DEFAULT_MAX_STEPS}. */
+  maxSteps?: number;
+  /** Deadline budget override in milliseconds. Defaults to {@link DEFAULT_MAX_TIME_MS}. */
+  maxTimeMs?: number;
+  /** Recursion-depth budget override. Defaults to {@link DEFAULT_MAX_DEPTH}. */
+  maxDepth?: number;
+  /** String-growth cap override. Defaults to {@link MAX_STRING_LENGTH}. */
+  maxStringLength?: number;
+  /** PRNG seed for the callable's `rand()`/`range()`. Defaults to `0`. */
+  seed?: number;
+  /** Builtin modules the callable resolves an unbound call head against (e.g. the numeric
+   *  library so a kernel body's `vec3(...)`/`sqrt(...)` dispatch). Omit for a builtin-free callable. */
+  builtins?: readonly BuiltinModule[];
 }
-/** Build a plain JS callable that invokes a UserFn under a FRESH Runner (its own budget). Used to run a
- *  kernel per sampled coordinate as a top-level call — distinct from a reentrant in-interpretation call,
- *  which shares the ambient Runner. A raised maxSteps sizes the Runner for a large loop bound. */
+/**
+ * Build a plain JS callable that invokes a {@link UserFn} under a FRESH evaluation context (its own
+ * budget).
+ *
+ * @param fn - the user function/component to invoke.
+ * @param opts - host capabilities + budget/seed overrides ({@link MakeCallableOpts}).
+ * @returns a function `(...args) => value` that runs `fn` with the given arguments; it returns `null`
+ *          rather than throwing if the budget is exhausted mid-call.
+ * @remarks Used to run a kernel per sampled coordinate as a top-level call — distinct from a reentrant
+ *          in-interpretation call, which shares the ambient context.
+ */
 export function makeCallable(fn: UserFn, opts: MakeCallableOpts): (...args: unknown[]) => unknown {
   const runner = new Runner(resolveOptions(opts));
   return (...args: unknown[]) => {
@@ -116,13 +195,32 @@ export class Runner {
    *  `result = f(source, data, seed, state)` — same source + same seed → identical rand() sequence.
    *  A fresh Runner per run re-seeds identically, so a re-run is byte-stable. */
   readonly rng: () => number;
+  /** The injected builtin registry (name→Builtin). An unbound call head resolves here FIRST; an
+   *  unregistered head falls through to the intrinsic cascade and then fails closed. EMPTY_REGISTRY
+   *  when the consumer injected no modules. */
+  readonly registry: BuiltinRegistry;
   constructor(readonly opt: Required<Pick<EvalOptions, 'maxSteps' | 'maxTimeMs' | 'maxDepth' | 'maxStringLength'>> & EvalOptions) {
     this.deadline = Date.now() + opt.maxTimeMs;
     this.rng = makeSeededRng(opt.seed ?? 0);
+    this.registry = opt.builtins ? buildRegistry(opt.builtins) : EMPTY_REGISTRY;
   }
-  tick(): void {
-    if (++this.steps > this.opt.maxSteps) throw new BudgetSignal('steps');
-    if (this.steps % TIME_CHECK_INTERVAL === 0 && Date.now() > this.deadline) throw new BudgetSignal('time');
+  tick(steps = 1): void {
+    // Charge `steps` fuel at once (default 1). A builtin doing self-contained native work (e.g. splitting
+    // a string of length n) charges `tick(n)` up front — O(1) instead of an n-iteration accounting loop —
+    // so it fails closed BEFORE the native work on a pathological input. Loops that invoke a user closure
+    // must still tick once PER iteration (the tick is the loop's budget beat, interleaved with each call).
+    // Guard the increment: a non-finite (NaN/±Infinity) or non-positive `n` from a buggy builtin must not
+    // corrupt the count or skip the step cap — clamp such a value to a single step.
+    const n = Number.isFinite(steps) && steps >= 1 ? Math.floor(steps) : 1;
+    const before = this.steps;
+    this.steps += n;
+    if (this.steps > this.opt.maxSteps) throw new BudgetSignal('steps');
+    // Deadline is checked once per TIME_CHECK_INTERVAL window. A multi-step tick can jump PAST a window
+    // boundary without landing on a multiple, so test whether the increment CROSSED a boundary — not
+    // `steps % INTERVAL === 0`, which a large `n` would silently skip.
+    if (Math.floor(before / TIME_CHECK_INTERVAL) !== Math.floor(this.steps / TIME_CHECK_INTERVAL) && Date.now() > this.deadline) {
+      throw new BudgetSignal('time');
+    }
   }
   error(code: string, message: string, span?: Expr['span']): void {
     this.diagnostics.push(makeDiagnostic(code, message, span));
@@ -147,13 +245,22 @@ export function evalExpr(expr: Expr, env: Environment, r: Runner): unknown {
       const object = evalExpr(expr.object, env, r);
       const key = evalExpr(expr.index, env, r);
       if (typeof key !== 'string' && typeof key !== 'number') {
+        // A non-string/non-number key can never be a valid member/index key. Fail CLOSED to a localized
+        // diagnostic + null — the same fail-closed contract every readMember path honors — rather than
+        // coercing via String(). A record is null-prototype (no inherited toString), so String(record) THROWS
+        // ('Cannot convert object to primitive value'); coercing here would let that throw escape to the
+        // top-level catch → ML-LANG-INTERNAL, aborting the WHOLE program and losing every sibling's output.
+        // Booleans coerce cleanly to a string key (String(true)='true'), preserving the prior behavior for them.
+        if (typeof key === 'object' || typeof key === 'function') { r.error('ML-LANG-BAD-KEY', 'index key is not a string or number', expr.span); return null; }
         if (key === null || key === undefined) { r.error('ML-LANG-BAD-KEY', 'index key is null/undefined', expr.span); return null; }
         return readMember(object, String(key), expr, r);
       }
       return readMember(object, key, expr, r);
     }
     case 'object': {
-      const out: Record<string, unknown> = {};
+      // A null-prototype record: a metael object exposes NO inherited `__proto__`/`constructor`/`toString`,
+      // closing a class of prototype-based sandbox escapes (defense in depth over the FORBIDDEN_KEYS guard).
+      const out: Record<string, unknown> = Object.create(null);
       for (const entry of expr.entries) {
         if (entry.spread) {
           const src = evalExpr(entry.value, env, r);
@@ -320,508 +427,40 @@ function invokeClosure(fn: (...a: unknown[]) => unknown, expr: Extract<Expr, { k
   return fn(...expr.args.map((a) => evalExpr(a, env, r)));
 }
 
-// The six non-square matrix constructors, name → [rows, cols]. A matCxR builds C columns of R rows, so
-// its stored shape is R rows × C cols. Column-major: the flat args fill column 0 top-to-bottom, then
-// column 1, and so on.
-const NON_SQUARE_MAT: Readonly<Record<string, readonly [number, number]>> = {
-  mat2x3: [3, 2], mat2x4: [4, 2], mat3x2: [2, 3], mat3x4: [4, 3], mat4x2: [2, 4], mat4x3: [3, 4],
-};
-
-// The determinant of an n×n column-major matrix (n = 2, 3, or 4). Flat element (row, col) lives at
-// index col*n + row. Hardcoded cofactor expansions keep the result stable and match the shader targets'
-// native determinant().
-function matDeterminant(c: number[], n: number): number {
-  const e = (row: number, col: number): number => c[col * n + row] as number;
-  if (n === 2) return e(0, 0) * e(1, 1) - e(0, 1) * e(1, 0);
-  if (n === 3) {
-    return e(0, 0) * (e(1, 1) * e(2, 2) - e(1, 2) * e(2, 1))
-         - e(0, 1) * (e(1, 0) * e(2, 2) - e(1, 2) * e(2, 0))
-         + e(0, 2) * (e(1, 0) * e(2, 1) - e(1, 1) * e(2, 0));
-  }
-  // n === 4 — cofactor expansion along the first row, each 3×3 minor expanded inline.
-  const m3 = (r0: number, r1: number, r2: number, c0: number, c1: number, c2: number): number =>
-      e(r0, c0) * (e(r1, c1) * e(r2, c2) - e(r1, c2) * e(r2, c1))
-    - e(r0, c1) * (e(r1, c0) * e(r2, c2) - e(r1, c2) * e(r2, c0))
-    + e(r0, c2) * (e(r1, c0) * e(r2, c1) - e(r1, c1) * e(r2, c0));
-  return e(0, 0) * m3(1, 2, 3, 1, 2, 3)
-       - e(0, 1) * m3(1, 2, 3, 0, 2, 3)
-       + e(0, 2) * m3(1, 2, 3, 0, 1, 3)
-       - e(0, 3) * m3(1, 2, 3, 0, 1, 2);
-}
-
-// The determinant of a k×k column-major matrix (flat, element (row, col) at index col*k+row), by cofactor
-// expansion along the first column. k=1 is the scalar; k=2 is the direct 2×2 formula; larger k recurses on
-// the (k-1)×(k-1) minors. General over k so it serves BOTH the top-level inverse determinant AND the smaller
-// minors the adjugate needs (n−1 = 1/2/3 for n = 2/3/4).
-function detFlat(m: number[], k: number): number {
-  if (k === 1) return m[0] as number;
-  if (k === 2) return (m[0] as number) * (m[3] as number) - (m[2] as number) * (m[1] as number);   // col-major [a,b,c,d] → a*d − c*b
-  let sum = 0;
-  for (let row = 0; row < k; row++) {
-    const sign = row % 2 === 0 ? 1 : -1;                    // cofactor sign along column 0
-    sum += sign * (m[row] as number) * detFlat(subMat(m, k, row, 0), k - 1);   // element (row, 0) lives at flat index row
-  }
-  return sum;
-}
-// The (k−1)×(k−1) column-major submatrix of a k×k column-major matrix, formed by deleting row `dr` and column
-// `dc`. Iterating remaining columns (outer) then remaining rows (inner) pushes elements in column-major order.
-function subMat(m: number[], k: number, dr: number, dc: number): number[] {
-  const out: number[] = [];
-  for (let col = 0; col < k; col++) {
-    if (col === dc) continue;
-    for (let row = 0; row < k; row++) {
-      if (row === dr) continue;
-      out.push(m[col * k + row] as number);
-    }
-  }
-  return out;
-}
-// The inverse of an n×n column-major matrix (n = 2, 3, or 4) via the closed-form adjugate/determinant:
-// inv[i][j] = cofactor(j, i) / det = ((−1)^(i+j) · minor(j, i)) / det, where minor(j, i) is the determinant of
-// the submatrix with row j and column i deleted. The result is stored column-major (element (row=i, col=j) at
-// flat index j*n+i). If det ≈ 0 (a singular matrix) the elements are ±Inf/NaN — undefined, matching the shader
-// targets' native behavior (GLSL/WGSL neither guard nor define a singular inverse); no special guard is added.
-function matInverse(c: number[], n: number): number[] {
-  const det = detFlat(c, n);
-  const out = new Array<number>(n * n);
-  for (let i = 0; i < n; i++) {          // i = row of the inverse
-    for (let j = 0; j < n; j++) {        // j = column of the inverse
-      const sign = (i + j) % 2 === 0 ? 1 : -1;
-      const minor = detFlat(subMat(c, n, j, i), n - 1);
-      out[j * n + i] = (sign * minor) / det;
-    }
-  }
-  return out;
+function makeBuiltinCtx(expr: Extract<Expr, { kind: 'call' }>, env: Environment, r: Runner): BuiltinCtx {
+  return {
+    tick: (steps) => r.tick(steps),
+    error: (code, message, span) => r.error(code, message, span ?? expr.span),
+    rng: () => r.rng(),
+    // Returns undefined when the host injected no clock — the datetime builtin then raises
+    // ML-LANG-NO-CLOCK and returns null (fail-closed; NEVER a fake 0).
+    clock: () => {
+      const c = (r.opt.host as { clock?: () => { now(): number; monotonic(): number } }).clock;
+      return c ? c.call(r.opt.host) : undefined;
+    },
+    evalArg: (i) => evalExpr(expr.args[i] ?? { kind: 'null', span: expr.span }, env, r),
+    argCount: () => expr.args.length,
+    callClosure: (v, args) => (typeof v === 'function' ? (v as (...a: unknown[]) => unknown)(...args) : isUserFn(v) ? callUserFn(v, args, r) : null),
+    allocateGeneration: () => r.opt.host.allocateGeneration(),
+    readGeneration: (g) => r.opt.host.readGeneration(g),
+    freeze: (v) => deepFreeze(v),
+    maxStringLength: r.opt.maxStringLength,
+    span: expr.span,
+  };
 }
 
 function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, env: Environment, r: Runner): unknown {
-  // Intrinsic seeded builtins — resolved BEFORE the host so determinism-with-randomness is a language
-  // guarantee, not a per-domain re-implementation. Only fires for the UNBOUND-head path (a user
-  // `function rand`/`range` shadows via evalCall's callee-resolution step, which never reaches here).
-  if (head === 'f32' || head === 'f64' || head === 'i32' || head === 'u32') {
-    r.tick();
-    const kind = head as keyof typeof BUFFER_KINDS;
-    const spec = BUFFER_KINDS[kind];
-    const a0 = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
-    let store: { [i: number]: number; length: number };
-    if (typeof a0 === 'number') {
-      const n = Math.floor(a0);
-      if (!Number.isFinite(n) || n < 0) { r.error('ML-LANG-BUILTIN-ARG', `${head}(n) — n must be a non-negative number`, expr.span); return deepFreeze([]); }
-      if (n > MAX_BUFFER_LENGTH) { r.error('ML-LANG-BUDGET', `${head}(${n}) exceeds the ${MAX_BUFFER_LENGTH}-element cap`, expr.span); return deepFreeze([]); }
-      store = new spec.ctor(n);
-      const genFn = expr.args[1] ? evalExpr(expr.args[1], env, r) : undefined;
-      if (genFn !== undefined) {
-        const call = typeof genFn === 'function' ? (i: number) => (genFn as (...xs: unknown[]) => unknown)(i) : isUserFn(genFn) ? (i: number) => callUserFn(genFn, [i], r) : null;
-        if (!call) { r.error('ML-LANG-BUILTIN-ARG', `${head}(n, fn) — the second argument must be a function`, expr.span); return deepFreeze([]); }
-        for (let i = 0; i < n; i++) { r.tick(); const val = call(i); store[i] = spec.coerce(typeof val === 'number' ? val : NaN); }
-      }
-    } else if (Array.isArray(a0)) {
-      if (a0.length > MAX_BUFFER_LENGTH) { r.error('ML-LANG-BUDGET', `${head}([…]) exceeds the ${MAX_BUFFER_LENGTH}-element cap`, expr.span); return deepFreeze([]); }
-      store = new spec.ctor(a0.length);
-      for (let i = 0; i < a0.length; i++) { r.tick(); const val = a0[i]; store[i] = spec.coerce(typeof val === 'number' ? val : NaN); }
-    } else {
-      r.error('ML-LANG-BUILTIN-ARG', `${head}(n | […] | (n, fn)) — bad argument`, expr.span);
-      return deepFreeze([]);
-    }
-    const gen = r.opt.host.allocateGeneration();
-    return makeTypedArray(kind, store, gen);
-  }
-  if (head === 'vec2' || head === 'vec3' || head === 'vec4') {
-    r.tick();
-    const n = head === 'vec2' ? 2 : head === 'vec3' ? 3 : 4;
-    const a = expr.args.map((x) => evalExpr(x, env, r));
-    if (a.some((x) => typeof x !== 'number')) { r.error('ML-LANG-BUILTIN-ARG', `${head}(numbers) — all components must be numbers`, expr.span); return deepFreeze([]); }
-    const nums = a as number[];
-    if (nums.length === 1) return makeVec(new Array<number>(n).fill(nums[0] as number));   // splat
-    if (nums.length !== n) { r.error('ML-LANG-BUILTIN-ARG', `${head} needs 1 (splat) or ${n} components`, expr.span); return deepFreeze([]); }
-    return makeVec(nums);
-  }
-  if (Object.hasOwn(NON_SQUARE_MAT, head)) {   // own-property check: a prototype-inherited head (constructor/toString/…) is NOT a ctor
-    r.tick();
-    const [rows, cols] = NON_SQUARE_MAT[head]!;
-    const a = expr.args.map((x) => evalExpr(x, env, r));
-    if (a.some((x) => typeof x !== 'number') || a.length !== rows * cols) { r.error('ML-LANG-BUILTIN-ARG', `${head}(${rows * cols} numbers, column-major)`, expr.span); return deepFreeze([]); }
-    return makeMat(a as number[], rows, cols);
-  }
-  if (head === 'mat2' || head === 'mat3' || head === 'mat4') {
-    r.tick();
-    const n = head === 'mat2' ? 2 : head === 'mat3' ? 3 : 4;
-    const a = expr.args.map((x) => evalExpr(x, env, r));
-    if (a.length === 0) return makeMat(identityMat(n), n, n);
-    if (a.some((x) => typeof x !== 'number') || a.length !== n * n) { r.error('ML-LANG-BUILTIN-ARG', `${head}() (identity) or ${head}(${n * n} numbers, column-major)`, expr.span); return deepFreeze([]); }
-    return makeMat(a as number[], n, n);
-  }
-  if (head === 'transpose') {
-    r.tick();
-    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
-    const d = descriptorOf(m);
-    if (!d || d.lower?.shape !== 'matMxN') { r.error('ML-LANG-BUILTIN-ARG', 'transpose(mat)', expr.span); return deepFreeze([]); }
-    // Column-major transpose. Input is R rows × C cols; element (r,c) lives at flat index c*R+r. The
-    // transpose is C rows × R cols and maps (r,c) → (c,r); output element at row=c, col=r lives at flat
-    // index r*C+c. So out[r*C+c] = in[c*R+r] for r∈[0,R), c∈[0,C).
-    const s = vecStoreOf(m); const R = s.rows, C = s.cols; const out = new Array<number>(R * C);
-    for (let c = 0; c < C; c++) for (let rr = 0; rr < R; rr++) out[rr * C + c] = s.c[c * R + rr] as number;
-    return makeMat(out, C, R);
-  }
-  if (head === 'determinant') {
-    r.tick();
-    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
-    const d = descriptorOf(m);
-    const s = d?.lower?.shape === 'matMxN' ? vecStoreOf(m) : null;
-    if (!s || s.rows !== s.cols) { r.error('ML-LANG-BUILTIN-ARG', 'determinant(square mat)', expr.span); return deepFreeze([]); }
-    return matDeterminant(Array.from(s.c), s.rows);
-  }
-  if (head === 'inverse') {
-    r.tick();
-    const m = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
-    const d = descriptorOf(m);
-    const s = d?.lower?.shape === 'matMxN' ? vecStoreOf(m) : null;
-    if (!s || s.rows !== s.cols) { r.error('ML-LANG-BUILTIN-ARG', 'inverse(square mat)', expr.span); return deepFreeze([]); }
-    return makeMat(matInverse(Array.from(s.c), s.rows), s.rows, s.rows);
-  }
-  if (head === 'qmat') {
-    r.tick();
-    // qmat(q:vec4) → the 3×3 rotation matrix of the quaternion, COLUMN-MAJOR (element (r,c) at flat index c*3+r).
-    const q = evalExpr(expr.args[0] ?? { kind: 'null', span: expr.span }, env, r);
-    const d = descriptorOf(q);
-    if (!d || d.lower?.shape !== 'vecN' || (d.lower.rows ?? 0) !== 4) { r.error('ML-LANG-BUILTIN-ARG', 'qmat(vec4 quaternion)', expr.span); return deepFreeze([]); }
-    const s = vecStoreOf(q); const x = s.c[0] as number, y = s.c[1] as number, z = s.c[2] as number, w = s.c[3] as number;
-    const xx=x*x, yy=y*y, zz=z*z, xy=x*y, xz=x*z, yz=y*z, wx=w*x, wy=w*y, wz=w*z;
-    // Columns of the rotation matrix. col0 = R·x̂, col1 = R·ŷ, col2 = R·ẑ; laid out column-major so
-    // out[c*3+r] = column c's row r. This is the transpose-free companion to qrotate: qmat(q)·v ≡ qrotate(q,v).
-    return makeMat([
-      1-2*(yy+zz), 2*(xy+wz),   2*(xz-wy),     // col 0
-      2*(xy-wz),   1-2*(xx+zz), 2*(yz+wx),     // col 1
-      2*(xz+wy),   2*(yz-wx),   1-2*(xx+yy),   // col 2
-    ], 3, 3);
-  }
-  if (head === 'dot' || head === 'cross' || head === 'normalize' || head === 'length' ||
-      head === 'distance' || head === 'reflect' || head === 'refract' || head === 'faceforward' ||
-      head === 'qmul' || head === 'qconj' || head === 'qinvert' || head === 'qaxisangle' || head === 'qrotate' ||
-      head === 'qslerp') {
-    r.tick();
-    const a = expr.args.map((x) => evalExpr(x, env, r));
-    const comps = (v: unknown): number[] | null => {
-      const d = descriptorOf(v);
-      if (!d || d.lower?.shape !== 'vecN') return null;
-      const n = d.lower.rows ?? 0; const out: number[] = [];
-      for (let i = 0; i < n; i++) { const c = d.getMember!(v, 'xyzw'[i] as string); if (typeof c !== 'number') return null; out.push(c); }
-      return out;
-    };
-    const num = (v: unknown): number | null => (typeof v === 'number' && !Number.isNaN(v)) ? v : null;
-    const badVec = (): unknown => { r.error('ML-LANG-BUILTIN-ARG', `${head}(vec…) — argument must be a vector`, expr.span); return deepFreeze([]); };
-    if (head === 'dot') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== y.length) return badVec(); return x.reduce((s, xi, i) => s + xi * (y[i] as number), 0); }
-    if (head === 'cross') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== 3 || y.length !== 3) return badVec(); return makeVec([x[1]!*y[2]!-x[2]!*y[1]!, x[2]!*y[0]!-x[0]!*y[2]!, x[0]!*y[1]!-x[1]!*y[0]!]); }
-    if (head === 'length') { const x = comps(a[0]); if (!x) return badVec(); return Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0)); }
-    // distance(a, b) = length(a - b) = sqrt(Σ (aᵢ - bᵢ)²).
-    if (head === 'distance') { const x = comps(a[0]); const y = comps(a[1]); if (!x || !y || x.length !== y.length) return badVec(); return Math.sqrt(x.reduce((s, xi, i) => s + (xi - (y[i] as number)) ** 2, 0)); }
-    // reflect(I, N) = I - 2·dot(N, I)·N (GLSL/WGSL semantics; N is assumed normalized).
-    if (head === 'reflect') { const I = comps(a[0]); const N = comps(a[1]); if (!I || !N || I.length !== N.length) return badVec(); const d = I.reduce((s, ii, i) => s + ii * (N[i] as number), 0); return makeVec(I.map((ii, i) => ii - 2 * d * (N[i] as number))); }
-    // refract(I, N, eta): k = 1 - eta²·(1 - dot(N,I)²); k < 0 → total internal reflection → zero vector;
-    // else eta·I - (eta·dot(N,I) + √k)·N.
-    if (head === 'refract') { const I = comps(a[0]); const N = comps(a[1]); const eta = num(a[2]); if (!I || !N || eta === null || I.length !== N.length) return badVec(); const d = I.reduce((s, ii, i) => s + ii * (N[i] as number), 0); const k = 1 - eta * eta * (1 - d * d); if (k < 0) return makeVec(I.map(() => 0)); const sq = Math.sqrt(k); return makeVec(I.map((ii, i) => eta * ii - (eta * d + sq) * (N[i] as number))); }
-    // faceforward(N, I, Nref): dot(Nref, I) < 0 → N, else -N (orient N to face away from I).
-    if (head === 'faceforward') { const N = comps(a[0]); const I = comps(a[1]); const Nref = comps(a[2]); if (!N || !I || !Nref || N.length !== I.length || N.length !== Nref.length) return badVec(); const d = Nref.reduce((s, ni, i) => s + ni * (I[i] as number), 0); return makeVec(N.map((ni) => d < 0 ? ni : -ni)); }
-    // ─── quaternions (vec4 layout (x,y,z,w) = imaginary xyz + real w) ───
-    // A quat IS a vec4; each op requires its argument to be exactly a vec4 (`comps` returns any width, so
-    // the length===4 guard rejects a vec2/vec3). qconj negates the imaginary part; qinvert = qconj / |q|²
-    // (the multiplicative inverse — for a unit quat this equals the conjugate); qmul is the Hamilton product.
-    if (head === 'qconj') { const q = comps(a[0]); if (!q || q.length !== 4) return badVec(); return makeVec([-q[0]!, -q[1]!, -q[2]!, q[3]!]); }
-    if (head === 'qinvert') { const q = comps(a[0]); if (!q || q.length !== 4) return badVec(); const d = q[0]!**2 + q[1]!**2 + q[2]!**2 + q[3]!**2; return makeVec([-q[0]!/d, -q[1]!/d, -q[2]!/d, q[3]!/d]); }
-    if (head === 'qmul') {
-      const A = comps(a[0]); const B = comps(a[1]); if (!A || A.length !== 4 || !B || B.length !== 4) return badVec();
-      const [ax, ay, az, aw] = A as [number, number, number, number]; const [bx, by, bz, bw] = B as [number, number, number, number];
-      return makeVec([aw*bx + ax*bw + ay*bz - az*by, aw*by - ax*bz + ay*bw + az*bx, aw*bz + ax*by - ay*bx + az*bw, aw*bw - ax*bx - ay*by - az*bz]);
-    }
-    // qaxisangle(axis:vec3, angle) → the unit quat (axis·sin(θ/2), cos(θ/2)). The axis must be a vec3.
-    if (head === 'qaxisangle') { const ax = comps(a[0]); const ang = num(a[1]); if (!ax || ax.length !== 3 || ang === null) return badVec(); const s = Math.sin(ang/2); return makeVec([ax[0]!*s, ax[1]!*s, ax[2]!*s, Math.cos(ang/2)]); }
-    // qrotate(q:vec4, v:vec3) → the rotated vec3 via the optimized `v + 2·cross(q.xyz, cross(q.xyz, v) + q.w·v)`:
-    // t = 2·cross(q.xyz, v); c2 = cross(q.xyz, t); result = v + q.w·t + c2. Cheaper than building qmat and equal to it.
-    if (head === 'qrotate') { const q = comps(a[0]); const v = comps(a[1]); if (!q || q.length !== 4 || !v || v.length !== 3) return badVec();
-      const t = [2*(q[1]!*v[2]!-q[2]!*v[1]!), 2*(q[2]!*v[0]!-q[0]!*v[2]!), 2*(q[0]!*v[1]!-q[1]!*v[0]!)];   // 2·cross(q.xyz, v)
-      const c2 = [q[1]!*t[2]!-q[2]!*t[1]!, q[2]!*t[0]!-q[0]!*t[2]!, q[0]!*t[1]!-q[1]!*t[0]!];               // cross(q.xyz, t)
-      return makeVec([v[0]!+q[3]!*t[0]!+c2[0]!, v[1]!+q[3]!*t[1]!+c2[1]!, v[2]!+q[3]!*t[2]!+c2[2]!]);
-    }
-    // qslerp(a:vec4, b:vec4, t) → spherical linear interpolation of the two quats. The antipodal fix (dot<0 →
-    // negate b, so the shorter arc is taken); a small-angle NORMALIZED-lerp fallback (dot>0.9995 → sin θ ≈ 0 would
-    // divide-by-near-zero, so lerp+normalize instead); else the sin-weighted great-circle blend.
-    if (head === 'qslerp') { const A = comps(a[0]); const B = comps(a[1]); const t = num(a[2]); if (!A || A.length !== 4 || !B || B.length !== 4 || t === null) return badVec();
-      let dot = A[0]!*B[0]! + A[1]!*B[1]! + A[2]!*B[2]! + A[3]!*B[3]!; let b = B.slice(); if (dot < 0) { b = b.map((x) => -x); dot = -dot; }
-      if (dot > 0.9995) { const out = A.map((ai, i) => ai + t * (b[i]! - ai)); const len = Math.hypot(...out); return makeVec(out.map((x) => x / len)); }
-      const th = Math.acos(dot); const s = Math.sin(th); const wa = Math.sin((1 - t) * th) / s; const wb = Math.sin(t * th) / s;
-      return makeVec(A.map((ai, i) => wa * ai + wb * b[i]!));
-    }
-    // normalize
-    const x = comps(a[0]); if (!x) return badVec(); const len = Math.sqrt(x.reduce((s, xi) => s + xi * xi, 0));
-    return makeVec(x.map((xi) => xi / len));   // len===0 → NaN components, matching native normalize
-  }
-  if (head === 'rand') { r.tick(); return r.rng(); }
+  const _b = r.registry.get(head);
+  if (_b) return _b.invoke(makeBuiltinCtx(expr, env, r), expr.args);
+  // `range` stays a language-kernel intrinsic (resolved before the host): it is the bounded-loop primitive
+  // the compute-lowering gate hardcodes as the only lowerable loop form (`for … of range(n)`) and the
+  // interpreter oracle relies on, so it cannot move to the injectable standard library. Only fires for the
+  // UNBOUND-head path (a user `function range` shadows via evalCall's callee-resolution step, which never
+  // reaches here). `rand` moved to the standard-library `random` module (registry-dispatched above).
   if (head === 'range') {
     r.tick();
     const n = Number(evalExpr(expr.args[0] ?? { kind: 'number', value: 0, span: expr.span }, env, r));
     return seededRange(Number.isFinite(n) ? n : 0);
-  }
-  // Pure collection builtins — intrinsic free functions that RETURN NEW frozen collections (never
-  // mutate). Unbound-head-only (a user function of the same name shadows via evalCall's callee
-  // resolution, which never reaches here). Each ticks the budget per call + per element so a large
-  // collection fails closed with ML-LANG-BUDGET. Callbacks are ordinary closures invoked as fn(x, i).
-  if (IMPLEMENTED_BUILTINS.has(head) && head !== 'rand' && head !== 'range') {
-    r.tick();
-    const a = expr.args.map((x) => evalExpr(x, env, r));
-    // A callback may be EITHER an arrow (a real JS closure — typeof 'function') OR a user-declared
-    // `function` (a structured callable object, invoked via callUserFn). Normalize both to a uniform
-    // `(...xs) => unknown` invoker so a named function works as a callback, not just an arrow.
-    const asFn = (v: unknown): ((...xs: unknown[]) => unknown) | null => {
-      if (typeof v === 'function') return v as (...xs: unknown[]) => unknown;   // an arrow closure
-      if (isUserFn(v)) return (...xs: unknown[]) => callUserFn(v, xs, r);        // a user `function`
-      return null;
-    };
-    const badArg = (msg: string): unknown => { r.error('ML-LANG-BUILTIN-ARG', msg, expr.span); return deepFreeze([]); };
-    // Accept any value the language can iterate: a plain array as-is, or a custom value whose descriptor
-    // exposes `iterate` (a typed array — the same seam for-of uses). Returns null for a non-iterable, so the
-    // caller's existing bad-argument diagnostic fires. Materializes to a plain array (results stay plain
-    // arrays). A whole-buffer read must register the value's generation dependency — like for-of, index, and
-    // concat — so a reactive context re-runs on an in-place write; iterate alone would not subscribe.
-    const asArray = (xs: unknown): unknown[] | null => {
-      if (Array.isArray(xs)) return xs;
-      const desc = descriptorOf(xs);
-      const iter = desc?.iterate?.(xs);
-      if (!iter) return null;
-      const gen = generationOf(xs);
-      if (gen !== undefined) r.opt.host.readGeneration(gen);
-      return Array.from(iter);
-    };
-
-    switch (head) {
-      case 'map': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`map(array, fn) — bad arguments`);
-        const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); out.push(fn(x, i)); }); return deepFreeze(out);
-      }
-      case 'filter': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`filter(array, fn) — bad arguments`);
-        const out: unknown[] = []; xs.forEach((x, i) => { r.tick(); if (truthy(fn(x, i))) out.push(x); }); return deepFreeze(out);
-      }
-      case 'reduce': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]); const init = a[2];
-        if (!xs || !fn) return badArg(`reduce(array, fn, init) — bad arguments`);
-        let acc = init; xs.forEach((x, i) => { r.tick(); acc = fn(acc, x, i); }); return acc;   // acc may be a scalar; a collection acc is already frozen by its own eval
-      }
-      case 'keys': {
-        const o = a[0];
-        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`keys(object) — bad argument`);
-        return deepFreeze(Object.keys(o as object));
-      }
-      case 'values': {
-        const o = a[0];
-        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`values(object) — bad argument`);
-        return deepFreeze(Object.values(o as Record<string, unknown>));
-      }
-      case 'entries': {
-        const o = a[0];
-        if (o === null || typeof o !== 'object' || Array.isArray(o)) return badArg(`entries(object) — bad argument`);
-        return deepFreeze(Object.entries(o as Record<string, unknown>).map(([k, v]) => [k, v]));
-      }
-      case 'fromEntries': {
-        const pairs = a[0];
-        if (!Array.isArray(pairs)) return badArg(`fromEntries(array of [key, value]) — bad argument`);
-        const out: Record<string, unknown> = {};
-        for (const p of pairs) { r.tick(); if (Array.isArray(p) && typeof p[0] === 'string' && !FORBIDDEN_KEYS.has(p[0])) out[p[0]] = p[1]; }
-        return deepFreeze(out);
-      }
-      case 'some': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`some(array, fn) — bad arguments`);
-        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return true; }
-        return false;
-      }
-      case 'every': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`every(array, fn) — bad arguments`);
-        for (let i = 0; i < xs.length; i++) { r.tick(); if (!truthy(fn(xs[i], i))) return false; }
-        return true;
-      }
-      case 'find': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`find(array, fn) — bad arguments`);
-        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return xs[i] ?? null; }
-        return null;
-      }
-      case 'findIndex': {
-        const xs = asArray(a[0]); const fn = asFn(a[1]);
-        if (!xs || !fn) return badArg(`findIndex(array, fn) — bad arguments`);
-        for (let i = 0; i < xs.length; i++) { r.tick(); if (truthy(fn(xs[i], i))) return i; }
-        return -1;
-      }
-      case 'includes': {
-        const xs = asArray(a[0]); const v = a[1];
-        if (!xs) return badArg(`includes(array, value) — bad argument`);
-        for (const x of xs) { r.tick(); if (looseEquals(x, v)) return true; }
-        return false;
-      }
-      case 'sort': {
-        const xs = asArray(a[0]); const cmpArg = a[1];
-        if (!xs) return badArg(`sort(array, comparator?) — bad argument`);
-        // Tick PER COMPARISON on the default path too — an O(n log n) sort of a large array must be
-        // budget-charged or it bypasses the step + time guards (tick() is the only deadline check point).
-        if (cmpArg === undefined) return deepFreeze(stableSort(xs, (x, y) => { r.tick(); return defaultCompare(x, y); }));
-        const cmpFn = asFn(cmpArg);
-        if (!cmpFn) return badArg(`sort(array, comparator) — comparator is not callable`);
-        let flagged = false;
-        const cmp = (x: unknown, y: unknown): number => {
-          r.tick();
-          const res = cmpFn(x, y);
-          if (typeof res !== 'number' || Number.isNaN(res)) {
-            if (!flagged) { flagged = true; r.error('ML-LANG-BUILTIN-ARG', 'sort comparator must return a number', expr.span); }
-            return 0;   // keep relative order on a bad return (stable)
-          }
-          return res;
-        };
-        return deepFreeze(stableSort(xs, cmp));
-      }
-      case 'slice': {
-        const xs = asArray(a[0]);
-        if (!xs) return badArg(`slice(array, start, end?) — bad argument`);
-        const len = xs.length;
-        const norm = (v: unknown, dflt: number): number => {
-          if (v === undefined) return dflt;
-          const n = Math.trunc(toNum(v));
-          if (Number.isNaN(n)) return dflt;
-          return n < 0 ? Math.max(len + n, 0) : Math.min(n, len);
-        };
-        const start = norm(a[1], 0);
-        const end = norm(a[2], len);
-        const out: unknown[] = [];
-        for (let i = start; i < end; i++) { r.tick(); out.push(xs[i]); }
-        return deepFreeze(out);
-      }
-      case 'reverse': {
-        const xs = asArray(a[0]);
-        if (!xs) return badArg(`reverse(array) — bad argument`);
-        const out: unknown[] = [];
-        for (let i = xs.length - 1; i >= 0; i--) { r.tick(); out.push(xs[i]); }
-        return deepFreeze(out);
-      }
-      case 'split': {
-        const s = a[0]; const sep = a[1];
-        if (typeof s !== 'string' || typeof sep !== 'string') return badArg(`split(string, separator) — bad arguments`);
-        const parts = sep === '' ? Array.from(s) : s.split(sep);
-        parts.forEach(() => r.tick());
-        return deepFreeze(parts);
-      }
-      case 'join': {
-        const xs = asArray(a[0]); const sep = a[1];
-        if (!xs || typeof sep !== 'string') return badArg(`join(array, separator) — bad arguments`);
-        const parts: string[] = [];
-        // Fail CLOSED before the result crosses the string cap (mirrors the `+` operator): a large
-        // collection of large strings could otherwise build a string past the engine limit and throw
-        // a raw RangeError. Treat the cap as a budget trip, before allocating the joined string.
-        let total = 0;
-        for (let i = 0; i < xs.length; i++) {
-          r.tick();
-          const s = strOf(xs[i]);
-          total += s.length + (i > 0 ? sep.length : 0);
-          if (total > r.opt.maxStringLength) {
-            r.error('ML-LANG-BUDGET', `string result would exceed the ${r.opt.maxStringLength}-character limit`, expr.span);
-            return null;
-          }
-          parts.push(s);
-        }
-        return parts.join(sep);
-      }
-      case 'chars': {
-        const s = a[0];
-        if (typeof s !== 'string') return badArg(`chars(string) — bad argument`);
-        const cs = Array.from(s);
-        cs.forEach(() => r.tick());
-        return deepFreeze(cs);
-      }
-      case 'toUpperCase': {
-        const s = a[0];
-        if (typeof s !== 'string') return badArg(`toUpperCase(string) — bad argument`);
-        return s.toUpperCase();
-      }
-      case 'toLowerCase': {
-        const s = a[0];
-        if (typeof s !== 'string') return badArg(`toLowerCase(string) — bad argument`);
-        return s.toLowerCase();
-      }
-      case 'trim': {
-        const s = a[0];
-        if (typeof s !== 'string') return badArg(`trim(string) — bad argument`);
-        return s.trim();
-      }
-      case 'min': case 'max': case 'abs': case 'sign': case 'floor':
-      case 'ceil': case 'round': case 'clamp': case 'sqrt': case 'pow':
-      case 'sin': case 'cos': case 'exp': case 'log': case 'fract':
-      case 'step': case 'mix': case 'smoothstep':
-      case 'tan': case 'sinh': case 'cosh': case 'tanh':
-      case 'asin': case 'acos': case 'atan': case 'atan2':
-      case 'exp2': case 'log2': case 'inverseSqrt':
-      case 'degrees': case 'radians': case 'trunc': {
-        // Coerce a numeric arg or fail: returns null when the value is not a finite/coercible number.
-        const num = (v: unknown): number | null => {
-          if (typeof v === 'number') return Number.isNaN(v) ? null : v;
-          const n = toNum(v);
-          return Number.isNaN(n) ? null : n;
-        };
-        const bad = (): unknown => badArg(`${head}(number, …) — non-numeric argument`);
-        const arity = NUMERIC_ARITY[head] ?? a.length;
-        // Componentwise vec application (GLSL semantics): if any of the head's arity-relevant args carries
-        // a vecN descriptor, map the scalar op over its components, broadcasting a plain scalar arg to every
-        // component, and return a fresh vec of the common width. Detection + reads are scoped to the first
-        // `arity` args, so a vec in a beyond-arity slot never promotes an otherwise-scalar call. All vec
-        // args in that prefix must share ONE width — a mismatch is a fail-loud arg error (GLSL rejects
-        // `min(vec2, vec3)` at compile time, so the interpreter oracle must too; it never truncates). A NaN
-        // component (e.g. sqrt(negative), log(<=0), or a non-numeric scalar broadcast) is KEPT — native
-        // shaders compute componentwise and never abort the whole vector.
-        const vecComps = (v: unknown): number[] | null => {
-          const d = descriptorOf(v);
-          if (!d || d.lower?.shape !== 'vecN') return null;
-          const n = d.lower.rows ?? 0; const out: number[] = [];
-          for (let i = 0; i < n; i++) out.push(Number(d.getMember!(v, 'xyzw'[i] as string)));
-          return out;
-        };
-        const relevant = a.slice(0, arity);
-        const vecArgs = relevant.map(vecComps).filter((c): c is number[] => c !== null);
-        if (vecArgs.length > 0) {
-          const width = vecArgs[0]!.length;
-          if (vecArgs.some((c) => c.length !== width)) {
-            return badArg(`${head}(vec…) — vector arguments must be the same width`);
-          }
-          const scalarAt = (arg: unknown, i: number): number => { const c = vecComps(arg); return c ? (c[i] ?? NaN) : (num(arg) ?? NaN); };
-          const out: number[] = [];
-          for (let i = 0; i < width; i++) {
-            const xs: number[] = [];
-            for (let k = 0; k < arity; k++) xs.push(scalarAt(relevant[k], i));
-            out.push(scalarMath(head, xs));
-          }
-          return makeVec(out);
-        }
-        // Scalar path — byte-identical to the pre-vec dispatch: coerce each needed arg (null → fail loud),
-        // intercept sqrt/log domains for their specific diagnostics, then compute via scalarMath.
-        const xs: number[] = [];
-        for (let k = 0; k < arity; k++) { const v = num(a[k]); if (v === null) return bad(); xs.push(v); }
-        if (head === 'sqrt' && xs[0]! < 0) return badArg(`sqrt(x) — x must be >= 0`);
-        if (head === 'log' && xs[0]! <= 0) return badArg(`log(x) — x must be > 0`);
-        if ((head === 'asin' || head === 'acos') && (xs[0]! < -1 || xs[0]! > 1)) return badArg(`${head}(x) — x must be in [-1, 1]`);
-        if ((head === 'log2' || head === 'inverseSqrt') && xs[0]! <= 0) return badArg(`${head}(x) — x must be > 0`);
-        return scalarMath(head, xs);
-      }
-      case 'format': {
-        const x = a[0]; const digits = a[1];
-        if (typeof x !== 'number' || Number.isNaN(x)) return badArg(`format(number, digits) — first argument must be a number`);
-        if (typeof digits !== 'number' || !Number.isInteger(digits) || digits < 0 || digits > 100) return badArg(`format(number, digits) — digits must be an integer in [0, 100]`);
-        return x.toFixed(digits);
-      }
-      default: {
-        // A registry-admitted name with no case yet fails loud here, with args evaluated exactly once —
-        // never silently falling through to the host resolveCall path (which would re-evaluate args).
-        r.error('ML-LANG-UNKNOWN-CALL', `unknown call '${head}'`, expr.span);
-        return null;
-      }
-    }
   }
   const args = expr.args.map((a) => evalExpr(a, env, r));
   // Wrap each evaluated value into the Arg shape. lang's evaluator does NOT populate name/reactive
@@ -847,6 +486,15 @@ function dispatchBuiltin(head: string, expr: Extract<Expr, { kind: 'call' }>, en
   return null;
 }
 
+/**
+ * Invoke a {@link UserFn} with the given arguments under an existing evaluation context, returning its
+ * value (its last expression, or a `return` value). Enforces the recursion-depth budget.
+ *
+ * @param fn - the user function/component to call.
+ * @param args - positional arguments bound to the function's parameters.
+ * @param r - the ambient evaluation context (shared with the caller).
+ * @returns the value produced by the call.
+ */
 export function callUserFn(fn: UserFn, args: unknown[], r: Runner): unknown {
   if (++r.depth > r.opt.maxDepth) { r.depth--; throw new BudgetSignal('depth'); }
   const frame = new Environment(fn.closure);
@@ -1094,6 +742,9 @@ function readMember(container: unknown, key: string | number, expr: Expr, r: Run
   return null;
 }
 
+/** The language's canonical truthiness test (used by `if`/`&&`/`||`/`!` and filtering builtins).
+ *  @internal Exported so a standard-library builtin matches the language's own truthiness exactly
+ *  rather than re-deriving it; not part of the end-user API. */
 export function truthy(v: unknown): boolean {
   const d = descriptorOf(v);
   if (d?.truthy) return d.truthy(v);
@@ -1105,74 +756,17 @@ function toNum(v: unknown): number {
   if (typeof v === 'string') { const t = v.trim(); return t === '' ? NaN : Number(t); }
   return NaN;
 }
-function strOf(v: unknown): string {
+/** The language's canonical value→string coercion (used by string `+` and `join`): custom values via
+ *  their bounded `display`, primitives via String, collections via JSON.
+ *  @internal Exported so a standard-library string builtin stringifies exactly as the language does
+ *  rather than re-deriving it; not part of the end-user API. */
+export function strOf(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   const d = descriptorOf(v);
   if (d) return d.display ? d.display(v) : `[${d.name}]`;
   try { return JSON.stringify(v) ?? ''; } catch { return ''; }
-}
-/** Round half-to-even ("banker's rounding") — matches the shader `round` builtins so a `core` numeric
- *  result is bit-identical across targets (JS Math.round is half-up, which would diverge at x.5). */
-function roundHalfEven(x: number): number {
-  const f = Math.floor(x);
-  const diff = x - f;
-  if (diff < 0.5) return f;
-  if (diff > 0.5) return f + 1;
-  return f % 2 === 0 ? f : f + 1;   // exactly .5 → nearest even
-}
-/** The number of leading args each scalar numeric builtin reads. The scalar caller coerces exactly
- *  this many (fail-loud on the first non-numeric one), matching the pre-vec per-head arg-count guards. */
-const NUMERIC_ARITY: Readonly<Record<string, number>> = {
-  min: 2, max: 2, abs: 1, sign: 1, floor: 1, ceil: 1, round: 1, clamp: 3,
-  sqrt: 1, pow: 2, sin: 1, cos: 1, exp: 1, log: 1, fract: 1, step: 2, mix: 3, smoothstep: 3,
-  tan: 1, sinh: 1, cosh: 1, tanh: 1, asin: 1, acos: 1, atan: 1, atan2: 2,
-  exp2: 1, log2: 1, inverseSqrt: 1, degrees: 1, radians: 1, trunc: 1,
-};
-/** The pure scalar math for the numeric builtins, over already-coerced numbers (xs[0..2]). Returns a
- *  raw result — which may itself be NaN (e.g. pow(-2, 0.5), or sin(Infinity)), exactly as the direct
- *  Math.* call did before. `sqrt(x<0)` and `log(x<=0)` return NaN here; the SCALAR caller intercepts
- *  those domains first for their specific diagnostics, so it never observes this NaN — but the vec
- *  path uses it directly, keeping a NaN component (native shaders compute componentwise and never
- *  abort the whole vector). `round` is half-to-even for cross-target exactness. */
-function scalarMath(head: string, xs: readonly number[]): number {
-  const x = xs[0] ?? NaN; const y = xs[1] ?? NaN; const z = xs[2] ?? NaN;
-  switch (head) {
-    case 'min': return Math.min(x, y);
-    case 'max': return Math.max(x, y);
-    case 'abs': return Math.abs(x);
-    case 'sign': return Math.sign(x);
-    case 'floor': return Math.floor(x);
-    case 'ceil': return Math.ceil(x);
-    case 'round': return roundHalfEven(x);
-    case 'clamp': return Math.min(Math.max(x, y), z);
-    case 'sqrt': return x < 0 ? NaN : Math.sqrt(x);
-    case 'pow': return Math.pow(x, y);
-    case 'sin': return Math.sin(x);
-    case 'cos': return Math.cos(x);
-    case 'tan': return Math.tan(x);
-    case 'sinh': return Math.sinh(x);
-    case 'cosh': return Math.cosh(x);
-    case 'tanh': return Math.tanh(x);
-    case 'asin': return (x < -1 || x > 1) ? NaN : Math.asin(x);
-    case 'acos': return (x < -1 || x > 1) ? NaN : Math.acos(x);
-    case 'atan': return Math.atan(x);
-    case 'atan2': return Math.atan2(x, y);   // atan2(y, x): xs[0]=y (numerator), xs[1]=x (denominator)
-    case 'exp': return Math.exp(x);
-    case 'exp2': return Math.pow(2, x);
-    case 'log': return x <= 0 ? NaN : Math.log(x);
-    case 'log2': return x <= 0 ? NaN : Math.log2(x);
-    case 'inverseSqrt': return x <= 0 ? NaN : 1 / Math.sqrt(x);
-    case 'degrees': return x * 180 / Math.PI;
-    case 'radians': return x * Math.PI / 180;
-    case 'trunc': return Math.trunc(x);
-    case 'fract': return x - Math.floor(x);
-    case 'step': return y < x ? 0 : 1;          // step(edge, x) → x < edge ? 0 : 1
-    case 'mix': return x + (y - x) * z;
-    case 'smoothstep': { const t = y === x ? 0 : Math.min(Math.max((z - x) / (y - x), 0), 1); return t * t * (3 - 2 * t); }
-    default: return NaN;
-  }
 }
 /** Deep-freeze a DSL-created collection so it is immutable by construction. Recurses into arrays +
  *  plain objects; a function short-circuits at the first guard (typeof !== 'object'), so a handler
@@ -1189,7 +783,10 @@ function deepFreeze<T>(v: T): T {
   for (const val of Object.values(v as Record<string, unknown>)) deepFreeze(val);
   return Object.freeze(v) as T;
 }
-function looseEquals(a: unknown, b: unknown): boolean {
+/** The language's loose-equality relation (the `==` operator's semantics).
+ *  @internal Exported so a standard-library builtin (`includes`) matches `==` exactly rather than
+ *  re-implementing (and risking drift from) the language's own semantics; not part of the end-user API. */
+export function looseEquals(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || a === undefined) return b === null || b === undefined;
   if (b === null || b === undefined) return false;
@@ -1254,6 +851,25 @@ function execProgram(stmts: Stmt[], root: Environment, r: Runner, insideComponen
   return last;
 }
 
+/**
+ * Parse and evaluate a metael program, returning its value and diagnostics.
+ *
+ * The entry point of the language kernel. Total and non-throwing: a parse error, an author error, a
+ * budget/recursion limit, an unknown call, or a forbidden-key access all become diagnostics with a safe
+ * `null` value — nothing escapes into the host. Injected `data` is deep-frozen at the boundary, so the
+ * program cannot mutate anything the host passes in. The kernel privileges no builtin; supply the
+ * vocabulary a program needs via {@link EvalOptions.builtins}.
+ *
+ * @param source - the program source text.
+ * @param options - host capabilities, the determinism seed, injected data, and budget overrides
+ *                  ({@link EvalOptions}).
+ * @returns the produced value + the diagnostics collected during the run ({@link EvalResult}).
+ * @example
+ * ```ts
+ * const { value, diagnostics } = evaluateProgram('1 + 2', { host, env });
+ * // value === 3, diagnostics === []
+ * ```
+ */
 export function evaluateProgram(source: string, options: EvalOptions): EvalResult {
   const opt = {
     maxSteps: DEFAULT_MAX_STEPS, maxTimeMs: DEFAULT_MAX_TIME_MS, maxDepth: DEFAULT_MAX_DEPTH,

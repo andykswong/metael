@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { evaluateProgram, isUserFn } from '@metael/lang';
 import type { UserFn } from '@metael/lang';
 import { PlainStorageHost, RecordingHostEnv } from '@metael/lang';
@@ -8,7 +9,7 @@ import { checkMatch } from './oracle.ts';
 
 function kernelOf(src: string): { fn: UserFn; host: PlainStorageHost } {
   const host = new PlainStorageHost();
-  const res = evaluateProgram(src, { host, env: new RecordingHostEnv() });
+  const res = evaluateProgram(src, { host, env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
   if (!isUserFn(res.value)) throw new Error('expected kernel');
   return { fn: res.value, host };
 }

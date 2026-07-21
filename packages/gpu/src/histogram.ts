@@ -17,6 +17,7 @@
 // same guard `if (_b >= 0 && _b < i32(bins))` before `atomicAdd` — so both backends AGREE.
 import type { UserFn, Diagnostic, ReactiveHost, HostEnvironment, Expr, Stmt } from '@metael/lang';
 import { makeDiagnostic, makeCallable } from '@metael/lang';
+import { MATH_BUILTINS } from '@metael/math/lang';
 import { gateKernel, type GateVerdict } from './gate.ts';
 
 /** Gate a BIN-MAPPER for lowerability. A bin-mapper is DISTINCT from a map kernel and a reducer: exactly 1
@@ -117,7 +118,7 @@ export function cpuHistogram(binMapper: UserFn, inputValues: readonly number[], 
   const counts = new Array(bins).fill(0);
   const declineEnv: HostEnvironment = { resolveCall: () => ({ handled: false }) };
   for (const x of inputValues) {
-    const call = makeCallable(binMapper, { host, env: declineEnv });   // fresh budget per element
+    const call = makeCallable(binMapper, { host, env: declineEnv, builtins: [MATH_BUILTINS] });   // fresh budget per element
     const b = Math.trunc(Number(call(x)));
     if (Number.isFinite(b) && b >= 0 && b < bins) counts[b] += 1;   // drop out-of-range / non-finite bins
   }
