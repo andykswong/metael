@@ -2,33 +2,26 @@
 // becomes a class-tagged segment, and the gaps between tokens (whitespace + // comments, which the lexer
 // does not emit) become 'plain' segments reconstructed from span offsets. The editor overlay renders these
 // as <span class="tok-*">. Highlighting the language with the language's own lexer.
-import { lex } from '@metael/lang';
+import { lex, lexicalCategory } from '@metael/lang';
 import type { Token } from '@metael/lang';
 
 export type TokKind = 'keyword' | 'string' | 'number' | 'ident' | 'operator' | 'punct' | 'plain';
 
 export interface Segment { readonly text: string; readonly kind: TokKind }
 
-const KEYWORDS = new Set([
-  'component', 'function', 'const', 'let', 'if', 'else', 'for', 'of', 'while', 'return', 'true', 'false', 'null',
-]);
-const OPERATORS = new Set([
-  'arrow', 'assign', 'eq', 'neq', 'lt', 'le', 'gt', 'ge', 'plus', 'minus', 'star', 'slash', 'percent',
-  'and', 'or', 'not', 'question', 'ellipsis',
-]);
-const PUNCT = new Set([
-  'lbrace', 'rbrace', 'lbracket', 'rbracket', 'lparen', 'rparen', 'dot', 'comma', 'colon', 'semi',
-]);
-
+// The token → highlight-class mapping is derived from the language's own `lexicalCategory` so this
+// cold-start highlighter shares the lexer's single source of truth — no local copy of the
+// keyword/operator/punctuation partition to drift when the grammar changes.
 function kindOf(tok: Token): TokKind {
-  if (tok.type === 'eof') return 'plain';
-  if (KEYWORDS.has(tok.type)) return 'keyword';
-  if (tok.type === 'string') return 'string';
-  if (tok.type === 'number') return 'number';
-  if (tok.type === 'ident') return 'ident';
-  if (OPERATORS.has(tok.type)) return 'operator';
-  if (PUNCT.has(tok.type)) return 'punct';
-  return 'plain';
+  const cat = lexicalCategory(tok.type);
+  switch (cat) {
+    case 'eof': return 'plain';
+    case 'keyword': return 'keyword';
+    case 'literal': return tok.type === 'string' ? 'string' : 'number';
+    case 'ident': return 'ident';
+    case 'operator': return 'operator';
+    case 'punctuation': return 'punct';
+  }
 }
 
 /** Segment the full source. Concatenating segment.text reproduces `src` exactly. */

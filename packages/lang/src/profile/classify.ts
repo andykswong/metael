@@ -1,10 +1,11 @@
 // A pure, static analysis over a function's AST: is it "core-compliant" — i.e. does it use ONLY
 // closure-free, heap-free constructs so it could lower to a restricted (compile-to-shader / fixed-
 // data-model) target, not just the interpreter? Reports why-not for each disqualifier. No evaluation,
-// no side effects: purely reads the AST + the builtins catalog.
-import type { Expr, Stmt, Diagnostic } from '@metael/lang';
-import { makeDiagnostic } from '@metael/lang';
-import { BUILTINS } from './registry-data.ts';
+// no side effects: purely reads the AST + the active profile's builtins.
+import type { Expr, Stmt } from '../ast.ts';
+import type { Diagnostic } from '../diagnostics.ts';
+import { makeDiagnostic } from '../diagnostics.ts';
+import type { Profile } from './profile.ts';
 
 /** The outcome of {@link classifyProfile}: whether a function is core-compliant, plus a why-not
  *  diagnostic for every disqualifying construct found. */
@@ -16,9 +17,11 @@ export interface ProfileResult {
   readonly reasons: Diagnostic[];
 }
 
-/** Classify a `function`/`component`-shaped node (anything with a `body: Stmt[]`). Only `function`
- *  bodies are meaningfully core-classifiable, but the walk is shape-driven so it accepts either. */
-export function classifyProfile(fn: { readonly body: readonly Stmt[] }): ProfileResult {
+/** Classify a `function`/`component`-shaped node (anything with a `body: Stmt[]`) against a
+ *  {@link Profile}. Only `function` bodies are meaningfully core-classifiable, but the walk is
+ *  shape-driven so it accepts either. Reads the profile's builtins to decide whether a called name is
+ *  a `'core'` intrinsic or a `'host'` capability. */
+export function classifyProfile(fn: { readonly body: readonly Stmt[] }, profile: Profile): ProfileResult {
   const reasons: Diagnostic[] = [];
   const flag = (message: string, span?: Expr['span']): void => {
     reasons.push(makeDiagnostic('ML-LANG-PROFILE', message, span));
@@ -39,7 +42,7 @@ export function classifyProfile(fn: { readonly body: readonly Stmt[] }): Profile
       case 'cond': walkExpr(e.test); walkExpr(e.then); walkExpr(e.else); return;
       case 'call': {
         if (e.callee.kind === 'ident') {
-          const spec = BUILTINS[e.callee.name];
+          const spec = profile.builtins.get(e.callee.name);
           if (spec) {
             if (spec.profile === 'host') flag(`calls host builtin '${e.callee.name}' (heap/closure), not core-compliant`, e.span);
             // a 'core' builtin is fine; still walk args

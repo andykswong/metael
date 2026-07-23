@@ -22,6 +22,9 @@ component_management:
     - component_id: "@metael/gpu"
       paths:
         - "packages/gpu/src/**"
+    - component_id: "@metael/lsp"
+      paths:
+        - "packages/lsp/src/**"
 coverage:
   status:
     project:

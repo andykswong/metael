@@ -1,4 +1,4 @@
-import { lex, type Token, type TokenType } from './lexer.ts';
+import { lex, lexicalCategory, type Token, type TokenType } from './lexer.ts';
 import type { Diagnostic, SourceSpan } from './diagnostics.ts';
 import { makeDiagnostic } from './diagnostics.ts';
 import type { Expr, Stmt, BinOp, Pattern, Program, ArrayElement, ObjectEntry } from './ast.ts';   // Stmt: the statement layer (decls + control flow) + arrow block bodies
@@ -21,12 +21,6 @@ export interface ParseExprResult {
 export const MAX_PARSE_DEPTH = 512;
 /** Thrown internally when the nesting cap trips; caught by the public entrypoints → diagnostic. */
 class ParseDepthSignal extends Error {}
-
-// Reserved-word token types that are still legal as a `.member` property name (JS allows `x.if`,
-// `x.const`, etc.). A property after `.` must be one of these, an `ident`, or a quoted `string`.
-const KEYWORD_TOKENS: ReadonlySet<TokenType> = new Set<TokenType>([
-  'component', 'function', 'const', 'let', 'if', 'else', 'for', 'of', 'while', 'return', 'true', 'false', 'null',
-]);
 
 // Precedence tiers (low→high). Each entry: matching token types → BinOp.
 const BINARY_TIERS: Array<Partial<Record<TokenType, BinOp>>> = [
@@ -213,7 +207,9 @@ export class Parser {
         // The property must be a NAME-like token: an identifier, a keyword (JS allows `x.if`), or a
         // quoted string (the printer's round-trip form `a."x-y"`). A number/operator/punctuation after
         // `.` is a fail-loud parse error, not a silent bogus member (`obj.5`, `obj.` → ML-LANG-PARSE).
-        const nameLike = name.type === 'ident' || name.type === 'string' || KEYWORD_TOKENS.has(name.type);
+        // A reserved word is name-like here: it is derived from the lexer's own classification, so the
+        // set of keyword-shaped members stays in lock-step with the grammar (JS allows `x.if`, `x.const`).
+        const nameLike = name.type === 'ident' || name.type === 'string' || lexicalCategory(name.type) === 'keyword';
         if (!nameLike) this.diagnostics.push(makeDiagnostic('ML-LANG-PARSE', `expected property name after '.', got ${name.type}`, name.span));
         if (FORBIDDEN_KEYS.has(name.value)) this.diagnostics.push(makeDiagnostic('ML-LANG-FORBIDDEN', `forbidden property '${name.value}'`, name.span));
         e = { kind: 'member', object: e, property: name.value, span: t.span };
@@ -335,7 +331,7 @@ export class Parser {
         // object literal — emit ONE diagnostic + skip to the closing `}` rather than flailing per-token
         // into a cascade (e.g. a stray `{ compute() }` after a call). One clear message, clean recovery.
         const keyTok = this.peek();
-        const keyIsName = keyTok.type === 'ident' || keyTok.type === 'string' || KEYWORD_TOKENS.has(keyTok.type);
+        const keyIsName = keyTok.type === 'ident' || keyTok.type === 'string' || lexicalCategory(keyTok.type) === 'keyword';
         if (!keyIsName || this.toks[this.pos + 1]?.type !== 'colon') {
           this.skipMalformedToGroupClose('malformed object literal — an entry must be `key: value` (a bare block/wrap is not valid in value position)', keyTok.span);
           break;

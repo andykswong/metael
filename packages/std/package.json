@@ -18,7 +18,7 @@
     "test": "vitest run --root ../.. packages/std"
   },
   "repository": { "type": "git", "url": "git+https://github.com/andykswong/metael.git", "directory": "packages/std" },
-  "keywords": ["metael", "stdlib", "collections", "string", "typescript"],
+  "keywords": ["metael", "stdlib", "builtins", "collections", "string", "structural", "datetime", "typescript"],
   "author": "Andy K.S. Wong <andykswong@outlook.com>",
   "license": "MIT",
   "bugs": { "url": "https://github.com/andykswong/metael/issues" },

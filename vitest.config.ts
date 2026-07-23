@@ -5,6 +5,7 @@ import { playwright } from '@vitest/browser-playwright';
 // Resolve workspace packages from live source (mirrors tsconfig paths), not built dist via the
 // node_modules symlink. Applied per project — projects resolve independently.
 const alias = {
+  '@metael/lang/profile': fileURLToPath(new URL('./packages/lang/src/profile/index.ts', import.meta.url)),
   '@metael/lang': fileURLToPath(new URL('./packages/lang/src/index.ts', import.meta.url)),
   '@metael/runtime': fileURLToPath(new URL('./packages/runtime/src/index.ts', import.meta.url)),
   '@metael/vdom/lang': fileURLToPath(new URL('./packages/vdom/src/lang/index.ts', import.meta.url)),
@@ -15,6 +16,9 @@ const alias = {
   '@metael/math/lang': fileURLToPath(new URL('./packages/math/src/lang/index.ts', import.meta.url)),
   '@metael/math': fileURLToPath(new URL('./packages/math/src/core/index.ts', import.meta.url)),
   '@metael/std': fileURLToPath(new URL('./packages/std/src/index.ts', import.meta.url)),
+  '@metael/lsp/service': fileURLToPath(new URL('./packages/lsp/src/service/index.ts', import.meta.url)),
+  '@metael/lsp/worker': fileURLToPath(new URL('./packages/lsp/src/worker/index.ts', import.meta.url)),
+  '@metael/lsp': fileURLToPath(new URL('./packages/lsp/src/index.ts', import.meta.url)),
 };
 
 export default defineConfig({

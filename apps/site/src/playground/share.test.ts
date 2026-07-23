@@ -38,6 +38,14 @@ describe('share round-trip', () => {
     if (!res.ok) expect(res.diagnostic.code).toBe('ML-PLAY-SHARE');
   });
 
+  it('round-trips a gpu-target state (gpu is a valid decode target)', async () => {
+    const state: ShareState = { source: 'component App() {}', target: 'gpu' };
+    const frag = await encodeState(state);
+    const res = await decodeState(frag);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.state.target).toBe('gpu');
+  });
+
   it('rejects a well-formed-but-wrong-shape payload', async () => {
     const frag = 'j' + encodeURIComponent(JSON.stringify({ nope: 1 }));
     const res = await decodeState(frag);

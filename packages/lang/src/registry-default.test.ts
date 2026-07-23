@@ -9,7 +9,7 @@ const H = () => ({ host: new PlainStorageHost(), env: new RecordingHostEnv() });
 describe('lang ships an empty registry; builtins are injected', () => {
   it('an injected module resolves', () => {
     const mod: BuiltinModule = { builtins: [{
-      spec: { name: 'inc', profile: 'core', portability: 'exact', takesClosure: false, arity: [1, 1] },
+      name: 'inc',
       invoke: (ctx) => (ctx.evalArg(0) as number) + 1,
     }] };
     expect(evaluateProgram('inc(41)', { ...H(), builtins: [mod] }).value).toBe(42);

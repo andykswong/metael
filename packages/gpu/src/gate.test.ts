@@ -236,6 +236,30 @@ describe('gate — robustness + wrapping block', () => {
   });
 });
 
+describe('gate — a value-position range() call is rejected at the gate (not at emit)', () => {
+  const reject = (src: string) => { const { fn, host } = kernelOf(src); return gateKernel(fn, host); };
+  it('rejects range() used as a VALUE (const init / return) with MLGPU-NOT-LOWERABLE — before any emitter', () => {
+    // `range` is a `core`/`exact` intrinsic in the gate catalog, so the generic host/lowerName reject branch
+    // never fires for it. But `range(n)` returns a COLLECTION, which has no scalar/vec lowering — the only
+    // lowerable use is as the bound of a `for (… of range(n))` loop (intercepted in the `for` case). A value-
+    // position `range()` call must be rejected here at the gate so it never reaches the emitter (which would
+    // otherwise throw "no WGSL/GLSL lowering for builtin 'range'" → an MLGPU-EMIT). gate ↔ emitter agree.
+    const v = reject(`component k(i) { const r = range(i)\n return r } k`);
+    expect(v.core).toBe(false);
+    const notLowerable = v.reasons.find((r) => r.code === 'MLGPU-NOT-LOWERABLE' && /range/.test(r.message));
+    expect(notLowerable).toBeDefined();
+    // The gate rejects it — it must NOT slip through to the emitter (no MLGPU-EMIT).
+    expect(v.reasons.some((r) => r.code === 'MLGPU-EMIT')).toBe(false);
+  });
+  it('REGRESSION: a SUPPORTED `for (… of range(n))` loop is unaffected (still gates core=true)', () => {
+    // The `for` case walks ONLY the bound `range(n)` arg, never the `range(...)` call node through walkExpr,
+    // so the new value-position reject must NOT fire for the supported loop form.
+    const v = reject(`component k(i) { let acc = 0\n for (const j of range(4)) { acc = acc + j }\n return acc } k`);
+    expect(v.core).toBe(true);
+    expect(v.reasons).toEqual([]);
+  });
+});
+
 describe('gate — a matrix return has no output-cell form', () => {
   it('a matrix returned to a scalar output is rejected', () => {
     const { fn, host } = kernelOf('component k(i) { return mat2(1,2,3,4) } k');
@@ -297,11 +321,15 @@ describe('gate — accepts EXACTLY the vec/mat op·shapes the interpreter accept
 });
 
 describe('gate — rand() cannot be lowered (no deterministic shader match)', () => {
-  it('a kernel using rand() is non-core with MLGPU-NOT-LOWERABLE', () => {
+  it('a kernel using rand() is non-core with the PRECISE deterministic-oracle rejection (not a mislabeled BAD-INPUT)', () => {
     const { fn, host } = kernelOf('component k(i) { return rand() } k');
     const v = gateKernel(fn, host, 1);
     expect(v.core).toBe(false);
-    expect(v.reasons.some((r) => r.code === 'MLGPU-NOT-LOWERABLE' && /rand/.test(r.message))).toBe(true);
+    // The dedicated rand branch must fire: the message names the deterministic-oracle mismatch, not the
+    // generic "not a lowerable builtin" fallback. (`rand` is recognized in the gate catalog for this reason.)
+    expect(v.reasons.some((r) => r.code === 'MLGPU-NOT-LOWERABLE' && /cannot match the deterministic interpreter oracle/.test(r.message))).toBe(true);
+    // `rand` must NOT be mislabeled as a missing kernel input (the free-name path) — it is a recognized builtin.
+    expect(v.reasons.some((r) => r.code === 'MLGPU-BAD-INPUT')).toBe(false);
   });
 });
 

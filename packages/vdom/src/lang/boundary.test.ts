@@ -13,7 +13,7 @@ describe('@metael/vdom/lang import boundary', () => {
     for (const f of files) for (const m of readFileSync(join(dir, f), 'utf8').matchAll(importRe)) {
       const spec = m[1]!;
       if (spec.startsWith('.')) continue;                       // core sibling or lang sibling
-      if (spec === '@metael/lang' || spec === '@metael/runtime') continue;
+      if (spec === '@metael/lang' || spec === '@metael/lang/profile' || spec === '@metael/runtime') continue;
       offenders.push(`${f}: ${spec}`);
     }
     expect(offenders).toEqual([]);

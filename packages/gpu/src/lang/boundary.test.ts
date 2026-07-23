@@ -9,7 +9,7 @@ describe('@metael/gpu/lang import boundary', () => {
     const files = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('.browser.test.ts'));
     expect(files.length).toBeGreaterThan(0);
     const importRe = /\bfrom\s+['"]([^'"]+)['"]/g;
-    const allowed = new Set(['@metael/lang', '@metael/runtime', '@metael/math', '@metael/math/lang']);
+    const allowed = new Set(['@metael/lang', '@metael/lang/profile', '@metael/runtime', '@metael/math', '@metael/math/lang']);
     const offenders: string[] = [];
     for (const f of files) for (const m of readFileSync(join(dir, f), 'utf8').matchAll(importRe)) {
       const spec = m[1]!;

@@ -9,9 +9,14 @@
 // vec/mat construct + operate natively. Unlike WGSL, GLSL has no `let` type inference — a `const`/`let`
 // must be declared with a concrete type, so each initializer's GLSL type is inferred (float / vecN / matN).
 import type { UserFn, Expr, Stmt } from '@metael/lang';
-import { BUILTINS } from '@metael/math/lang';
+import { mathProfile } from '@metael/math/lang';
+import { composeProfiles, coreIntrinsicsProfile } from '@metael/lang/profile';
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
+
+// The name → spec catalog the emitter reads a called builtin's `lowerName` from — the same math + `range`
+// catalog the gate composes (a gate-accepted call always resolves here). Computed once at module load.
+const GPU_CATALOG = composeProfiles(mathProfile, coreIntrinsicsProfile).builtins;
 
 // Core-exact builtins the gate accepts but that carry no registry `lowerName` — they map to a native GLSL
 // function of the same name (round → roundEven so ties-to-even matches the interpreter/CPU + WGSL).
@@ -278,7 +283,7 @@ function emitExpr(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       // placeholder rather than the native builtin. Checked BEFORE the builtin branches so `function abs(){…}`
       // never lowers to abs().
       if (bindings.byName.get(name)?.role === 'callee') return `/* shadowed builtin ${name} (helper — gate-rejected) */ 0.0`;
-      const spec = BUILTINS[name];
+      const spec = GPU_CATALOG.get(name);
       const args = e.args.map((a) => emitExpr(a, tenv, bindings)).join(', ');
       if (VEC_CTORS.has(name)) return `${name}(${args})`;   // GLSL vecN/matN are not generic
       // Domain-restricted transcendentals: the interpreter maps an out-of-domain input to 0 (a cell). Guard
@@ -470,7 +475,7 @@ function glslType(e: Expr, tenv: TypeEnv, bindings: BindingTable): string {
       // fallback below (which would wrongly declare `mat2 d = determinant(...)`).
       if (name === 'dot' || name === 'length' || name === 'distance' || name === 'determinant') return 'float';
       if (GLSL_CORE_FN[name]) return e.args[0] ? glslType(e.args[0], tenv, bindings) : 'float';
-      const spec = BUILTINS[name];
+      const spec = GPU_CATALOG.get(name);
       if (spec?.lowerName && e.args[0]) return glslType(e.args[0], tenv, bindings);   // transcendentals + reflect/refract: componentwise vec
       return 'float';
     }

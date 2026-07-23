@@ -1,13 +1,33 @@
 // The compute-lowerability gate: walk the kernel AST + the binding table and decide GPU-lowerability,
-// reusing BUILTINS data + descriptorOf(v).lower. NOT classifyProfile (which rejects array index / for-of /
-// member / every user call — it would reject every kernel this engine runs). Reasons are MLGPU-* +
-// span-anchored. A buffer has no whole-value form in a shader — it is valid ONLY as `a[i]` or `a.length`;
-// anywhere else it is flagged. Helper (callee) bodies are gated recursively against their own closures.
+// reusing the builtin catalog's spec data + descriptorOf(v).lower. NOT classifyProfile (which rejects array
+// index / for-of / member / every user call — it would reject every kernel this engine runs). Reasons are
+// MLGPU-* + span-anchored. A buffer has no whole-value form in a shader — it is valid ONLY as `a[i]` or
+// `a.length`; anywhere else it is flagged. Helper (callee) bodies are gated recursively against their closures.
 import type { UserFn, Expr, Stmt, Diagnostic, ReactiveHost } from '@metael/lang';
 import { makeDiagnostic } from '@metael/lang';
-import { BUILTINS } from '@metael/math/lang';
+import { mathProfile } from '@metael/math/lang';
+import { composeProfiles, coreIntrinsicsProfile } from '@metael/lang/profile';
+import type { BuiltinSpec } from '@metael/lang/profile';
 import { buildBindingTable, collectFreeNames } from './binding.ts';
 import type { BindingTable } from './binding.ts';
+
+// `rand` is a standard-library builtin (it lives in `@metael/std`, not the math or core-intrinsics profiles),
+// but the gate must still RECOGNIZE it so a `rand()`-in-kernel call routes to the dedicated "cannot match the
+// deterministic interpreter oracle" rejection below — rather than the misleading "not a kernel input"
+// (free-name) path or the generic "not a lowerable builtin" fallback. gpu must not import `@metael/std`
+// (layering: gpu depends on lang/runtime/math only) and `rand` is not a language-kernel intrinsic like `range`
+// (adding it to `coreIntrinsicsProfile` would wrongly leak it into completion/classification), so the gate
+// declares a tiny local spec purely to make `GPU_CATALOG.has('rand')` true. `rand` is NEVER lowerable — this
+// entry only steers the diagnostic; it never reaches an emitter (the kernel is always gate-rejected).
+const RAND_SPEC: BuiltinSpec = { name: 'rand', profile: 'host', portability: 'cpu-only', takesClosure: false, arity: [0, 0] };
+
+// The name → spec catalog the gate recognizes: the numeric math builtins + the language kernel's own `range`
+// intrinsic (the bounded-loop primitive collected as a free name in `for (… of range(n))`) + `rand` (recognized
+// only to route it to its precise rejection). A fresh Map so the RAND_SPEC insert never mutates the composed
+// profile's map. Computed once at module load. A called `host`/no-lowerName builtin is rejected NOT-LOWERABLE;
+// a free name present here (like `range`) is a valid builtin, not a missing kernel input.
+const GPU_CATALOG = new Map(composeProfiles(mathProfile, coreIntrinsicsProfile).builtins);
+GPU_CATALOG.set('rand', RAND_SPEC);
 
 /** The outcome of gating a kernel for GPU-lowerability: whether it can lower, why not (if not), and the
  *  resolved binding table (reused by the emitters + the oracle so they see the SAME name resolution). */
@@ -450,7 +470,7 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
 
   // Every free name must resolve to a supported binding; else reject with the reason for WHY.
   for (const name of free) {
-    if (BUILTINS[name]) continue;                       // a builtin call (validated in walkExpr)
+    if (GPU_CATALOG.has(name)) continue;                // a builtin call (validated in walkExpr)
     const b = bindings.byName.get(name);
     if (!b) {
       // A common shape is indexing a member of a resource wrapper (`rA.value[i]`) — the kernel closes over
@@ -555,7 +575,7 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
       case 'cond': walkExpr(e.test); walkExpr(e.then); walkExpr(e.else); return;
       case 'call': {
         if (e.callee.kind === 'ident') {
-          const spec = BUILTINS[e.callee.name];
+          const spec = GPU_CATALOG.get(e.callee.name);
           const b = bindings.byName.get(e.callee.name);
           // A user function BINDING wins over a builtin of the same name — the interpreter resolves the
           // closure binding first, so `function abs(x){…}` SHADOWS the `abs` intrinsic. Check the callee
@@ -566,6 +586,14 @@ function gateFn(fn: UserFn, host: ReactiveHost, reasons: Diagnostic[], visited: 
           if (b?.role === 'callee') { flag('MLGPU-NOT-LOWERABLE', `calling a helper function ('${e.callee.name}') is not yet lowerable — inline it into the kernel`, e.span); }
           else if (spec) {
             if (e.callee.name === 'rand') flag('MLGPU-NOT-LOWERABLE', `rand() cannot be lowered to a compute kernel — it cannot match the deterministic interpreter oracle`, e.span);
+            // `range` is a `core`/`exact` intrinsic (so the generic host/lowerName reject below never fires for
+            // it), but `range(n)` produces a COLLECTION with no scalar/vec lowering — the emitters have no
+            // `range` lowering. Its ONLY lowerable use is as the bound of a `for (… of range(n))` loop, which the
+            // `for` case intercepts (walking only the bound arg, never this call node). A value-position
+            // `range(...)` call (a const init, a return, an arg) reaching walkExpr is therefore not lowerable —
+            // reject it HERE so it never slips through to the emitter (which would throw → an MLGPU-EMIT). gate ↔
+            // emitter agree.
+            else if (e.callee.name === 'range') flag('MLGPU-NOT-LOWERABLE', `range() is only lowerable as the bound of a 'for (… of range(n))' loop, not as a value`, e.span);
             else if (spec.profile === 'host' || (spec.portability === 'cpu-only' && !spec.lowerName)) flag('MLGPU-NOT-LOWERABLE', `builtin '${e.callee.name}' has no shader lowering`, e.span);
             // WGSL has NO builtin inverse() — the emitter hand-emits a per-SIZE `_invN` helper, so the arg's square
             // size must be STATICALLY resolvable (a mat ctor, a matrix-typed local, or a transpose/inverse chain

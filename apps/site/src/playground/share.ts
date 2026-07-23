@@ -93,7 +93,7 @@ export async function decodeState(fragment: string): Promise<DecodeResult> {
       return fail(`unknown share encoding '${scheme ?? ''}'`);
     }
     const parsed = JSON.parse(json) as ShareState;
-    if (typeof parsed?.source !== 'string' || (parsed.target !== 'ui' && parsed.target !== 'compute')) {
+    if (typeof parsed?.source !== 'string' || !['ui', 'compute', 'gpu'].includes(parsed.target as string)) {
       return fail('share payload is not a valid playground state');
     }
     return { ok: true, state: parsed };

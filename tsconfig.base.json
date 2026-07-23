@@ -14,6 +14,7 @@
     "noEmit": true,
     "paths": {
       "@metael/lang": ["./packages/lang/src/index.ts"],
+      "@metael/lang/profile": ["./packages/lang/src/profile/index.ts"],
       "@metael/runtime": ["./packages/runtime/src/index.ts"],
       "@metael/vdom": ["./packages/vdom/src/index.ts"],
       "@metael/vdom/lang": ["./packages/vdom/src/lang/index.ts"],
@@ -22,7 +23,10 @@
       "@metael/gpu": ["./packages/gpu/src/index.ts"],
       "@metael/math": ["./packages/math/src/core/index.ts"],
       "@metael/math/lang": ["./packages/math/src/lang/index.ts"],
-      "@metael/std": ["./packages/std/src/index.ts"]
+      "@metael/std": ["./packages/std/src/index.ts"],
+      "@metael/lsp/service": ["./packages/lsp/src/service/index.ts"],
+      "@metael/lsp/worker": ["./packages/lsp/src/worker/index.ts"],
+      "@metael/lsp": ["./packages/lsp/src/index.ts"]
     }
   }
 }

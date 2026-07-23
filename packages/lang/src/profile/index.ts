@@ -1,0 +1,10 @@
+export type { BuiltinProfile, Portability, BuiltinSpec } from './types.ts';
+export { defineBuiltin, toBuiltinModule, builtinSpecMap } from './define-builtin.ts';
+export type { DefinedBuiltin } from './define-builtin.ts';
+export type { HeadParam, HeadSpec, MemberSpec, TypeDescriptorMeta } from './types.ts';
+export { swizzleMembers } from './members.ts';
+export { composeProfiles } from './profile.ts';
+export type { Profile, ComposedProfile } from './profile.ts';
+export { coreIntrinsicsProfile } from './core-intrinsics.ts';
+export { classifyProfile } from './classify.ts';
+export type { ProfileResult } from './classify.ts';

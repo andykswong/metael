@@ -3,7 +3,9 @@
 // it in via evaluateProgram(src, { …, builtins: [STD_BUILTINS] }). Imports ONLY @metael/lang (the registry
 // seam + the language's own truthiness/equality/stringify/forbidden-key primitives), so the standard
 // library stays in lockstep with the language's semantics rather than re-deriving them.
+import { toBuiltinModule, builtinSpecMap } from '@metael/lang/profile';
 import type { BuiltinModule } from '@metael/lang';
+import type { Profile, DefinedBuiltin } from '@metael/lang/profile';
 import { COLLECTION_BUILTINS } from './collections.ts';
 import { STRING_BUILTINS } from './string.ts';
 import { STRUCTURAL_BUILTINS } from './structural.ts';
@@ -17,11 +19,17 @@ export { RANDOM_BUILTINS } from './random.ts';
 export { DATETIME_BUILTINS } from './datetime.ts';
 export { defaultCompare, stableSort } from './sort.ts';
 
+const ALL: readonly DefinedBuiltin[] = [
+  ...COLLECTION_BUILTINS, ...STRING_BUILTINS, ...STRUCTURAL_BUILTINS, ...RANDOM_BUILTINS, ...DATETIME_BUILTINS,
+];
+
 /** The standard-library module a consumer injects at evaluateProgram: collection (map/filter/reduce/…),
  *  string (split/join/…/codePointAt), structural (keys/values/entries/object/has), random (rand — reads the
  *  seeded RNG the language owns), and datetime (now/monotonic — read the host's injected clock capability)
  *  builtins. NOTE: `range` is NOT here — it stays a language-kernel intrinsic (a bounded-loop primitive the
  *  compute-lowering gate + interpreter oracle depend on), dispatched by lang, not the standard library. */
-export const STD_BUILTINS: BuiltinModule = {
-  builtins: [...COLLECTION_BUILTINS, ...STRING_BUILTINS, ...STRUCTURAL_BUILTINS, ...RANDOM_BUILTINS, ...DATETIME_BUILTINS],
-};
+export const STD_BUILTINS: BuiltinModule = toBuiltinModule(ALL);
+
+/** The standard library's tooling profile — the static specs of its builtins (for a classifier / a
+ *  language-service consumer), with no head or custom-type vocabulary of its own. */
+export const stdProfile: Profile = { id: 'std', builtins: builtinSpecMap(ALL), heads: new Map(), types: new Map() };

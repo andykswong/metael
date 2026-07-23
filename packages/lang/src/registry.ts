@@ -6,38 +6,6 @@ import type { Expr } from './ast.ts';
 import type { SourceSpan } from './diagnostics.ts';
 import type { GenerationRef } from './ports.ts';
 
-/** A builtin's capability profile (metadata for a classifier / a compile consumer). */
-export type BuiltinProfile = 'core' | 'host';
-/** How faithfully a builtin's result reproduces AWAY from the interpreter: `'exact'` (bit-for-bit
- *  identical on any target), `'gpu-tolerant'` (reproducible within a GPU's floating-point tolerance), or
- *  `'cpu-only'` (must run on the interpreter — not reproducible on a GPU target). Metadata for a
- *  classifier / a compile consumer; it does not affect interpretation. */
-export type Portability = 'exact' | 'gpu-tolerant' | 'cpu-only';
-/** The static self-description a {@link Builtin} declares: its call name, capability profile, and the
- *  metadata a classifier / a compile consumer reads to decide whether (and how) the call reproduces on
- *  another target. Pure data — it carries no behavior. */
-export interface BuiltinSpec {
-  /** The call head this builtin answers to — the identifier used at the call site (e.g. `'sqrt'`). */
-  readonly name: string;
-  /** Whether this is a domain-agnostic `'core'` builtin or a `'host'`-supplied capability
-   *  ({@link BuiltinProfile}). */
-  readonly profile: BuiltinProfile;
-  /** How faithfully the result reproduces away from the interpreter ({@link Portability}). */
-  readonly portability: Portability;
-  /** True when the builtin accepts a closure argument (a mapping/filtering predicate), so a consumer
-   *  knows a call site may carry an arrow/function value. */
-  readonly takesClosure: boolean;
-  /** The accepted argument-count range as `[min, max]`, inclusive. */
-  readonly arity: readonly [number, number];
-  /** True when the builtin is DECLARED in the catalog but NOT dispatched — a name whose classification is
-   *  reserved for a future consumer, without adding a code path now. */
-  readonly future?: boolean;
-  /** The name this builtin lowers to on a compile target when it differs from {@link BuiltinSpec.name}
-   *  (e.g. a source head that maps to a different intrinsic in generated code). Omitted when the target
-   *  name matches the call name. */
-  readonly lowerName?: string;
-}
-
 /** The capability context a builtin uses to interact with the interpreter — the ONLY channel by which a
  *  builtin reaches evaluation, budget, diagnostics, determinism, and reactive plumbing. It exposes NO
  *  concrete value constructor (vec/mat/buffer builders live in the library, not here). */
@@ -91,16 +59,11 @@ export interface BuiltinCtx {
 }
 
 /** How the interpreter invokes a builtin. `argExprs` are UNEVALUATED — the builtin pulls values via
- *  ctx.evalArg(i) so closure-taking + short-circuit builtins stay expressible. */
+ *  `ctx.evalArg(i)` so closure-taking + short-circuit builtins stay expressible. */
 export interface Builtin {
-  /** The static self-description used for dispatch and classification ({@link BuiltinSpec}). */
-  readonly spec: BuiltinSpec;
-  /** Run the builtin. Called by the interpreter when a call head resolves to this builtin.
-   *  @param ctx - the capability context ({@link BuiltinCtx}), the builtin's only channel back into the
-   *               interpreter.
-   *  @param argExprs - the UNEVALUATED argument expressions; the builtin pulls each value via
-   *                    `ctx.evalArg(i)`, so closure-taking and short-circuit builtins stay expressible.
-   *  @returns the call's result value. */
+  /** The call head this builtin answers to (the interpreter's dispatch key). */
+  readonly name: string;
+  /** Run the builtin. `argExprs` are unevaluated; pull each value via `ctx.evalArg(i)`. */
   invoke(ctx: BuiltinCtx, argExprs: readonly Expr[]): unknown;
 }
 
@@ -117,7 +80,7 @@ export type BuiltinRegistry = ReadonlyMap<string, Builtin>;
 /** Build a name→Builtin map. Later modules override earlier ones on a name clash (last wins). */
 export function buildRegistry(modules: readonly BuiltinModule[]): BuiltinRegistry {
   const map = new Map<string, Builtin>();
-  for (const mod of modules) for (const b of mod.builtins) map.set(b.spec.name, b);
+  for (const mod of modules) for (const b of mod.builtins) map.set(b.name, b);
   return map;
 }
 

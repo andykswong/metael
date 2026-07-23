@@ -3,8 +3,8 @@ import { evaluateProgram, Runner, BudgetSignal } from './evaluate.ts';
 import { makeSeededRng } from './determinism.ts';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 import type { Arg } from './ports.ts';
-import { BUILTINS, MATH_BUILTINS } from '@metael/math/lang';
-import { STD_BUILTINS } from '@metael/std';
+import { MATH_BUILTINS, mathProfile } from '@metael/math/lang';
+import { STD_BUILTINS, stdProfile } from '@metael/std';
 
 const run = (src: string, data?: unknown) =>
   evaluateProgram(src, { data, host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS, STD_BUILTINS] });
@@ -589,7 +589,8 @@ describe('registry ↔ dispatch cross-check', () => {
     // or a case exists without a catalog row). rand/range are seeded intrinsics handled before the
     // collection block; the rest resolve either in the collection cascade or via the injected numeric
     // module (MATH_BUILTINS is wired into `run`).
-    for (const name of Object.keys(BUILTINS)) {
+    const catalog = new Set([...mathProfile.builtins.keys(), ...stdProfile.builtins.keys()]);
+    for (const name of catalog) {
       if (name === 'rand' || name === 'range') continue;
       const codes = run(`${name}(5, 5, 5);`).diagnostics.map((d) => d.code);
       expect(codes, `builtin '${name}' fell through to UNKNOWN-CALL`).not.toContain('ML-LANG-UNKNOWN-CALL');

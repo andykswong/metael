@@ -20,7 +20,7 @@ The same eval-free reactive-DSL kernel — lexer → parser → tree-walking int
 
 ## Repo Structure
 
-This is an npm **workspaces monorepo**. The `@metael/{lang,runtime,vdom,gpu}` packages are built + green on `main`; the two standard-library packages `@metael/{math,std}` are built + green **held on `feat-metael-std-math`** (not yet merged/published).
+This is an npm **workspaces monorepo**. The `@metael/{lang,runtime,vdom,gpu,math,std,lsp}` packages are all built + green.
 
 ```
 packages/
@@ -34,8 +34,17 @@ packages/
 │                               registry seam, not privileged by lang) + the host-injection port INTERFACES
 │                               (HostEnvironment/ReactiveHost/KeyMinter) + test doubles (PlainStorageHost/
 │                               RecordingHostEnv/PathKeyMinter). Zero runtime deps; imports NOTHING
-│                               domain-specific (self-contained).
-├── math/     @metael/math    — [BUILT + GREEN — held on feat-metael-std-math] the numeric standard library,
+│                               domain-specific (self-contained). The `@metael/lang/profile` SUBPATH owns the
+│                               vocabulary-METADATA (tooling) layer: BuiltinSpec/HeadSpec/MemberSpec/Profile
+│                               + composeProfiles (keyed-union of N profiles) + classifyProfile(fn, profile)
+│                               (the static capability classifier) + defineBuiltin/toBuiltinModule/
+│                               builtinSpecMap (co-locate a builtin's spec + invoke, project two ways) +
+│                               coreIntrinsicsProfile (publishes the `range` intrinsic's spec). The kernel
+│                               `Builtin` is slimmed to `{ name, invoke }` (the spec moved to the profile
+│                               layer's `DefinedBuiltin`); the CORE↛profile boundary holds (lang core,
+│                               src/*.ts excluding src/profile/, never imports src/profile/ — guarded by
+│                               packages/lang/src/profile/boundary.test.ts).
+├── math/     @metael/math    — [BUILT + GREEN] the numeric standard library,
 │                               in TWO layers via subpath exports. `@metael/math` (the CORE): a zero-dependency
 │                               plain numeric library — scalar math, vec/mat (column-major, out-param
 │                               `out = op(a,b,out?)`, aliasing-safe), quaternions (vec4 xyzw), transform/camera
@@ -45,10 +54,12 @@ packages/
 │                               can adopt it as its transform-math library). `@metael/math/lang` (the BINDING):
 │                               wraps the same core in the boxed/immutable/reactive custom-value protocol (vec/
 │                               mat/buffer instances) + MATH_BUILTINS (the numeric BuiltinModule a consumer
-│                               injects) + the BUILTINS lowering-metadata catalog + the classifyProfile
-│                               capability classifier. src/core imports NOTHING; src/lang imports ONLY
-│                               @metael/lang + @metael/math (both enforced by boundary tests).
-├── std/      @metael/std     — [BUILT + GREEN — held on feat-metael-std-math] the general standard library:
+│                               injects, projected from its DefinedBuiltins via toBuiltinModule) + mathProfile
+│                               (its tooling profile via defineBuiltin/builtinSpecMap). The classifier
+│                               (classifyProfile) + the metadata types (BuiltinSpec/Profile) live in
+│                               @metael/lang/profile, not here. src/core imports NOTHING; src/lang imports ONLY
+│                               @metael/lang (incl. @metael/lang/profile) + @metael/math (enforced by boundary tests).
+├── std/      @metael/std     — [BUILT + GREEN] the general standard library:
 │                               STD_BUILTINS — collections (map/filter/reduce/some/every/find/findIndex/
 │                               includes/sort/slice/reverse), string (split/join/chars/codePointAt/
 │                               toUpperCase/toLowerCase/trim/format), structural (keys/values/entries/object/
@@ -89,10 +100,11 @@ packages/
 │                               automated import-boundary test); the core subpath carries no interpreter dep.
 │                               NOTE the old `mount()` was renamed `renderSource()` and moved to the `./lang`
 │                               subpath; `render()` is the API-first host-authored-VNode path on the barrel.
-└── gpu/      @metael/gpu     — [BUILT + GREEN] an eval-free, verifiable GPU-COMPUTE engine — a domain
+├── gpu/      @metael/gpu     — [BUILT + GREEN] an eval-free, verifiable GPU-COMPUTE engine — a domain
                                consumer like @metael/vdom. A map kernel is authored as a metael `component`
                                (a `let` accumulator works vs the interpreter); the `gpu(kernel, cfg)` head
-                               → an OWN compute-lowerability gate (over BUILTINS + descriptorOf(v).lower, NOT
+                               → an OWN compute-lowerability gate (over a composed catalog from mathProfile +
+                               coreIntrinsicsProfile via composeProfiles + descriptorOf(v).lower, NOT
                                classifyProfile) → a resource-cost gate → THREE emitters that lower the same
                                AST (WGSL / GLSL-ES-3.0 / an eval-free CPU closure) with type codegen derived
                                from each value's Lowering → a device layer (WebGPU → WebGL2 compute-via-
@@ -117,6 +129,23 @@ packages/
                                and imports @metael/lang ONLY — no runtime/evaluator). The façade drives the
                                change()/drain/re-read settle dance for host TS, backed by a per-backend
                                shader-source pipeline cache.
+└── lsp/      @metael/lsp     — [BUILT + GREEN] metael language services (the newest package), in TWO layers
+                               + a transport, via package exports. `@metael/lsp/service` (the PROTOCOL-FREE
+                               analysis engine): `(source, Profile) → answers` in CHAR OFFSETS + Svc* result
+                               records — LanguageService (openDocument/updateDocument/closeDocument/setProfile
+                               + the nine analyses: diagnostics/completion/hover/signatureHelp/semanticTokens/
+                               foldingRanges/selectionRanges/format/capabilityLens + lineIndexFor), Document,
+                               LineIndex, ScopeModel, the Svc* types. Reuses lang's total lexer/parser/printer
+                               + @metael/lang/profile's classifyProfile; imports @metael/lang + @metael/lang/
+                               profile, NEVER vscode-languageserver* (guarded by src/service/boundary.test.ts).
+                               `@metael/lsp` (the main entry, the SHELL): the LSP wire-protocol layer + the SOLE
+                               offset↔Position / Svc*↔wire-type marshaler — createServer(reader, writer, opts)
+                               (transport-agnostic; domain-agnostic via an injected resolveProfile(id)=>Profile),
+                               CAPABILITIES, TOKEN_LEGEND, ServerOptions; imports vscode-languageserver-protocol.
+                               `@metael/lsp/worker` (the browser Web Worker transport): startWorkerServer binds
+                               createServer to BrowserMessageReader/BrowserMessageWriter. Deps: @metael/lang +
+                               vscode-languageserver-protocol (tests use @metael/{math,std,vdom} Profiles via
+                               workspace resolution).
 ```
 
 The **showcase apps** (`apps/site/` — a landing + a multi-target playground, dogfooded on `@metael/vdom`, with a GPU playground target composing `@metael/gpu` + `@metael/vdom`) are also built + green; they add no package source.
@@ -135,13 +164,17 @@ npm run typecheck           # tsc --noEmit (root) + every package's typecheck (-
 npm run lint                # eslint (root + packages)
 npm run build:packages      # build @metael/* packages → dist/ (.js + .d.ts, preserveModules)
 npm test                    # vitest run — node + Playwright/Chromium browser projects
+npm run docs:api            # generate the TypeDoc API reference
+npm run docs:api:check      # doc-coverage gate: 0 undocumented exported symbols required (scripts/typedoc-check.sh)
 npx vitest run --project node       # the pure-logic node suite only
-npx vitest run --project browser    # the @metael/vdom real-DOM proofs only (Chromium)
-npx vitest run packages/lang        # the @metael/lang suite specifically
+npx vitest run --project browser    # the @metael/{vdom,gpu} real-DOM/adapter proofs only (Chromium)
+npx vitest run packages/lang        # one package's suite specifically
 npm run test:coverage               # node suite with v8 coverage → coverage/lcov.info (Codecov)
 ```
 
-### Publishing (`@metael/{lang,math,std,runtime,vdom}` → npm)
+**Script-name convention.** `build:packages` is the workspace-fanout build (`npm run build --ws`), deliberately distinct from a single package's own `build` and from the site build (`npm run build -w @metael/site`). `docs:api` generates the TypeDoc reference; `docs:api:check` is its coverage gate. **When a plan/effort is done, run the full gate in one shot:** `npm run prepublishOnly` = `clean → build:packages → typecheck → test → docs:api:check` — the exact bar a release must clear (npm runs it automatically before `npm publish`). It omits a standalone `lint` because each package's `build` is `prebuild`-linted, so `build:packages` already lints every published package (`npm run lint` at the root additionally covers the private `apps/site` + repo config — that's a CI concern, run separately). Prefer it over re-typing the individual commands for a final check.
+
+### Publishing (`@metael/{lang,math,std,runtime,vdom,gpu,lsp}` → npm)
 
 The public packages are **versioned in lockstep** (changesets `fixed`) and published with npm
 **provenance via Trusted Publishing (OIDC)** — no npm token; `@metael/site` is private (never published).
@@ -155,7 +188,7 @@ CI (`build` workflow) runs build → typecheck → lint → test → coverage �
 **One-time setup before the first release:** (1) a trusted publisher can only be configured on a package
 that already exists, so the **first `0.1.0` publish is a manual bootstrap** — `npm login`, then from a
 clean build publish in **dependency order** (each package before its dependents):
-`npm publish -w @metael/lang && npm publish -w @metael/math && npm publish -w @metael/std && npm publish -w @metael/runtime && npm publish -w @metael/vdom`
+`npm publish -w @metael/lang && npm publish -w @metael/math && npm publish -w @metael/std && npm publish -w @metael/runtime && npm publish -w @metael/vdom && npm publish -w @metael/gpu && npm publish -w @metael/lsp`
 (each has `publishConfig.access=public`; `npm publish --provenance` locally if you want provenance on the
 bootstrap). (2) On npmjs.com, for **each** public package, add a GitHub Actions trusted publisher:
 org `andykswong`, repo `metael`, workflow filename `release.yaml`. (3) Add the `CODECOV_TOKEN` repo secret.
@@ -169,13 +202,13 @@ The browser project launches Chromium with WebGPU flags (`--enable-unsafe-webgpu
 
 - **TypeScript, ESM-only** (`"type": "module"`), `moduleResolution: bundler`. Sources import with explicit **`.ts` extensions** (`allowImportingTsExtensions`). `strict` + `noUncheckedIndexedAccess` + `verbatimModuleSyntax` + `noImplicitOverride` are on. `lib: ["ESNext", ...]` — `ESNext` resolves `Disposable`/`DisposableStack`/`Symbol.dispose` (no separate `ESNext.Disposable` needed on TS 6).
 - **Dependency discipline per package.** `@metael/lang` is a pure, self-contained kernel with **zero runtime dependencies** — do not add one (a signal library like `@vue/reactivity` is a `@metael/runtime` concern, not `lang`). `@metael/runtime` may import **only** `@metael/lang` + `@vue/reactivity` — nothing domain-specific, no other package.
-- **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). A `safety.test.ts` source-scan asserts this; do not defeat it.
+- **Eval-free tree-walking interpreter** — the DSL is evaluated by an AST walk, **never** `eval`/`new Function`/string-timers/`GeneratorFunction` (sandbox-safe, LLM-emit-safe, deterministic). Two standing guardrail suites in `@metael/lang` enforce this: `safety.test.ts` (a source-scan asserting the kernel stays eval-free) and `sandbox.test.ts` (proves a program can't reach host globals / escape the sandbox). Per-package `boundary.test.ts` files enforce the dependency seams (see *When Editing*). Do not defeat any of them.
 - **Vocabulary-agnostic core.** The grammar/reactivity/composition/registry hardcode **no** concrete heads. A domain's vocabulary change needs **zero** grammar/AST change. Do not add domain keywords — vocabulary is identifiers resolved through `HostEnvironment.resolveCall`.
-- **Call resolution has a fixed order — two name axes over one capability substrate.** A call head resolves: (1) an **Environment binding** (a user `let`/`function`/`component` in call position — shadows everything below) → (2) the injected **`BuiltinRegistry`** (`buildRegistry` over the modules; produces a pure, deep-frozen value) → (3) the **`range`** intrinsic (the only privileged control-flow head) → (4) **`HostEnvironment.resolveCall`** (the domain vocabulary; a node by default, or a pure value with `kind:'value'`) → (5) fail closed `ML-LANG-UNKNOWN-CALL`. The registry and the host are **two distinct name→behavior mechanisms on purpose**: the registry is for *stateless pure functions over values* (unevaluated args, rich `BuiltinSpec` lowering metadata, flat N-way `buildRegistry` merge, resolved first); the host is for a *stateful vocabulary that builds output nodes and owns reactive resources* (`bindHost`-held state, `Region`-tagged reactive args, resolved last). Both reach reactivity/budget/determinism only through the **one** `ReactiveHost` the evaluator/derive owns — a builtin via the narrowed `BuiltinCtx`, a host via `bindHost`. Preserve this ordering and this split; do not add a third dispatch mechanism, and keep a stateless pure builtin in the registry (not behind `resolveCall`).
+- **Call resolution has a fixed order — two name axes over one capability substrate.** A call head resolves: (1) an **Environment binding** (a user `let`/`function`/`component` in call position — shadows everything below) → (2) the injected **`BuiltinRegistry`** (`buildRegistry` over the modules; produces a pure, deep-frozen value) → (3) the **`range`** intrinsic (the only privileged control-flow head) → (4) **`HostEnvironment.resolveCall`** (the domain vocabulary; a node by default, or a pure value with `kind:'value'`) → (5) fail closed `ML-LANG-UNKNOWN-CALL`. The registry and the host are **two distinct name→behavior mechanisms on purpose**: the registry is for *stateless pure functions over values* (unevaluated args, rich lowering metadata via the `BuiltinSpec` in `@metael/lang/profile` — the registry's runtime `Builtin` is just `{ name, invoke }`, flat N-way `buildRegistry` merge, resolved first); the host is for a *stateful vocabulary that builds output nodes and owns reactive resources* (`bindHost`-held state, `Region`-tagged reactive args, resolved last). Both reach reactivity/budget/determinism only through the **one** `ReactiveHost` the evaluator/derive owns — a builtin via the narrowed `BuiltinCtx`, a host via `bindHost`. Preserve this ordering and this split; do not add a third dispatch mechanism, and keep a stateless pure builtin in the registry (not behind `resolveCall`).
 - **Immutable collections.** DSL-created arrays/objects (literals + builtin results) are **deep-frozen** at eval — immutable by construction. A member/index write (`o.a = 2`, `a[0] = 9`) is a fail-loud `ML-LANG-IMMUTABLE`; the update path is reassignment + spread/builtins. An **identifier**-LHS assign (a reactive `let` write / `ML-LANG-CONST`) is unaffected — only member/index LHS writes are rejected (a computed forbidden key still surfaces `ML-LANG-FORBIDDEN`). **Injected `data` is deep-frozen at the boundary** (a shallow walk, not a copy) so a builtin result aliasing `data`'s own objects never silently freezes a live host object — do not revert to binding it un-frozen, and do not reintroduce an in-place member/index write.
 - **Spread is supported in literals** (`[...a, x]`, `{ ...o, k: v }`) via the `ellipsis` token — array + object literals only, not call args. A spread of a non-array/non-object is a fail-loud `ML-LANG-SPREAD` + a safe skip.
 - **The pure builtin set** — collection (`map`/`filter`/`reduce`), query (`some`/`every`/`find`/`findIndex`/`includes`), ordering (`sort`/`slice`/`reverse`), object⇄array (`keys`/`values`/`entries`/`object`/`has`), string bridge (`split`/`join`/`chars`/`toUpperCase`/`toLowerCase`/`trim`/`codePointAt`), numeric — the exact/algebraic `min`/`max`/`abs`/`sign`/`floor`/`ceil`/`round`/`clamp`/`trunc`/`degrees`/`radians` + the `gpu-tolerant` transcendentals `sqrt`/`pow`/`exp`/`exp2`/`log`/`log2`/`inverseSqrt`/`fract`/`step`/`mix`/`smoothstep`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sinh`/`cosh`/`tanh` (each applies componentwise to a `vec` arg) + `format` — the vec/mat `core` set (`vec2/3/4`, square `mat2/3/4` + the six non-square `matCxR`, column-major; `dot`/`cross`/`normalize`/`length`, `transpose`/`determinant`/`inverse`/`distance`/`reflect`/`refract`/`faceforward`, and the `vec4` quaternion family `qmul`/`qconj`/`qinvert`/`qaxisangle`/`qrotate`/`qslerp`/`qmat`), plus seeded `rand`/`range` — is bound **intrinsically** (unbound-head-only: a user `function` of the same name shadows). Each ticks the budget per call + per element (a large collection/comparison fails closed with `ML-LANG-BUDGET`); each collection-returning builtin returns a **new frozen** value and never mutates an input; a wrong-shape arg is a fail-loud `ML-LANG-BUILTIN-ARG` (never a throw); callbacks may be an arrow OR a user `function`. New builtins go in the registry (`builtins-registry.ts`) with a profile/portability tag; a cross-check test binds the registry to real dispatch. `sort` has a total/stable/deterministic order (`sort.ts`, NaN pinned). `round` is round-half-to-even. Collection builtins are **array-only**; strings bridge via `split`/`join`/`chars`. `for-of` iterates arrays + strings (code points).
-- **Capability profiles.** Each builtin is tagged `core` (closure-free/scalar — restricted-target-lowerable) vs `host` (closure/heap — interpreter-backed), with a numeric portability class (`exact`/`gpu-tolerant`/`cpu-only`). `classifyProfile(fn)` decides a function's core-compliance from its AST. This is metadata + a pure classifier only — no codegen/dispatch engine is built. Do not add domain-flavored builtins to the core; niche/domain ops belong behind `resolveCall` (which may return `kind: 'value'` for a pure, deep-frozen value in expression position).
+- **Capability profiles.** Each builtin is tagged `core` (closure-free/scalar — restricted-target-lowerable) vs `host` (closure/heap — interpreter-backed), with a numeric portability class (`exact`/`gpu-tolerant`/`cpu-only`), declared via `defineBuiltin` and published in a package's `Profile`. `classifyProfile(fn, profile)` (in `@metael/lang/profile`) decides a function's core-compliance from its AST against the active `Profile`'s builtins. This is metadata + a pure classifier only — no codegen/dispatch engine is built. Do not add domain-flavored builtins to the core; niche/domain ops belong behind `resolveCall` (which may return `kind: 'value'` for a pure, deep-frozen value in expression position).
 - **`head { … }` wrap shorthand.** A bare identifier followed by a **same-line** `{` is a zero-arg wrapping call (`group { … }` ≡ `group() { … }`) — the parser synthesizes the `call` node. A next-line `{` after a bare ident stays two statements (the newline guard); a `{` after a *call* wraps on either line (unchanged).
 - **Custom value types dispatch through a non-forgeable descriptor.** A value may carry a Symbol-keyed `TypeDescriptor` (`custom-types.ts`) redefining its operators/accessors/iteration/truthiness/display/lowering; the evaluator dispatches through it at 8 sites — **always after a number/primitive fast path** (do not regress it: a scalar op must never do a descriptor lookup) and **after `FORBIDDEN_KEYS`** (a descriptor is never reachable via a forbidden key). An undefined operator → `ML-LANG-OP-UNSUPPORTED`; an undefined member/swizzle → `ML-LANG-UNKNOWN-MEMBER`; `==`/`!=` with no handler → reference identity (never fail-loud). **Typed arrays** (`f32`/`f64`/`i32`/`u32`) are the only in-place-mutable values: a `let` buffer is writable + reactive via the `ReactiveHost` generation signal, a `const` buffer is frozen (`ML-LANG-IMMUTABLE`, enforced by the interpreter's own frozen box — aliasing-proof), OOB is `ML-LANG-INDEX-RANGE`, a non-number element is `ML-LANG-BUILTIN-ARG`, construction is capped by `MAX_BUFFER_LENGTH`. **`vec`/`mat`** are immutable value types. `deepFreeze` **exempts** a tagged value (an opaque leaf — never `Object.freeze` a typed array, which would throw); do not remove that exemption.
 - **Diagnostics are `ML-*`** — `ML-LANG-*` for lex/parse/eval/budget (`@metael/lang`; including `ML-LANG-IMMUTABLE` for a member/index write, `ML-LANG-SPREAD` for a spread of a non-array/non-object, `ML-LANG-BUILTIN-ARG` for a wrong-shape builtin arg, and the custom-value-type codes `ML-LANG-OP-UNSUPPORTED`/`ML-LANG-UNKNOWN-MEMBER`/`ML-LANG-INDEX-RANGE`), `ML-RT-*` for the runtime (`@metael/runtime`; `ML-RT-CONVERGE` on a non-converging flush). A domain owns its own prefix for its own diagnostics. Fail-loud.
@@ -188,7 +221,7 @@ The browser project launches Chromium with WebGPU flags (`--enable-unsafe-webgpu
 - **The load-bearing guards are not negotiable.** Never weaken: `FORBIDDEN_KEYS = new Set(['__proto__','constructor','prototype'])`; the budget constants (`DEFAULT_MAX_STEPS=100_000`, `DEFAULT_MAX_TIME_MS=1000`, `DEFAULT_MAX_DEPTH=64`, `MAX_STRING_LENGTH=10_000_000`); `MAX_PARSE_DEPTH=512`; the never-throw contract (`evaluateProgram` catches budget/parse-overflow → diagnostics + `null`, never throws); or the `safety.test.ts` eval-free scan.
 - **The tests are the conformance bar.** The existing suite pins the kernel's behavior. If a change would make a test need a *logic* edit to pass, treat that as a red flag — the behavior is load-bearing; change the test only when you're deliberately and correctly changing the contract, with the reasoning recorded.
 - **Disposal uses the native TC39 protocol.** `runLeafEffect` → `Disposable`; `scope()` → `Scope<T> extends Disposable`; no bespoke `() => void` disposer. Tear-down on throw must not leak a subscription (regression-tested).
-- **Build + verify before claiming.** From the repo root: `npm run typecheck && npm run lint && npm run build:packages && npm test` (all green). Add/adjust a test with any logic change.
+- **Build + verify before claiming.** From the repo root during iteration: `npm run typecheck && npm run lint && npm run build:packages && npm test` (all green). For the **final** check when an effort is done, run `npm run prepublishOnly` (adds `clean` + `docs:api:check` — the doc-coverage gate). Add/adjust a test with any logic change.
 
 ## Docs
 

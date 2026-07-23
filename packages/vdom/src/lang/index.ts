@@ -6,3 +6,4 @@ export { compileToProducer } from './compile.ts';
 export type { CompileOptions, CompiledPass } from './compile.ts';
 export { VDomHostEnv } from './host-env.ts';
 export { materialize } from './materialize.ts';
+export { vdomProfile } from './profile.ts';

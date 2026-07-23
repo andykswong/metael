@@ -10,7 +10,7 @@ describe('registry dispatch via ctx', () => {
     const calls: number[] = [];
     const mod: BuiltinModule = {
       builtins: [{
-        spec: { name: 'twice', profile: 'core', portability: 'exact', takesClosure: false, arity: [1, 1] },
+        name: 'twice',
         invoke: (ctx, argExprs) => { ctx.tick(); calls.push(argExprs.length); return (ctx.evalArg(0) as number) * 2; },
       }],
     };

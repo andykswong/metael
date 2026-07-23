@@ -7,6 +7,8 @@ import type { VDomHandle } from '@metael/vdom/lang';
 import type { Diagnostic } from '@metael/lang';
 import { el, clear } from '../ui.ts';
 import { createEditor } from './editor.ts';
+import { LspClient } from './lsp-client.ts';
+import { lspExtensions } from './lsp-extensions.ts';
 import { runTarget, runComputeSettled } from './targets.ts';
 import { diagnosticView, spanToLineCol } from './diagnostics.ts';
 import { encodeState, type ShareState } from './share.ts';
@@ -99,6 +101,25 @@ export function createPlayground(container: Element, opts: PlaygroundOptions = {
   ]);
   container.append(root);
 
+  // Language intelligence: spawn the LSP server in a Web Worker and fill the editor's extension compartment
+  // with the CM6 set driven by it (lint/complete/hover/semantic-tokens/lens + a cold-start highlighter). The
+  // worker's diagnostics squiggles are ADDITIVE — the synchronous probe still feeds the text diagnostics
+  // list below. The single document is opened here (didOpen); the extension then owns keeping it in full-text
+  // sync (didChange, fired synchronously per edit) so its analysis never lags the buffer (version-counted).
+  const client = new LspClient();
+  const uri = 'mem://playground.ml';
+  const openVersion = 1;
+  let lspProfile: Target = target;                // the profile the worker currently holds; re-set on switch
+  // async; request methods await readiness internally. The `.catch` swallows the connection-disposed
+  // rejection when a (synchronous) consumer disposes the playground before `initialize` has answered.
+  void client.initialize(target).catch(() => {});
+  client.didOpen(uri, first.source, openVersion);
+  // After didOpen, the editor extension OWNS keeping the worker's text in sync: it fires didChange
+  // synchronously on every doc change (holding its own monotonic version counter, continuing after
+  // openVersion), so every debounced token/lens/lint fetch queries the up-to-date document. render() below
+  // therefore never sends didChange itself — that would double-send and fight over version numbers.
+  editor.view.dispatch({ effects: editor.extensions.reconfigure(lspExtensions(client, uri, openVersion)) });
+
   let liveHandle: VDomHandle | null = null;   // the currently-mounted UI preview (real @metael/vdom app)
   let timer: ReturnType<typeof setTimeout> | null = null;
   let renderSeq = 0;                          // bumped per render(); guards a stale mount's late gpu callback
@@ -132,6 +153,12 @@ export function createPlayground(container: Element, opts: PlaygroundOptions = {
   function render(): void {
     const source = currentSource();
     const seq = ++renderSeq;   // this render's identity — a later render invalidates a stale gpu callback
+    // The editor extension already synced the worker's text on the doc change that scheduled this render
+    // (didChange fires synchronously per edit — see lspExtensions), so render() does NOT re-send it. A target
+    // switch, however, also switched the vocabulary profile: re-set it here. The setValue that carried the
+    // new source already fired the extension's didChange, so this setProfile re-analyses the up-to-date text
+    // under the new profile (the server re-publishes on setProfile) — diagnostics re-run under the switch.
+    if (lspProfile !== target) { lspProfile = target; client.setProfile(uri, target); }
     // A LATE gpu reason (a kernel guarded behind an async-settled resource that finally derives non-core,
     // after the live mount returns) is folded into the panel here. Ignored if a newer render has started,
     // and always re-merged with THIS run's diagnostics so it never erases a parse/lang error.
@@ -255,6 +282,6 @@ export function createPlayground(container: Element, opts: PlaygroundOptions = {
     root,
     getState,
     runNow: () => { if (timer) clearTimeout(timer); render(); },
-    [Symbol.dispose]: () => { if (timer) clearTimeout(timer); if (liveHandle) liveHandle.unmount(); container.removeChild(root); },
+    [Symbol.dispose]: () => { if (timer) clearTimeout(timer); if (liveHandle) liveHandle.unmount(); client.dispose(); editor.destroy(); container.removeChild(root); },
   };
 }

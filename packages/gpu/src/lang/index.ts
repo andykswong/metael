@@ -4,3 +4,4 @@
 // API-first core (@metael/gpu) does not.
 export { GpuHostEnv } from './host-env.ts';
 export { compileKernel } from './compile-kernel.ts';
+export { gpuProfile } from './profile.ts';

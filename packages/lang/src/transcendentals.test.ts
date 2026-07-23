@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateProgram } from './index.ts';
-import { BUILTINS, isBuiltin, MATH_BUILTINS } from '@metael/math/lang';
+import { MATH_BUILTINS, mathProfile } from '@metael/math/lang';
 import { PlainStorageHost, RecordingHostEnv } from './ports.ts';
 
 const run = (src: string) => evaluateProgram(src, { host: new PlainStorageHost(), env: new RecordingHostEnv(), builtins: [MATH_BUILTINS] });
@@ -29,11 +29,11 @@ describe('transcendental builtins (implemented + f64-exact reference)', () => {
   it('a non-numeric arg is fail-loud ML-LANG-BUILTIN-ARG', () => {
     expect(run('sin("x")').diagnostics.some((d) => d.code === 'ML-LANG-BUILTIN-ARG')).toBe(true);
   });
-  it('they are dispatched (not future) — in the catalog + carry a lowerName', () => {
+  it('they are dispatched (not future) — in the profile + carry a lowerName', () => {
     for (const name of ['sin', 'cos', 'exp', 'log', 'fract', 'step', 'mix', 'smoothstep']) {
-      expect(isBuiltin(name)).toBe(true);
-      expect(BUILTINS[name]!.future).toBeFalsy();
-      expect(BUILTINS[name]!.lowerName).toBeTruthy();
+      expect(mathProfile.builtins.has(name)).toBe(true);
+      expect(mathProfile.builtins.get(name)!.future).toBeFalsy();
+      expect(mathProfile.builtins.get(name)!.lowerName).toBeTruthy();
     }
   });
   it('a user `function sin` still shadows the intrinsic', () => {

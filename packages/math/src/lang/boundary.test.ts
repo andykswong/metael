@@ -9,8 +9,11 @@ describe('@metael/math/lang import boundary', () => {
     const importRe = /\bfrom\s+['"]([^'".][^'"]*)['"]/g;
     const offenders: string[] = [];
     for (const f of files) for (const m of readFileSync(join(dir, f), 'utf8').matchAll(importRe)) {
-      if (m[1] === '@metael/lang' || m[1] === '@metael/math') continue;
-      offenders.push(`${f}: ${m[1]}`);
+      const spec = m[1]!;
+      // A sub-path of an allowed package (e.g. '@metael/lang/profile') resolves to its root package name.
+      const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]!;
+      if (pkg === '@metael/lang' || pkg === '@metael/math') continue;
+      offenders.push(`${f}: ${spec}`);
     }
     expect(offenders).toEqual([]);
   });

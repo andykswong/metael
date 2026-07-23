@@ -1,53 +1,55 @@
-// Highlight-over-textarea editor: a transparent <textarea> (real caret, native undo/IME) layered over a
-// <pre> that renders lex()-classified segments. The textarea is UNCONTROLLED (the DOM holds the text) so
-// the caret never jumps; on input we re-render the highlight overlay and notify the owner. The overlay also
-// hosts squiggle underlines the owner positions (via the returned API) for diagnostic spans.
-import { tokensToSegments } from './highlight.ts';
+// A CodeMirror 6 editor exposing the narrow EditorHandle seam the playground consumes. The LSP-backed
+// extensions (lint/autocomplete/hover/semantic tokens) are added by the client wiring; this module owns
+// only the view + the seam. Programmatic setValue is flagged so it never fires onChange.
+import { EditorState, Compartment } from '@codemirror/state';
+import { EditorView, keymap } from '@codemirror/view';
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { el } from '../ui.ts';
 
 export interface EditorHandle {
   readonly root: HTMLElement;
+  readonly view: EditorView;              // exposed so the client wiring can reconfigure extensions
+  readonly extensions: Compartment;       // a compartment the client fills with LSP extensions
   getValue(): string;
   setValue(text: string): void;
   onChange(cb: (value: string) => void): void;
+  destroy(): void;
 }
 
 export function createEditor(initial: string): EditorHandle {
-  const highlightLayer = el('pre', { class: 'ed-highlight', 'aria-hidden': 'true' });
-  const textarea = el('textarea', {
-    class: 'ed-input', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', wrap: 'off',
-    'aria-label': 'metael source editor',
-  }) as HTMLTextAreaElement;
-  const root = el('div', { class: 'ed-root' }, [highlightLayer, textarea]);
-
+  const root = el('div', { class: 'ed-root' });
   let changeCb: ((value: string) => void) | null = null;
+  let programmatic = false;                // true while setValue drives the doc → suppress onChange
 
-  function renderHighlight(text: string): void {
-    highlightLayer.textContent = '';
-    for (const seg of tokensToSegments(text)) {
-      highlightLayer.append(el('span', { class: `tok-${seg.kind}` }, [seg.text]));
-    }
-    // A trailing newline needs a spacer so the <pre> height matches the textarea's scrollHeight.
-    if (text.endsWith('\n') || text === '') highlightLayer.append(document.createTextNode('\u200B'));
-  }
-
-  textarea.value = initial;
-  renderHighlight(initial);
-
-  textarea.addEventListener('input', () => {
-    renderHighlight(textarea.value);
-    changeCb?.(textarea.value);
+  const lspExtensions = new Compartment();
+  const updateListener = EditorView.updateListener.of((u) => {
+    if (u.docChanged && !programmatic) changeCb?.(u.state.doc.toString());
   });
-  // Keep the overlay scroll-synced with the textarea.
-  textarea.addEventListener('scroll', () => {
-    highlightLayer.scrollTop = textarea.scrollTop;
-    highlightLayer.scrollLeft = textarea.scrollLeft;
+
+  const view = new EditorView({
+    parent: root,
+    state: EditorState.create({
+      doc: initial,
+      extensions: [
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        updateListener,
+        // Give the contenteditable an accessible name so a screen-reader announces the edit box.
+        EditorView.contentAttributes.of({ 'aria-label': 'metael source editor' }),
+        lspExtensions.of([]),
+      ],
+    }),
   });
 
   return {
-    root,
-    getValue: () => textarea.value,
-    setValue: (text: string) => { textarea.value = text; renderHighlight(text); },
+    root, view, extensions: lspExtensions,
+    getValue: () => view.state.doc.toString(),
+    setValue: (text: string) => {
+      programmatic = true;
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+      programmatic = false;
+    },
     onChange: (cb) => { changeCb = cb; },
+    destroy: () => view.destroy(),
   };
 }

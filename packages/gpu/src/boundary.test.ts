@@ -11,7 +11,7 @@ describe('@metael/gpu import boundary (self-containment invariant)', () => {
     const files = walk(srcDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && !f.endsWith('.browser.test.ts'));
     const offenders: string[] = [];
     const importRe = /\bfrom\s+['"]([^'".][^'"]*)['"]/g;
-    const allowed = new Set(['@metael/lang', '@metael/runtime', '@metael/math', '@metael/math/lang']);
+    const allowed = new Set(['@metael/lang', '@metael/lang/profile', '@metael/runtime', '@metael/math', '@metael/math/lang']);
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
       for (const m of text.matchAll(importRe)) {

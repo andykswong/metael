@@ -201,40 +201,50 @@ button.pg-share:hover { filter: brightness(1.06); border-color: var(--amber); }
   text-shadow: 0 0 12px rgba(157, 214, 168, 0.18);
 }
 
-/* ── Editor: transparent textarea over a highlighted <pre> (must align exactly) ─ */
+/* ── Editor: CodeMirror 6, themed into the warm-phosphor well ───────────────────
+   All rules are scoped under .pg-editor so they out-specify CodeMirror's single-class
+   baseTheme regardless of stylesheet order. Tooltip/completion/hover theming lives in the
+   editor's own EditorView.theme (lsp-extensions.ts) since those layers can reparent to <body>. */
 
-.pg-editor { background: var(--panel); }
-.ed-root { position: relative; height: 100%; min-height: 380px; }
-.ed-highlight,
-.ed-input {
-  margin: 0;
-  padding: 20px 20px 20px 22px;
+.pg-editor { background: var(--panel); min-height: 380px; }
+.pg-compact .pg-editor { min-height: 300px; }
+
+/* Fill the fixed-height panel and scroll internally (as the prior textarea did): .pg-editor is
+   position:relative for its corner label, so the editor's wrapper absolutely fills it — this bounds
+   the CodeMirror height so .cm-scroller scrolls internally instead of the editor driving the grid
+   row taller than the panel. */
+.pg-editor .ed-root { position: absolute; inset: 0; }
+.pg-editor .cm-editor { height: 100%; background: transparent; color: var(--fg); }
+.pg-editor .cm-editor.cm-focused { outline: none; }   /* the framed panel is the focus affordance */
+.pg-editor .cm-scroller {
   font-family: var(--mono);
   font-size: 13.5px;
   line-height: 1.62;
-  letter-spacing: 0;
-  border: 0;
-  white-space: pre;
   overflow: auto;
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+}
+.pg-editor .cm-content {
+  /* The lint + capability-lens gutters supply the left margin (~35px), so the content's own left
+     padding is small — total left offset lands near the prior textarea's ~22px rather than doubling it. */
+  padding: 20px 20px 20px 6px;
+  caret-color: var(--amber);
   tab-size: 2;
 }
-.ed-highlight {
+.pg-editor .cm-line { padding: 0; }
+.pg-editor .cm-cursor,
+.pg-editor .cm-dropCursor { border-left-color: var(--amber); }
+.pg-editor .cm-selectionBackground,
+.pg-editor .cm-content ::selection { background: rgba(232, 163, 61, 0.22); }
+.pg-editor .cm-focused .cm-selectionBackground { background: rgba(232, 163, 61, 0.30); }
+
+/* No line-number gutter in the design — the only gutters are the lint + capability-lens strips,
+   blended into the dark well (the default baseTheme paints them a light-grey bar). */
+.pg-editor .cm-gutters {
   background: transparent;
-  pointer-events: none;
-  margin: 0;
+  border-right: 0;
+  color: var(--faint);
+  padding-left: 8px;   /* keep the lint/lens markers off the rounded-corner edge */
 }
-.ed-input {
-  color: transparent;
-  background: transparent;
-  caret-color: var(--amber);
-  resize: none;
-}
-.ed-input:focus-visible { outline: none; }
-.ed-input::selection { background: rgba(232, 163, 61, 0.25); }
+.pg-editor .cm-lineNumbers { display: none; }   /* defensive — no line-number gutter is configured */
 
 .tok-keyword { color: var(--kw); font-weight: 500; }
 .tok-string  { color: var(--str); }

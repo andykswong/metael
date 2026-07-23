@@ -12,13 +12,22 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20",
+    "@codemirror/commands": "^6.10",
+    "@codemirror/language": "^6.10",
+    "@codemirror/lint": "^6.9",
+    "@codemirror/state": "^6.5",
+    "@codemirror/view": "^6.40",
+    "@lezer/highlight": "^1.2",
     "@metael/gpu": "*",
     "@metael/lang": "*",
+    "@metael/lsp": "*",
     "@metael/math": "*",
     "@metael/runtime": "*",
     "@metael/std": "*",
     "@metael/vdom": "*",
-    "disposablestack": "^1.1.8"
+    "disposablestack": "^1.1.8",
+    "vscode-languageserver-protocol": "^3.18.2"
   },
   "devDependencies": {
     "vite": "^8.1"

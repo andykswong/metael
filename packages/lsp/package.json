@@ -1,0 +1,32 @@
+{
+  "name": "@metael/lsp",
+  "version": "0.1.0",
+  "description": "metael language services — a protocol-free analysis engine and a Language Server Protocol shell for the metael language.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./service": { "types": "./dist/service/index.d.ts", "import": "./dist/service/index.js" },
+    "./worker": { "types": "./dist/worker/index.d.ts", "import": "./dist/worker/index.js" }
+  },
+  "files": ["/dist"],
+  "engines": { "node": ">=24.0" },
+  "scripts": {
+    "clean": "rimraf dist *.tsbuildinfo",
+    "prebuild": "npm run lint",
+    "build": "vite build",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/lsp"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/andykswong/metael.git", "directory": "packages/lsp" },
+  "keywords": ["metael", "lsp", "language-server", "editor", "typescript"],
+  "author": "Andy K.S. Wong <andykswong@outlook.com>",
+  "license": "MIT",
+  "bugs": { "url": "https://github.com/andykswong/metael/issues" },
+  "homepage": "https://github.com/andykswong/metael#readme",
+  "publishConfig": { "access": "public", "provenance": true },
+  "dependencies": { "@metael/lang": "^0.1.0", "vscode-languageserver-protocol": "^3.18.2" }
+}

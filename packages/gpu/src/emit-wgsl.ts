@@ -7,12 +7,17 @@
 // computed straight from gid, never from an f32 coord copy) and a BUFFER INDEX (cast u32(round(<f32>)) at
 // the access site — f32-exact for an in-bounds index since MAX_BUFFER_LENGTH = 2^24 ≤ f32's exact range).
 import type { UserFn, Expr, Stmt } from '@metael/lang';
-import { BUILTINS } from '@metael/math/lang';
+import { mathProfile } from '@metael/math/lang';
+import { composeProfiles, coreIntrinsicsProfile } from '@metael/lang/profile';
 import type { Binding, BindingTable } from './binding.ts';
 import { bodyReferencesAny } from './binding.ts';
 import { REDUCE_TILE } from './emit-glsl.ts';
 import { matShapeOf, buildLocalShapes, shapeOfExpr, returnVecWidth } from './gate.ts';
 import type { LocalShapes } from './gate.ts';
+
+// The name → spec catalog the emitter reads a called builtin's `lowerName` from — the same math + `range`
+// catalog the gate composes (a gate-accepted call always resolves here). Computed once at module load.
+const GPU_CATALOG = composeProfiles(mathProfile, coreIntrinsicsProfile).builtins;
 
 // A conservative operand-shape probe for the emitter's width-driven choices (e.g. the divide guard). WGSL
 // carries no local type env like the GLSL emitter's `tenv`, so this recovers an operand's shape structurally
@@ -398,7 +403,7 @@ function emitExpr(e: Expr, S: string, bindings: BindingTable, locals: LocalShape
       // placeholder rather than the native builtin so a non-core kernel emitted anyway never masquerades as
       // the intrinsic. Checked BEFORE the builtin branches so `function abs(){…}` never lowers to abs().
       if (bindings.byName.get(name)?.role === 'callee') return `/* shadowed builtin ${name} (helper — gate-rejected) */ ${S}(0)`;
-      const spec = BUILTINS[name];
+      const spec = GPU_CATALOG.get(name);
       const args = e.args.map((a) => emitExpr(a, S, bindings, locals)).join(', ');
       if (name === 'vec2' || name === 'vec3' || name === 'vec4') return `${name}<${S}>(${args})`;
       // Every matrix constructor (square matN + the six non-square matCxR) emits WGSL `matCxR<S>(...)`,

@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { EditorView } from '@codemirror/view';
 import { createPlayground } from './create.ts';
 
 let container: HTMLElement;
 beforeEach(() => { container = document.createElement('div'); document.body.appendChild(container); });
 
+// Drive the editor through CodeMirror's own transaction API rather than synthesizing contenteditable
+// input: locate the view from its DOM and dispatch a full-document replace. A (non-programmatic) dispatch
+// fires the updateListener exactly as real typing would, so onChange → schedule → render all run.
 function type(root: HTMLElement, source: string): void {
-  const ta = root.querySelector('textarea') as HTMLTextAreaElement;
-  ta.value = source;
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  const view = EditorView.findFromDOM(root.querySelector('.cm-editor') as HTMLElement)!;
+  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: source } });
 }
 
 describe('createPlayground (real DOM)', () => {

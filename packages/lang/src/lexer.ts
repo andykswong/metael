@@ -38,6 +38,11 @@ export interface Token {
 export interface LexResult {
   /** The tokens in source order, always terminated by a single `eof` token. */
   readonly tokens: Token[];
+  /** The `[start, end)` char-offset span of every `//` line comment, in source order. Comments are NOT
+   *  emitted as tokens (the parser reads only {@link tokens}); this parallel list lets editor tooling —
+   *  syntax colouring, folding — see comment runs the token stream deliberately omits. Each span covers
+   *  the `//` and the comment text up to (but not including) the terminating newline or EOF. */
+  readonly comments: SourceSpan[];
   /** Every diagnostic collected while scanning — a malformed number, an unterminated string, or an
    *  unexpected character, each an `ML-LANG-LEX`. Empty on a clean scan. */
   readonly diagnostics: Diagnostic[];
@@ -47,6 +52,71 @@ const KEYWORDS: Record<string, TokenType> = {
   component: 'component', function: 'function', const: 'const', let: 'let', if: 'if', else: 'else',
   for: 'for', of: 'of', while: 'while', return: 'return', true: 'true', false: 'false', null: 'null',
 };
+
+/**
+ * The reserved words of the language — the exact set of identifier-shaped words the lexer promotes to a
+ * keyword token — as a frozen name set.
+ *
+ * @remarks Derived from the single private keyword table above so there is ONE source of truth: adding
+ * or removing a reserved word updates this set automatically. Published for editor tooling that offers
+ * keyword completions, without exposing the private word→{@link TokenType} table.
+ */
+export const KEYWORDS_SET: ReadonlySet<string> = Object.freeze(new Set(Object.keys(KEYWORDS)));
+
+/**
+ * A coarse lexical category grouping every {@link TokenType} into the class an editor treats uniformly
+ * for colouring and completion: a reserved `keyword`, a scalar `literal` (`string`/`number`), an
+ * `operator` symbol, a `punctuation` delimiter, an `ident`, or the terminal `eof`.
+ *
+ * @remarks The keyword-shaped literals `true`/`false`/`null` are reserved words in this lexer (they lex
+ * to their own keyword {@link TokenType}s), so they classify as `keyword` — NOT `literal`. Only `number`
+ * and `string` are `literal`.
+ */
+export type LexicalCategory = 'keyword' | 'literal' | 'operator' | 'punctuation' | 'ident' | 'eof';
+
+/**
+ * The exhaustive {@link TokenType} → {@link LexicalCategory} map backing {@link lexicalCategory}.
+ *
+ * @remarks Because it is a `Record` over the closed `TokenType` union, adding a new member to that union
+ * makes this literal miss a key and fails the typecheck — forcing whoever adds a token to classify it.
+ * This is the compile-time drift guard that keeps every editor-layer copy of the token classification in
+ * lock-step with the lexer's own grammar.
+ */
+const LEXICAL_CATEGORY: Record<TokenType, LexicalCategory> = {
+  // identifier + scalar literals
+  ident: 'ident',
+  number: 'literal', string: 'literal',
+  // reserved keywords (true/false/null are reserved words here → keyword, not literal)
+  component: 'keyword', function: 'keyword', const: 'keyword', let: 'keyword', if: 'keyword',
+  else: 'keyword', for: 'keyword', of: 'keyword', while: 'keyword', return: 'keyword',
+  true: 'keyword', false: 'keyword', null: 'keyword',
+  // punctuation / delimiters
+  lbrace: 'punctuation', rbrace: 'punctuation', lbracket: 'punctuation', rbracket: 'punctuation',
+  lparen: 'punctuation', rparen: 'punctuation', dot: 'punctuation', comma: 'punctuation',
+  colon: 'punctuation', semi: 'punctuation',
+  // operators
+  arrow: 'operator', assign: 'operator', question: 'operator', ellipsis: 'operator',
+  eq: 'operator', neq: 'operator', lt: 'operator', le: 'operator', gt: 'operator', ge: 'operator',
+  plus: 'operator', minus: 'operator', star: 'operator', slash: 'operator', percent: 'operator',
+  and: 'operator', or: 'operator', not: 'operator',
+  // terminal
+  eof: 'eof',
+};
+
+/**
+ * Classify a {@link TokenType} into its {@link LexicalCategory} — a total function over the closed
+ * token-type union.
+ *
+ * @param type - the token type to classify.
+ * @returns the lexical category of `type`.
+ * @remarks Backed by the exhaustive {@link LEXICAL_CATEGORY} record, so it is defined for every
+ *          `TokenType` today and a newly added token type is a compile error until classified. Publishes
+ *          a derived view of the lexer's own grammar for editor tooling (syntax colouring, completion)
+ *          without exposing the private keyword table.
+ */
+export function lexicalCategory(type: TokenType): LexicalCategory {
+  return LEXICAL_CATEGORY[type];
+}
 
 /**
  * Scan source text into a token stream for the parser.
@@ -66,6 +136,7 @@ const KEYWORDS: Record<string, TokenType> = {
  */
 export function lex(src: string): LexResult {
   const tokens: Token[] = [];
+  const comments: SourceSpan[] = [];
   const diagnostics: Diagnostic[] = [];
   let i = 0;
   let pendingNewline = false;   // set when skipped whitespace/comment contains a '\n'
@@ -79,8 +150,15 @@ export function lex(src: string): LexResult {
   while (i < src.length) {
     const c = src[i]!;
     if (/\s/.test(c)) { if (c === '\n') pendingNewline = true; i++; continue; }
-    // line comments (a comment always ends at a newline → also a boundary)
-    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; pendingNewline = true; continue; }
+    // line comments (a comment always ends at a newline → also a boundary). Recorded as a span for editor
+    // tooling but NOT emitted as a token — the parser reads only `tokens`, so the stream is unchanged.
+    if (c === '/' && src[i + 1] === '/') {
+      const commentStart = i;
+      while (i < src.length && src[i] !== '\n') i++;
+      comments.push({ start: commentStart, end: i });
+      pendingNewline = true;
+      continue;
+    }
     const start = i;
     if (isIdStart(c)) {
       while (i < src.length && isId(src[i]!)) i++;
@@ -134,5 +212,5 @@ export function lex(src: string): LexResult {
     i++;
   }
   push('eof', '', i);
-  return { tokens, diagnostics };
+  return { tokens, comments, diagnostics };
 }
